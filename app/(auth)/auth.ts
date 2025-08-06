@@ -1,4 +1,6 @@
-import { compare } from 'bcrypt-ts';
+
+import bcrypt from 'bcryptjs';
+import { hash, compare } from 'bcryptjs';
 import NextAuth, { type DefaultSession } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import { createGuestUser, getUser } from '@/lib/db/queries';
