@@ -60,12 +60,15 @@ async function getLocationFromIP(request: Request) {
 }
 
 export async function POST(request: Request) {
+  console.log('📥 POST /api/chat iniciado');
   let requestBody: PostRequestBody;
 
   try {
     const json = await request.json();
+    console.log('📨 JSON recibido:', json);
     requestBody = postRequestBodySchema.parse(json);
-  } catch (_) {
+  } catch (error) {
+    console.error('❌ Error al parsear body:', error);
     return new ChatSDKError('bad_request:api').toResponse();
   }
 
@@ -83,14 +86,19 @@ export async function POST(request: Request) {
     } = requestBody;
 
     const session = await auth();
-    if (!session?.user)
+    if (!session?.user) {
+      console.warn('⚠️ Usuario no autenticado');
       return new ChatSDKError('unauthorized:chat').toResponse();
+    }
+
+    console.log('👤 Usuario autenticado:', session.user.email);
 
     const userType: UserType = session.user.type;
     const messageCount = await getMessageCountByUserId({
       id: session.user.id,
       differenceInHours: 24,
     });
+    console.log(`📊 Mensajes usados hoy: ${messageCount}`);
 
     if (messageCount > entitlementsByUserType[userType].maxMessagesPerDay) {
       return new ChatSDKError('rate_limit:chat').toResponse();
@@ -105,6 +113,7 @@ export async function POST(request: Request) {
         title,
         visibility: selectedVisibilityType,
       });
+      console.log('💬 Nuevo chat creado:', title);
     } else {
       if (chat.userId !== session.user.id) {
         return new ChatSDKError('forbidden:chat').toResponse();
@@ -115,6 +124,7 @@ export async function POST(request: Request) {
     const uiMessages = [...convertToUIMessages(messagesFromDb), message];
 
     const { longitude, latitude, city, country } = await getLocationFromIP(request);
+    console.log('🌍 Ubicación detectada:', { city, country });
 
     const requestHints: RequestHints = {
       longitude,
@@ -139,10 +149,13 @@ export async function POST(request: Request) {
     const streamId = generateUUID();
     await createStreamId({ streamId, chatId: id });
 
+    console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
+
     const stream = createUIMessageStream({
       execute: async (dataStream) => {
         try {
           if (selectedChatModel === 'assistant-openai') {
+            console.log('🤖 Usando assistant-openai');
             const assistantId = process.env.OPENAI_ASSISTANT_ID!;
             const firstPart = message.parts[0];
             const userInput =
@@ -152,10 +165,14 @@ export async function POST(request: Request) {
                 ? firstPart.text
                 : '';
 
+            console.log('📝 Prompt enviado al assistant:', userInput);
+
             const assistantResponse = await runAssistantWithStream({
               userInput,
               assistantId,
             });
+
+            console.log('📬 Respuesta del assistant:', assistantResponse);
 
             if (!assistantResponse) {
               throw new Error('No response from assistant');
@@ -174,6 +191,7 @@ export async function POST(request: Request) {
 
             dataStream.close();
           } else {
+            console.log('💡 Usando modelo alternativo:', selectedChatModel);
             const result = streamText({
               model: myProvider.languageModel(selectedChatModel),
               system: systemPrompt({ selectedChatModel, requestHints }),
@@ -211,6 +229,7 @@ export async function POST(request: Request) {
       },
       generateId: generateUUID,
       onFinish: async ({ messages }) => {
+        console.log('✅ Finalizó el stream, guardando mensajes...');
         await saveMessages({
           messages: messages.map((message) => ({
             id: message.id,
@@ -223,17 +242,20 @@ export async function POST(request: Request) {
         });
       },
       onError: () => {
+        console.warn('⚠️ Ocurrió un error en el stream');
         return 'Oops, an error occurred!';
       },
     });
 
     if (!stream) {
+      console.warn('⚠️ No se generó el stream');
       return new Response(
         JSON.stringify({ error: 'No stream generated.' }),
         { status: 204, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
+    console.log('📡 Enviando respuesta como SSE');
     return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
   } catch (error) {
     console.error('❌ ERROR en /api/chat:', error);
