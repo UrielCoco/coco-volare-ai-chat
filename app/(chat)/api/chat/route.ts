@@ -92,14 +92,10 @@ export async function POST(request: Request) {
           content: userInput,
         },
       ],
-      temperature: 0.7,
+      
     });
 
-    if (typeof result?.getReader === 'function') {
-      responseStream = result;
-    } else {
-      throw new Error('No se pudo obtener un stream válido');
-    }
+    responseStream = result.textStream();
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
     return new Response(JSON.stringify({ error: 'AI request failed' }), {
