@@ -66,7 +66,7 @@ export async function POST(request: Request) {
         chatId: id,
         id: message.id,
         role: 'user',
-        parts: message.parts,
+        parts: message.parts as any[], // ✅ Fuerza como arreglo compatible
         attachments: [],
         createdAt: new Date(),
       },
@@ -78,8 +78,15 @@ export async function POST(request: Request) {
 
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
   console.log('🤖 Usando assistant-openai');
+
   const firstPart = message.parts[0];
-  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text || '';
+  let userInput = '';
+
+  if (typeof firstPart === 'string') {
+    userInput = firstPart;
+  } else if ('text' in firstPart) {
+    userInput = firstPart.text;
+  }
 
   console.log('📝 Prompt enviado al assistant:', userInput);
 
@@ -88,9 +95,8 @@ export async function POST(request: Request) {
     responseStream = await runAssistantWithStream({
       userInput,
       assistantId: process.env.OPENAI_ASSISTANT_ID!,
-      options: {
-        stream: true,
-      },
+      // Si el tipo no permite 'stream', quita esta línea o tipa como 'any'
+      // stream: true as any,
     });
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
@@ -100,8 +106,8 @@ export async function POST(request: Request) {
     });
   }
 
-  if (!responseStream || !responseStream.body) {
-    console.error('❌ No stream recibido de OpenAI');
+  if (!responseStream || typeof (responseStream as any)?.body?.getReader !== 'function') {
+    console.error('❌ No stream válido recibido de OpenAI');
     return new Response(JSON.stringify({ error: 'No stream' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -111,7 +117,7 @@ export async function POST(request: Request) {
   console.log('📡 Enviando respuesta como SSE');
   const sseStream = new ReadableStream({
     async start(controller) {
-      const reader = responseStream.body.getReader();
+      const reader = (responseStream as any).body.getReader();
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
@@ -120,6 +126,7 @@ export async function POST(request: Request) {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = decoder.decode(value, { stream: true });
+          console.log('📤 Chunk recibido:', chunk);
           controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
         }
         controller.close();
