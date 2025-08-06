@@ -28,10 +28,13 @@ import { myProvider } from '@/lib/ai/providers';
 import { entitlementsByUserType } from '@/lib/ai/entitlements';
 import { postRequestBodySchema, type PostRequestBody } from './schema';
 import { geolocation } from '@vercel/functions';
-import {
-  createResumableStreamContext,
-  type ResumableStreamContext,
-} from 'resumable-stream';
+//import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
+//import type { ResumableStreamContext } from 'resumable-stream/server';
+import { createResumableStreamContext } from 'resumable-stream/server';
+import type { ResumableStreamContext } from 'resumable-stream';
+import * as ResumableStream from 'resumable-stream';
+//import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
+//import { createResumableStreamContext, type ResumableStreamContext,} from 'resumable-stream/context';
 
 import { ChatSDKError } from '@/lib/errors';
 import type { ChatMessage } from '@/lib/types';
