@@ -9,6 +9,7 @@ export const myProvider = customProvider({
     'chat-model': openai(fallbackModel),
     'chat-model-reasoning': wrapLanguageModel({
       model: openai(fallbackModel),
+      middleware: [], 
     }),
     'title-model': openai(fallbackModel),
     'artifact-model': openai(fallbackModel),
