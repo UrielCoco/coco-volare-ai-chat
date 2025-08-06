@@ -133,7 +133,13 @@ export async function POST(request: Request) {
       execute: async ({ writer: dataStream }) => {
         if (selectedChatModel === 'assistant-openai') {
           const assistantId = process.env.OPENAI_ASSISTANT_ID!;
-          const userInput = message.parts[0];
+          const firstPart = message.parts[0];
+          const userInput =
+            typeof firstPart === 'string'
+              ? firstPart
+              : typeof firstPart?.text === 'string'
+              ? firstPart.text
+              : '';
 
           const assistantResponse = await runAssistantWithStream({
             userInput,
