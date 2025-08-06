@@ -1,13 +1,20 @@
 'use client';
+
 import { cookies } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
+import dynamic from 'next/dynamic';
 
 import { auth } from '@/app/(auth)/auth';
-import { Chat } from '@/components/chat';
 import { getChatById, getMessagesByChatId } from '@/lib/db/queries';
 import { DataStreamHandler } from '@/components/data-stream-handler';
 import { DEFAULT_CHAT_MODEL } from '@/lib/ai/models';
 import { convertToUIMessages } from '@/lib/utils';
+
+// Import dinámico del componente Chat
+const Chat = dynamic(() => import('@/components/chat'), {
+  ssr: false,
+  loading: () => <div className="text-center p-4">Cargando chat...</div>,
+});
 
 export default async function Page(props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -25,47 +32,25 @@ export default async function Page(props: { params: Promise<{ id: string }> }) {
   }
 
   if (chat.visibility === 'private') {
-    if (!session.user) {
-      return notFound();
-    }
-
-    if (session.user.id !== chat.userId) {
+    if (!session.user || session.user.id !== chat.userId) {
       return notFound();
     }
   }
 
-  const messagesFromDb = await getMessagesByChatId({
-    id,
-  });
-
+  const messagesFromDb = await getMessagesByChatId({ id });
   const uiMessages = convertToUIMessages(messagesFromDb);
 
   const cookieStore = await cookies();
   const chatModelFromCookie = cookieStore.get('chat-model');
 
-  if (!chatModelFromCookie) {
-    return (
-      <>
-        <Chat
-          id={chat.id}
-          initialMessages={uiMessages}
-          initialChatModel={DEFAULT_CHAT_MODEL}
-          initialVisibilityType={chat.visibility}
-          isReadonly={session?.user?.id !== chat.userId}
-          session={session}
-          autoResume={true}
-        />
-        <DataStreamHandler />
-      </>
-    );
-  }
+  const initialChatModel = chatModelFromCookie?.value || DEFAULT_CHAT_MODEL;
 
   return (
     <>
       <Chat
         id={chat.id}
         initialMessages={uiMessages}
-        initialChatModel={chatModelFromCookie.value}
+        initialChatModel={initialChatModel}
         initialVisibilityType={chat.visibility}
         isReadonly={session?.user?.id !== chat.userId}
         session={session}
