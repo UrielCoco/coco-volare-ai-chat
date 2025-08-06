@@ -1,13 +1,16 @@
 import { openai } from '@ai-sdk/openai';
 import { customProvider, wrapLanguageModel } from 'ai';
 
+// Usa gpt-3.5-turbo como fallback (hasta que tengas acceso a GPT-4)
+const fallbackModel = 'gpt-3.5-turbo';
+
 export const myProvider = customProvider({
   languageModels: {
-    'chat-model': openai('gpt-4'),
+    'chat-model': openai(fallbackModel),
     'chat-model-reasoning': wrapLanguageModel({
-      model: openai('gpt-4'),
+      model: openai(fallbackModel),
     }),
-    'title-model': openai('gpt-4'),
-    'artifact-model': openai('gpt-4'),
+    'title-model': openai(fallbackModel),
+    'artifact-model': openai(fallbackModel),
   },
 });
