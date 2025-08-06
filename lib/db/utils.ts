@@ -1,5 +1,7 @@
 import { generateId } from 'ai';
-import { genSaltSync, hashSync } from 'bcrypt-ts';
+//import { genSaltSync, hashSync } from 'bcrypt-ts';
+//import bcrypt from 'bcryptjs';
+import { genSaltSync, hashSync } from 'bcryptjs';
 
 export function generateHashedPassword(password: string) {
   const salt = genSaltSync(10);
