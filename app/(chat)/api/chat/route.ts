@@ -178,17 +178,7 @@ export async function POST(request: Request) {
               throw new Error('No response from assistant');
             }
 
-            dataStream.sendData({
-              id: generateUUID(),
-              role: 'assistant',
-              content: [
-                {
-                  type: 'text',
-                  text: assistantResponse,
-                },
-              ],
-            });
-
+            dataStream.sendText(assistantResponse);
             dataStream.close();
           } else {
             console.log('💡 Usando modelo alternativo:', selectedChatModel);
