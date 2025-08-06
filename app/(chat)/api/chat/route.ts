@@ -140,7 +140,7 @@ export async function POST(request: Request) {
     await createStreamId({ streamId, chatId: id });
 
     const stream = createUIMessageStream({
-      execute: async ({ writer: dataStream }) => {
+      execute: async (dataStream) => {
         try {
           if (selectedChatModel === 'assistant-openai') {
             const assistantId = process.env.OPENAI_ASSISTANT_ID!;
