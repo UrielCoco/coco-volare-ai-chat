@@ -10,14 +10,14 @@ import { DataStreamHandler } from '@/components/data-stream-handler';
 import { DEFAULT_CHAT_MODEL } from '@/lib/ai/models';
 import { convertToUIMessages } from '@/lib/utils';
 
-// Import dinámico del componente Chat
-const Chat = dynamic<typeof import('../../../../components/chat/Chat').Chat>(
-  () => import('../../../../components/chat/Chat').then(mod => mod.Chat),
-  {
-    ssr: false,
-    loading: () => <div className="text-center p-4">Cargando chat...</div>,
-  }
-);
+'use client';
+
+import dynamic from 'next/dynamic';
+
+const Chat = dynamic(() => import('../../../../../components/chat/Chat'), {
+  ssr: false,
+  loading: () => <div className="text-center p-4">Cargando chat...</div>,
+});
 
 export default async function Page(props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
