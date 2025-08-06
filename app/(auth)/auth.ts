@@ -1,5 +1,5 @@
 
-import bcrypt from 'bcryptjs';
+
 import { hash, compare } from 'bcryptjs';
 import NextAuth, { type DefaultSession } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
