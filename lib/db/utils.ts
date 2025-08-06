@@ -1,5 +1,5 @@
 import { generateId } from 'ai';
-//import { genSaltSync, hashSync } from 'bcrypt-ts';
+
 //import bcrypt from 'bcryptjs';
 import { genSaltSync, hashSync } from 'bcryptjs';
 
