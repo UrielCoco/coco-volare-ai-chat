@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useActionState, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { AuthForm } from '@/components/auth-form';
 import { SubmitButton } from '@/components/submit-button';
@@ -13,18 +13,13 @@ import { useSession } from 'next-auth/react';
 
 export default function Page() {
   const router = useRouter();
+  const { update: updateSession } = useSession();
 
   const [email, setEmail] = useState('');
   const [isSuccessful, setIsSuccessful] = useState(false);
-
-  const [state, formAction] = useActionState<RegisterActionState, FormData>(
-    register,
-    {
-      status: 'idle',
-    },
-  );
-
-  const { update: updateSession } = useSession();
+  const [state, setState] = useState<RegisterActionState>({
+    status: 'idle',
+  });
 
   useEffect(() => {
     if (state.status === 'user_exists') {
@@ -43,11 +38,17 @@ export default function Page() {
       updateSession();
       router.refresh();
     }
-  }, [state]);
+  }, [state.status, updateSession, router]);
 
-  const handleSubmit = (formData: FormData) => {
+  // ✅ Ahora maneja el evento de formulario correctamente
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+
+    const formData = new FormData(e.currentTarget);
     setEmail(formData.get('email') as string);
-    formAction(formData);
+
+    const result = await register(state, formData);
+    setState(result);
   };
 
   return (
@@ -59,7 +60,7 @@ export default function Page() {
             Create an account with your email and password
           </p>
         </div>
-        <AuthForm action={handleSubmit} defaultEmail={email}>
+        <AuthForm onSubmit={handleSubmit} defaultEmail={email}>
           <SubmitButton isSuccessful={isSuccessful}>Sign Up</SubmitButton>
           <p className="text-center text-sm text-gray-600 mt-4 dark:text-zinc-400">
             {'Already have an account? '}

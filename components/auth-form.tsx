@@ -3,15 +3,13 @@
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 
-export function AuthForm({
-  onSubmit,
-  children,
-  defaultEmail = '',
-}: {
+interface AuthFormProps {
   onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
   children: React.ReactNode;
   defaultEmail?: string;
-}) {
+}
+
+export function AuthForm({ onSubmit, children, defaultEmail = '' }: AuthFormProps) {
   return (
     <form
       onSubmit={onSubmit}
