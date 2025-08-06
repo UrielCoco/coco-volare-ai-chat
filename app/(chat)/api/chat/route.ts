@@ -16,6 +16,7 @@ import { generateTitleFromUserMessage } from '../../actions';
 import type { VisibilityType } from '@/components/visibility-selector';
 import { streamText } from 'ai';
 import { myProvider } from '@/lib/ai/providers';
+import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 
 export async function POST(request: Request) {
   console.log('📥 POST /api/chat iniciado');
@@ -76,14 +77,33 @@ export async function POST(request: Request) {
   await createStreamId({ streamId, chatId: id });
 
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
-  console.log('🤖 Usando assistant-openai');
 
   const firstPart = message.parts[0];
   const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
   console.log('📝 Prompt enviado al assistant:', userInput);
 
-  let responseStream: ReadableStream;
   try {
+    // 👉 Branch para assistant
+    if (selectedChatModel === 'assistant-openai') {
+      const responseText = await runAssistantWithStream({
+        userInput,
+        assistantId: process.env.ASSISTANT_ID!, // asegúrate que esté definida en .env
+      });
+
+      return new Response(
+        `data: ${JSON.stringify({ type: 'text', content: responseText })}\n\n`,
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          },
+        },
+      );
+    }
+
+    // 👉 Branch para languageModel tradicional
     const result = await streamText({
       model: myProvider.languageModel(selectedChatModel),
       messages: [
@@ -92,10 +112,20 @@ export async function POST(request: Request) {
           content: userInput,
         },
       ],
-      
+      temperature: 0.7,
     });
 
-    responseStream = result.textStream();
+    const responseStream = result;
+
+    console.log('📡 Enviando respuesta como SSE');
+    return new Response(responseStream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      },
+    });
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
     return new Response(JSON.stringify({ error: 'AI request failed' }), {
@@ -103,16 +133,6 @@ export async function POST(request: Request) {
       headers: { 'Content-Type': 'application/json' },
     });
   }
-
-  console.log('📡 Enviando respuesta como SSE');
-  return new Response(responseStream, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  });
 }
 
 export async function DELETE(request: Request) {
