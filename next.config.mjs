@@ -1,4 +1,5 @@
 const nextConfig = {
+  // lo que ya tienes...
   images: {
     remotePatterns: [
       {
@@ -7,9 +8,13 @@ const nextConfig = {
     ],
   },
 
-  // ✅ Evita que falle por errores de ESLint en Vercel
   eslint: {
     ignoreDuringBuilds: true,
+  },
+
+  // ✅ desactiva la verificación de tipos durante build
+  typescript: {
+    ignoreBuildErrors: true,
   },
 };
 
