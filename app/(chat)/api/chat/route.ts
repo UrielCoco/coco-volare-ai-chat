@@ -106,9 +106,7 @@ export async function POST(request: Request) {
     const chat = await getChatById({ id });
 
     if (!chat) {
-      const title = await generateTitleFromUserMessage({
-        message,
-      });
+      const title = await generateTitleFromUserMessage({ message });
 
       await saveChat({
         id,
@@ -220,9 +218,22 @@ export async function POST(request: Request) {
       return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
     }
   } catch (error) {
+    console.error('❌ ERROR en /api/chat:', error);
+
     if (error instanceof ChatSDKError) {
       return error.toResponse();
     }
+
+    return new Response(
+      JSON.stringify({
+        error: 'Internal Server Error',
+        message: (error as Error)?.message || 'Unexpected error',
+      }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
   }
 }
 
