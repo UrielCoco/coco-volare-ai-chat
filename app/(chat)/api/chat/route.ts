@@ -30,7 +30,7 @@ import { postRequestBodySchema, type PostRequestBody } from './schema';
 import { geolocation } from '@vercel/functions';
 //import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
 //import type { ResumableStreamContext } from 'resumable-stream/server';
-import { createResumableStreamContext } from 'resumable-stream/server';
+import { createResumableStreamContext } from 'resumable-stream';
 import type { ResumableStreamContext } from 'resumable-stream';
 import * as ResumableStream from 'resumable-stream';
 //import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
