@@ -45,16 +45,21 @@ export async function POST(request: Request) {
   }
 
   const chat = await getChatById({ id });
+  const firstPart = message.parts[0];
+  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
+
   if (!chat) {
-    const firstPart = message.parts[0];
-    const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
-    const title = await generateTitleFromUserMessage({ message: { role: 'user', content: userInput } });
+    const title = await generateTitleFromUserMessage({
+      message: { role: 'user', content: userInput },
+    });
+
     await saveChat({
       id,
       userId: session.user.id,
       title,
       visibility: selectedVisibilityType,
     });
+
     console.log('💬 Nuevo chat creado:', title);
   } else if (chat.userId !== session.user.id) {
     return new ChatSDKError('forbidden:chat').toResponse();
@@ -77,55 +82,44 @@ export async function POST(request: Request) {
   await createStreamId({ streamId, chatId: id });
 
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
-
-  const firstPart = message.parts[0];
-  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
   console.log('📝 Prompt enviado al assistant:', userInput);
 
+  let responseStream: ReadableStream;
+
   try {
-    // 👉 Branch para assistant
     if (selectedChatModel === 'assistant-openai') {
+      const assistantId = process.env.OPENAI_ASSISTANT_ID;
+      if (!assistantId) {
+        throw new Error('El assistant ID no está definido en las variables de entorno');
+      }
+
       const responseText = await runAssistantWithStream({
         userInput,
-        assistantId: process.env.ASSISTANT_ID!, // asegúrate que esté definida en .env
+        assistantId,
       });
 
-      return new Response(
-        `data: ${JSON.stringify({ type: 'text', content: responseText })}\n\n`,
-        {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-          },
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`data: ${responseText}\n\n`));
+          controller.close();
         },
-      );
+      });
+
+      responseStream = stream;
+    } else {
+      const result = await streamText({
+        model: myProvider.languageModel(selectedChatModel),
+        messages: [{ role: 'user', content: userInput }],
+        temperature: 0.7,
+      });
+
+      if (typeof result?.getReader === 'function') {
+        responseStream = result;
+      } else {
+        throw new Error('No se pudo obtener un stream válido');
+      }
     }
-
-    // 👉 Branch para languageModel tradicional
-    const result = await streamText({
-      model: myProvider.languageModel(selectedChatModel),
-      messages: [
-        {
-          role: 'user',
-          content: userInput,
-        },
-      ],
-      temperature: 0.7,
-    });
-
-    const responseStream = result;
-
-    console.log('📡 Enviando respuesta como SSE');
-    return new Response(responseStream, {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      },
-    });
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
     return new Response(JSON.stringify({ error: 'AI request failed' }), {
@@ -133,6 +127,16 @@ export async function POST(request: Request) {
       headers: { 'Content-Type': 'application/json' },
     });
   }
+
+  console.log('📡 Enviando respuesta como SSE');
+  return new Response(responseStream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  });
 }
 
 export async function DELETE(request: Request) {
