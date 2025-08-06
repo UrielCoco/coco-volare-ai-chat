@@ -6,17 +6,14 @@ import {
   deleteChatById,
   getChatById,
   getMessageCountByUserId,
-  getMessagesByChatId,
   saveChat,
   saveMessages,
 } from '@/lib/db/queries';
 import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 import { postRequestBodySchema, type PostRequestBody } from './schema';
 import { ChatSDKError } from '@/lib/errors';
-import { convertToUIMessages, generateUUID } from '@/lib/utils';
+import { generateUUID } from '@/lib/utils';
 import { generateTitleFromUserMessage } from '../../actions';
-import type { ChatMessage } from '@/lib/types';
-import type { ChatModel } from '@/lib/ai/models';
 import type { VisibilityType } from '@/components/visibility-selector';
 
 export async function POST(request: Request) {
@@ -36,7 +33,6 @@ export async function POST(request: Request) {
   const session = await auth();
   if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
 
-  const userType: UserType = session.user.type;
   const messageCount = await getMessageCountByUserId({
     id: session.user.id,
     differenceInHours: 24,
@@ -66,7 +62,7 @@ export async function POST(request: Request) {
         chatId: id,
         id: message.id,
         role: 'user',
-        parts: message.parts as any[], // ✅ Fuerza como arreglo compatible
+        parts: message.parts,
         attachments: [],
         createdAt: new Date(),
       },
@@ -76,27 +72,21 @@ export async function POST(request: Request) {
   const streamId = generateUUID();
   await createStreamId({ streamId, chatId: id });
 
+  const firstPart = message.parts[0];
+  const userInput = typeof firstPart === 'string'
+    ? firstPart
+    : (firstPart as any)?.text ?? '';
+
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
   console.log('🤖 Usando assistant-openai');
-
-  const firstPart = message.parts[0];
-  let userInput = '';
-
-  if (typeof firstPart === 'string') {
-    userInput = firstPart;
-  } else if ('text' in firstPart) {
-    userInput = firstPart.text;
-  }
-
   console.log('📝 Prompt enviado al assistant:', userInput);
 
   let responseStream;
   try {
     responseStream = await runAssistantWithStream({
-      userInput,
+      message,
       assistantId: process.env.OPENAI_ASSISTANT_ID!,
-      // Si el tipo no permite 'stream', quita esta línea o tipa como 'any'
-      // stream: true as any,
+      stream: true,
     });
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
@@ -106,7 +96,7 @@ export async function POST(request: Request) {
     });
   }
 
-  if (!responseStream || typeof (responseStream as any)?.body?.getReader !== 'function') {
+  if (!responseStream || typeof (responseStream as any).body?.getReader !== 'function') {
     console.error('❌ No stream válido recibido de OpenAI');
     return new Response(JSON.stringify({ error: 'No stream' }), {
       status: 500,
