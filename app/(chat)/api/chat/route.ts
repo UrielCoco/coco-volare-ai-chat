@@ -79,12 +79,7 @@ export async function POST(request: Request) {
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
   console.log('🤖 Usando assistant-openai');
   const firstPart = message.parts[0];
-  const userInput =
-    typeof firstPart === 'string'
-      ? firstPart
-      : typeof firstPart?.text === 'string'
-      ? firstPart.text
-      : '';
+  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text || '';
 
   console.log('📝 Prompt enviado al assistant:', userInput);
 
@@ -93,7 +88,9 @@ export async function POST(request: Request) {
     responseStream = await runAssistantWithStream({
       userInput,
       assistantId: process.env.OPENAI_ASSISTANT_ID!,
-      stream: true,
+      options: {
+        stream: true,
+      },
     });
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
@@ -116,12 +113,20 @@ export async function POST(request: Request) {
     async start(controller) {
       const reader = responseStream.body.getReader();
       const encoder = new TextEncoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        controller.enqueue(encoder.encode(`data: ${new TextDecoder().decode(value)}\n\n`));
+      const decoder = new TextDecoder();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+        }
+        controller.close();
+      } catch (err) {
+        console.error('❌ Error durante el stream:', err);
+        controller.error(err);
       }
-      controller.close();
     },
   });
 
