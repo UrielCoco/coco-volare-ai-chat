@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 
-import { auth, type UserType } from '@/app/(auth)/auth';
+import { auth } from '@/app/(auth)/auth';
 import {
   createStreamId,
   deleteChatById,
@@ -9,17 +9,18 @@ import {
   saveChat,
   saveMessages,
 } from '@/lib/db/queries';
-import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
-import { postRequestBodySchema, type PostRequestBody } from './schema';
+import { postRequestBodySchema } from './schema';
 import { ChatSDKError } from '@/lib/errors';
 import { generateUUID } from '@/lib/utils';
 import { generateTitleFromUserMessage } from '../../actions';
 import type { VisibilityType } from '@/components/visibility-selector';
+import { streamText } from 'ai';
+import { myProvider } from '@/lib/ai/providers';
 
 export async function POST(request: Request) {
   console.log('📥 POST /api/chat iniciado');
-  let requestBody: PostRequestBody;
 
+  let requestBody;
   try {
     const json = await request.json();
     console.log('📨 JSON recibido:', json);
@@ -44,7 +45,9 @@ export async function POST(request: Request) {
 
   const chat = await getChatById({ id });
   if (!chat) {
-    const title = await generateTitleFromUserMessage({ message });
+    const firstPart = message.parts[0];
+    const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
+    const title = await generateTitleFromUserMessage({ message: { role: 'user', content: userInput } });
     await saveChat({
       id,
       userId: session.user.id,
@@ -72,22 +75,31 @@ export async function POST(request: Request) {
   const streamId = generateUUID();
   await createStreamId({ streamId, chatId: id });
 
-  const firstPart = message.parts[0];
-  const userInput = typeof firstPart === 'string'
-    ? firstPart
-    : (firstPart as any)?.text ?? '';
-
   console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
   console.log('🤖 Usando assistant-openai');
+
+  const firstPart = message.parts[0];
+  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
   console.log('📝 Prompt enviado al assistant:', userInput);
 
-  let responseStream;
+  let responseStream: ReadableStream;
   try {
-    responseStream = await runAssistantWithStream({
-      message,
-      assistantId: process.env.OPENAI_ASSISTANT_ID!,
-      stream: true,
+    const result = await streamText({
+      model: myProvider.languageModel(selectedChatModel),
+      messages: [
+        {
+          role: 'user',
+          content: userInput,
+        },
+      ],
+      temperature: 0.7,
     });
+
+    if (typeof result?.getReader === 'function') {
+      responseStream = result;
+    } else {
+      throw new Error('No se pudo obtener un stream válido');
+    }
   } catch (err) {
     console.error('❌ Error al llamar OpenAI:', err);
     return new Response(JSON.stringify({ error: 'AI request failed' }), {
@@ -96,38 +108,8 @@ export async function POST(request: Request) {
     });
   }
 
-  if (!responseStream || typeof (responseStream as any).body?.getReader !== 'function') {
-    console.error('❌ No stream válido recibido de OpenAI');
-    return new Response(JSON.stringify({ error: 'No stream' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
   console.log('📡 Enviando respuesta como SSE');
-  const sseStream = new ReadableStream({
-    async start(controller) {
-      const reader = (responseStream as any).body.getReader();
-      const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          console.log('📤 Chunk recibido:', chunk);
-          controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
-        }
-        controller.close();
-      } catch (err) {
-        console.error('❌ Error durante el stream:', err);
-        controller.error(err);
-      }
-    },
-  });
-
-  return new Response(sseStream, {
+  return new Response(responseStream, {
     status: 200,
     headers: {
       'Content-Type': 'text/event-stream',
