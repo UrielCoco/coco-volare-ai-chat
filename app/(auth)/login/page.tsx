@@ -45,7 +45,7 @@ export default function Page() {
     const formData = new FormData(e.currentTarget);
     setEmail(formData.get('email') as string);
 
-    const result = await login(formData);
+    const result = await login(state, formData);
     setState(result);
   };
 
