@@ -14,7 +14,7 @@ import { convertToUIMessages } from '@/lib/utils';
 
 import dynamic from 'next/dynamic';
 
-const Chat = dynamic(() => import('../../../app/components/chat/Chat'), {
+const Chat = dynamic(() => import('../../../../components/chat'), {
   ssr: false,
   loading: () => <div className="text-center p-4">Cargando chat...</div>,
 });
