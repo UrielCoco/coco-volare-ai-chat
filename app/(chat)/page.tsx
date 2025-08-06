@@ -1,12 +1,19 @@
+'use client';
 
 import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import dynamic from 'next/dynamic';
 
-import { Chat } from '@/components/chat';
 import { DEFAULT_CHAT_MODEL } from '@/lib/ai/models';
 import { generateUUID } from '@/lib/utils';
 import { DataStreamHandler } from '@/components/data-stream-handler';
 import { auth } from '../(auth)/auth';
-import { redirect } from 'next/navigation';
+
+// Importación dinámica del componente Chat
+const Chat = dynamic(() => import('@/components/chat'), {
+  ssr: false,
+  loading: () => <div className="text-center p-4">Cargando chat...</div>,
+});
 
 export default async function Page() {
   const session = await auth();
@@ -16,27 +23,10 @@ export default async function Page() {
   }
 
   const id = generateUUID();
-
   const cookieStore = await cookies();
   const modelIdFromCookie = cookieStore.get('chat-model');
 
-  if (!modelIdFromCookie) {
-    return (
-      <>
-        <Chat
-          key={id}
-          id={id}
-          initialMessages={[]}
-          initialChatModel={DEFAULT_CHAT_MODEL}
-          initialVisibilityType="private"
-          isReadonly={false}
-          session={session}
-          autoResume={false}
-        />
-        <DataStreamHandler />
-      </>
-    );
-  }
+  const initialChatModel = modelIdFromCookie?.value || DEFAULT_CHAT_MODEL;
 
   return (
     <>
@@ -44,7 +34,7 @@ export default async function Page() {
         key={id}
         id={id}
         initialMessages={[]}
-        initialChatModel={modelIdFromCookie.value}
+        initialChatModel={initialChatModel}
         initialVisibilityType="private"
         isReadonly={false}
         session={session}
