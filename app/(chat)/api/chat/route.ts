@@ -28,7 +28,6 @@ import { isProductionEnvironment } from '@/lib/constants';
 import { myProvider } from '@/lib/ai/providers';
 import { entitlementsByUserType } from '@/lib/ai/entitlements';
 import { postRequestBodySchema, type PostRequestBody } from './schema';
-import { geolocation } from '@vercel/functions';
 import { createResumableStreamContext } from 'resumable-stream';
 import type { ResumableStreamContext } from 'resumable-stream';
 import { ChatSDKError } from '@/lib/errors';
@@ -54,6 +53,28 @@ export function getStreamContext() {
   }
 
   return globalStreamContext;
+}
+
+// 📍 Función nueva para geolocalización basada en IP
+async function getLocationFromIP(request: Request) {
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] || '';
+  if (!ip) return {};
+
+  try {
+    const res = await fetch(`https://ipapi.co/${ip}/json/`);
+    if (!res.ok) return {};
+    const data = await res.json();
+
+    return {
+      city: data.city,
+      country: data.country_name,
+      latitude: data.latitude,
+      longitude: data.longitude,
+    };
+  } catch (err) {
+    console.warn('Error fetching geolocation:', err);
+    return {};
+  }
 }
 
 export async function POST(request: Request) {
@@ -110,8 +131,14 @@ export async function POST(request: Request) {
     const messagesFromDb = await getMessagesByChatId({ id });
     const uiMessages = [...convertToUIMessages(messagesFromDb), message];
 
-    const { longitude, latitude, city, country } = geolocation(request);
-    const requestHints: RequestHints = { longitude, latitude, city, country };
+    const { longitude, latitude, city, country } = await getLocationFromIP(request);
+
+    const requestHints: RequestHints = {
+      longitude,
+      latitude,
+      city,
+      country,
+    };
 
     await saveMessages({
       messages: [
