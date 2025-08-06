@@ -26,14 +26,15 @@ export async function runAssistantWithStream({
   });
 
   // 4. Espera a que termine
-  let runStatus;
-  do {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    runStatus = await openai.beta.threads.runs.retrieve({
-      thread_id: thread.id,
-      run_id: run.id,
-    });
-  } while (runStatus.status !== 'completed');
+let runStatus;
+do {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  runStatus = await openai.beta.threads.runs.retrieve(
+    run.id,
+    { thread_id: thread.id },
+    {}
+  );
+} while (runStatus.status !== 'completed');
 
   // 5. Recupera la respuesta
   const messages = await openai.beta.threads.messages.list(thread.id);
