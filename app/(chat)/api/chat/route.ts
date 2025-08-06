@@ -38,7 +38,6 @@ import type { VisibilityType } from '@/components/visibility-selector';
 
 export const maxDuration = 60;
 
-// 📍 Función nueva para geolocalización basada en IP
 async function getLocationFromIP(request: Request) {
   const ip = request.headers.get('x-forwarded-for')?.split(',')[0] || '';
   if (!ip) return {};
@@ -84,7 +83,8 @@ export async function POST(request: Request) {
     } = requestBody;
 
     const session = await auth();
-    if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
+    if (!session?.user)
+      return new ChatSDKError('unauthorized:chat').toResponse();
 
     const userType: UserType = session.user.type;
     const messageCount = await getMessageCountByUserId({
@@ -141,71 +141,72 @@ export async function POST(request: Request) {
 
     const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
-        if (selectedChatModel === 'assistant-openai') {
-          const assistantId = process.env.OPENAI_ASSISTANT_ID!;
-          const firstPart = message.parts[0];
-          const userInput =
-            typeof firstPart === 'string'
-              ? firstPart
-              : typeof firstPart?.text === 'string'
-              ? firstPart.text
-              : '';
+        try {
+          if (selectedChatModel === 'assistant-openai') {
+            const assistantId = process.env.OPENAI_ASSISTANT_ID!;
+            const firstPart = message.parts[0];
+            const userInput =
+              typeof firstPart === 'string'
+                ? firstPart
+                : typeof firstPart?.text === 'string'
+                ? firstPart.text
+                : '';
 
-          const assistantResponse = await runAssistantWithStream({
-            userInput,
-            assistantId,
-          });
+            const assistantResponse = await runAssistantWithStream({
+              userInput,
+              assistantId,
+            });
 
-          dataStream.sendData({
-            id: generateUUID(),
-            role: 'assistant',
-            content: [
-              {
-                type: 'text',
-                text: assistantResponse,
+            if (!assistantResponse) {
+              throw new Error('No response from assistant');
+            }
+
+            dataStream.sendData({
+              id: generateUUID(),
+              role: 'assistant',
+              content: [
+                {
+                  type: 'text',
+                  text: assistantResponse,
+                },
+              ],
+            });
+
+            dataStream.close();
+          } else {
+            const result = streamText({
+              model: myProvider.languageModel(selectedChatModel),
+              system: systemPrompt({ selectedChatModel, requestHints }),
+              messages: convertToModelMessages(uiMessages),
+              stopWhen: stepCountIs(5),
+              experimental_activeTools:
+                selectedChatModel === 'chat-model-reasoning'
+                  ? []
+                  : ['getWeather', 'createDocument', 'updateDocument', 'requestSuggestions'],
+              experimental_transform: smoothStream({ chunking: 'word' }),
+              tools: {
+                getWeather,
+                createDocument: createDocument({ session, dataStream }),
+                updateDocument: updateDocument({ session, dataStream }),
+                requestSuggestions: requestSuggestions({ session, dataStream }),
               },
-            ],
-          });
+              experimental_telemetry: {
+                isEnabled: isProductionEnvironment,
+                functionId: 'stream-text',
+              },
+            });
 
-          dataStream.close();
-        } else {
-          const result = streamText({
-            model: myProvider.languageModel(selectedChatModel),
-            system: systemPrompt({ selectedChatModel, requestHints }),
-            messages: convertToModelMessages(uiMessages),
-            stopWhen: stepCountIs(5),
-            experimental_activeTools:
-              selectedChatModel === 'chat-model-reasoning'
-                ? []
-                : [
-                    'getWeather',
-                    'createDocument',
-                    'updateDocument',
-                    'requestSuggestions',
-                  ],
-            experimental_transform: smoothStream({ chunking: 'word' }),
-            tools: {
-              getWeather,
-              createDocument: createDocument({ session, dataStream }),
-              updateDocument: updateDocument({ session, dataStream }),
-              requestSuggestions: requestSuggestions({
-                session,
-                dataStream,
-              }),
-            },
-            experimental_telemetry: {
-              isEnabled: isProductionEnvironment,
-              functionId: 'stream-text',
-            },
-          });
+            result.consumeStream();
 
-          result.consumeStream();
-
-          dataStream.merge(
-            result.toUIMessageStream({
-              sendReasoning: true,
-            }),
-          );
+            dataStream.merge(
+              result.toUIMessageStream({
+                sendReasoning: true,
+              })
+            );
+          }
+        } catch (e) {
+          console.error('❌ Error interno durante el stream:', e);
+          throw e;
         }
       },
       generateId: generateUUID,
@@ -226,13 +227,29 @@ export async function POST(request: Request) {
       },
     });
 
-    // 🔥 Streaming directo sin resumable-stream
+    if (!stream) {
+      return new Response(
+        JSON.stringify({ error: 'No stream generated.' }),
+        { status: 204, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
   } catch (error) {
     console.error('❌ ERROR en /api/chat:', error);
 
     if (error instanceof ChatSDKError) {
       return error.toResponse();
+    }
+
+    if ((error as Error)?.message?.includes('rate limit')) {
+      return new Response(
+        JSON.stringify({
+          error: 'Rate Limit Exceeded',
+          message: (error as Error)?.message,
+        }),
+        { status: 429, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
     return new Response(
@@ -243,7 +260,7 @@ export async function POST(request: Request) {
       {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
-      },
+      }
     );
   }
 }
