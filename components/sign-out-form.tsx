@@ -1,17 +1,18 @@
-import Form from 'next/form';
+'use client';
 
-import { signOut } from '@/app/(auth)/auth';
+import { signOut } from 'next-auth/react';
 
 export const SignOutForm = () => {
-  return (
-    <Form
-      className="w-full"
-      action={async () => {
-        'use server';
+  const handleSignOut = async () => {
+    await signOut({ callbackUrl: '/' });
+  };
 
-        await signOut({
-          redirectTo: '/',
-        });
+  return (
+    <form
+      className="w-full"
+      onSubmit={(e) => {
+        e.preventDefault();
+        handleSignOut();
       }}
     >
       <button
@@ -20,6 +21,6 @@ export const SignOutForm = () => {
       >
         Sign out
       </button>
-    </Form>
+    </form>
   );
 };
