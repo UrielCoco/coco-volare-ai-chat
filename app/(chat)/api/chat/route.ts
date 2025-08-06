@@ -1,3 +1,4 @@
+export const runtime = 'nodejs';
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -6,6 +7,7 @@ import {
   stepCountIs,
   streamText,
 } from 'ai';
+
 import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 import { auth, type UserType } from '@/app/(auth)/auth';
 import { type RequestHints, systemPrompt } from '@/lib/ai/prompts';
