@@ -2,7 +2,7 @@
 
 import { cookies } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
-import dynamic from 'next/dynamic';
+
 
 import { auth } from '@/app/(auth)/auth';
 import { getChatById, getMessagesByChatId } from '@/lib/db/queries';
@@ -10,11 +10,11 @@ import { DataStreamHandler } from '@/components/data-stream-handler';
 import { DEFAULT_CHAT_MODEL } from '@/lib/ai/models';
 import { convertToUIMessages } from '@/lib/utils';
 
-'use client';
+
 
 import dynamic from 'next/dynamic';
 
-const Chat = dynamic(() => import('../../../../../components/chat/Chat'), {
+const Chat = dynamic(() => import('../../../app/components/chat/Chat'), {
   ssr: false,
   loading: () => <div className="text-center p-4">Cargando chat...</div>,
 });
