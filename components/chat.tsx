@@ -71,7 +71,7 @@ export function Chat({
           body: {
             id,
             message: messages.at(-1),
-            selectedChatModel: initialChatModel,
+            selectedChatModel: 'assistant-openai',
             selectedVisibilityType: visibilityType,
             ...body,
           },

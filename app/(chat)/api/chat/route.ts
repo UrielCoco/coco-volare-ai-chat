@@ -6,6 +6,7 @@ import {
   stepCountIs,
   streamText,
 } from 'ai';
+import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 import { auth, type UserType } from '@/app/(auth)/auth';
 import { type RequestHints, systemPrompt } from '@/lib/ai/prompts';
 import {
@@ -28,14 +29,8 @@ import { myProvider } from '@/lib/ai/providers';
 import { entitlementsByUserType } from '@/lib/ai/entitlements';
 import { postRequestBodySchema, type PostRequestBody } from './schema';
 import { geolocation } from '@vercel/functions';
-//import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
-//import type { ResumableStreamContext } from 'resumable-stream/server';
 import { createResumableStreamContext } from 'resumable-stream';
 import type { ResumableStreamContext } from 'resumable-stream';
-
-//import { createResumableStreamContext, type ResumableStreamContext } from 'resumable-stream/context';
-//import { createResumableStreamContext, type ResumableStreamContext,} from 'resumable-stream/context';
-
 import { ChatSDKError } from '@/lib/errors';
 import type { ChatMessage } from '@/lib/types';
 import type { ChatModel } from '@/lib/ai/models';
@@ -51,9 +46,7 @@ export function getStreamContext() {
       globalStreamContext = createResumableStreamContext();
     } catch (error: any) {
       if (error.message.includes('REDIS_URL')) {
-        console.log(
-          ' > Resumable streams are disabled due to missing REDIS_URL',
-        );
+        console.log(' > Resumable streams are disabled due to missing REDIS_URL');
       } else {
         console.error(error);
       }
@@ -87,13 +80,9 @@ export async function POST(request: Request) {
     } = requestBody;
 
     const session = await auth();
-
-    if (!session?.user) {
-      return new ChatSDKError('unauthorized:chat').toResponse();
-    }
+    if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
 
     const userType: UserType = session.user.type;
-
     const messageCount = await getMessageCountByUserId({
       id: session.user.id,
       differenceInHours: 24,
@@ -104,10 +93,8 @@ export async function POST(request: Request) {
     }
 
     const chat = await getChatById({ id });
-
     if (!chat) {
       const title = await generateTitleFromUserMessage({ message });
-
       await saveChat({
         id,
         userId: session.user.id,
@@ -124,13 +111,7 @@ export async function POST(request: Request) {
     const uiMessages = [...convertToUIMessages(messagesFromDb), message];
 
     const { longitude, latitude, city, country } = geolocation(request);
-
-    const requestHints: RequestHints = {
-      longitude,
-      latitude,
-      city,
-      country,
-    };
+    const requestHints: RequestHints = { longitude, latitude, city, country };
 
     await saveMessages({
       messages: [
@@ -149,44 +130,67 @@ export async function POST(request: Request) {
     await createStreamId({ streamId, chatId: id });
 
     const stream = createUIMessageStream({
-      execute: ({ writer: dataStream }) => {
-        const result = streamText({
-          model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: convertToModelMessages(uiMessages),
-          stopWhen: stepCountIs(5),
-          experimental_activeTools:
-            selectedChatModel === 'chat-model-reasoning'
-              ? []
-              : [
-                  'getWeather',
-                  'createDocument',
-                  'updateDocument',
-                  'requestSuggestions',
-                ],
-          experimental_transform: smoothStream({ chunking: 'word' }),
-          tools: {
-            getWeather,
-            createDocument: createDocument({ session, dataStream }),
-            updateDocument: updateDocument({ session, dataStream }),
-            requestSuggestions: requestSuggestions({
-              session,
-              dataStream,
+      execute: async ({ writer: dataStream }) => {
+        if (selectedChatModel === 'assistant-openai') {
+          const assistantId = process.env.OPENAI_ASSISTANT_ID!;
+          const userInput = message.parts[0];
+
+          const assistantResponse = await runAssistantWithStream({
+            userInput,
+            assistantId,
+          });
+
+          dataStream.sendData({
+            id: generateUUID(),
+            role: 'assistant',
+            content: [
+              {
+                type: 'text',
+                text: assistantResponse,
+              },
+            ],
+          });
+
+          dataStream.close();
+        } else {
+          const result = streamText({
+            model: myProvider.languageModel(selectedChatModel),
+            system: systemPrompt({ selectedChatModel, requestHints }),
+            messages: convertToModelMessages(uiMessages),
+            stopWhen: stepCountIs(5),
+            experimental_activeTools:
+              selectedChatModel === 'chat-model-reasoning'
+                ? []
+                : [
+                    'getWeather',
+                    'createDocument',
+                    'updateDocument',
+                    'requestSuggestions',
+                  ],
+            experimental_transform: smoothStream({ chunking: 'word' }),
+            tools: {
+              getWeather,
+              createDocument: createDocument({ session, dataStream }),
+              updateDocument: updateDocument({ session, dataStream }),
+              requestSuggestions: requestSuggestions({
+                session,
+                dataStream,
+              }),
+            },
+            experimental_telemetry: {
+              isEnabled: isProductionEnvironment,
+              functionId: 'stream-text',
+            },
+          });
+
+          result.consumeStream();
+
+          dataStream.merge(
+            result.toUIMessageStream({
+              sendReasoning: true,
             }),
-          },
-          experimental_telemetry: {
-            isEnabled: isProductionEnvironment,
-            functionId: 'stream-text',
-          },
-        });
-
-        result.consumeStream();
-
-        dataStream.merge(
-          result.toUIMessageStream({
-            sendReasoning: true,
-          }),
-        );
+          );
+        }
       },
       generateId: generateUUID,
       onFinish: async ({ messages }) => {
@@ -207,7 +211,6 @@ export async function POST(request: Request) {
     });
 
     const streamContext = getStreamContext();
-
     if (streamContext) {
       return new Response(
         await streamContext.resumableStream(streamId, () =>
@@ -232,7 +235,7 @@ export async function POST(request: Request) {
       {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
-      }
+      },
     );
   }
 }
@@ -246,18 +249,13 @@ export async function DELETE(request: Request) {
   }
 
   const session = await auth();
-
-  if (!session?.user) {
-    return new ChatSDKError('unauthorized:chat').toResponse();
-  }
+  if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
 
   const chat = await getChatById({ id });
-
   if (chat.userId !== session.user.id) {
     return new ChatSDKError('forbidden:chat').toResponse();
   }
 
   const deletedChat = await deleteChatById({ id });
-
   return Response.json(deletedChat, { status: 200 });
 }
