@@ -1,4 +1,5 @@
 export const runtime = 'nodejs';
+
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -30,32 +31,12 @@ import { isProductionEnvironment } from '@/lib/constants';
 import { myProvider } from '@/lib/ai/providers';
 import { entitlementsByUserType } from '@/lib/ai/entitlements';
 import { postRequestBodySchema, type PostRequestBody } from './schema';
-import { createResumableStreamContext } from 'resumable-stream';
-import type { ResumableStreamContext } from 'resumable-stream';
 import { ChatSDKError } from '@/lib/errors';
 import type { ChatMessage } from '@/lib/types';
 import type { ChatModel } from '@/lib/ai/models';
 import type { VisibilityType } from '@/components/visibility-selector';
 
 export const maxDuration = 60;
-
-let globalStreamContext: ResumableStreamContext | null = null;
-
-export function getStreamContext() {
-  if (!globalStreamContext) {
-    try {
-      globalStreamContext = createResumableStreamContext();
-    } catch (error: any) {
-      if (error.message.includes('REDIS_URL')) {
-        console.log(' > Resumable streams are disabled due to missing REDIS_URL');
-      } else {
-        console.error(error);
-      }
-    }
-  }
-
-  return globalStreamContext;
-}
 
 // 📍 Función nueva para geolocalización basada en IP
 async function getLocationFromIP(request: Request) {
@@ -245,16 +226,8 @@ export async function POST(request: Request) {
       },
     });
 
-    const streamContext = getStreamContext();
-    if (streamContext) {
-      return new Response(
-        await streamContext.resumableStream(streamId, () =>
-          stream.pipeThrough(new JsonToSseTransformStream()),
-        ),
-      );
-    } else {
-      return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
-    }
+    // 🔥 Streaming directo sin resumable-stream
+    return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
   } catch (error) {
     console.error('❌ ERROR en /api/chat:', error);
 
