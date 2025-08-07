@@ -1,54 +1,50 @@
 'use client';
 
-import { AnimatePresence } from 'framer-motion';
-import { Fragment } from 'react';
-import type { Vote } from '@/lib/db/schema';
-import type { ChatMessage } from '@/lib/types';
-import { PreviewMessage } from './message';
-import { ScrollAnchor } from './scroll-anchor';
+import { cn } from '@/lib/utils';
+import { AnimatePresence, motion } from 'framer-motion';
+import { useEffect, useRef } from 'react';
+import { usePathname } from 'next/navigation';
+import { useChatContext } from '@/context/chat-context';
+import { ChatMessage } from '@/lib/types';
+import Message from './message';
 
-export function Messages({
-  chatId,
-  messages,
-  votes,
-  status,
-  setMessages,
-  regenerate,
-  isReadonly,
-  isArtifactVisible,
-}: {
-  chatId: string;
+interface Props {
   messages: ChatMessage[];
-  votes?: Vote[];
-  status: string;
-  setMessages: (messages: ChatMessage[]) => void;
-  regenerate: (messageId: string) => void;
-  isReadonly: boolean;
-  isArtifactVisible: boolean;
-}) {
+  isLoading?: boolean;
+}
+
+export default function Messages({ messages, isLoading }: Props) {
+  const { chatMessages } = useChatContext();
+  const pathname = usePathname();
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    containerRef.current?.scrollTo({
+      top: containerRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, [chatMessages, pathname]);
+
   return (
-    <section className="flex flex-col w-full flex-1 overflow-y-auto overflow-x-hidden">
-      <div className="w-full max-w-3xl mx-auto pb-4 md:pb-6 pt-4 md:pt-10 px-4">
-        <AnimatePresence mode="popLayout">
-          {messages.map((message, index) => (
-            <Fragment key={message.id}>
-              <PreviewMessage
-                chatId={chatId}
-                message={message}
-                vote={votes?.find((v) => v.messageId === message.id)}
-                isLoading={status === 'in_progress'}
-                setMessages={setMessages}
-                regenerate={regenerate}
-                isReadonly={isReadonly}
-                requiresScrollPadding={
-                  index === messages.length - 1 && isArtifactVisible
-                }
-              />
-            </Fragment>
-          ))}
-        </AnimatePresence>
-        <ScrollAnchor trackVisibility={status === 'in_progress'} />
-      </div>
-    </section>
+    <div
+      ref={containerRef}
+      className={cn(
+        'flex flex-1 flex-col gap-4 overflow-auto px-4 pb-4 pt-2 md:px-6 md:pt-4',
+      )}
+    >
+      <AnimatePresence initial={false}>
+        {messages.map((message, i) => (
+          <motion.div
+            key={message.id}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            transition={{ duration: 0.25 }}
+          >
+            <Message message={message} />
+          </motion.div>
+        ))}
+      </AnimatePresence>
+    </div>
   );
 }
