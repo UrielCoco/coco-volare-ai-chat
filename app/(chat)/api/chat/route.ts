@@ -1,35 +1,142 @@
-// ✅ Versión mínima funcional: /app/(chat)/api/chat/route.ts
+export const runtime = 'nodejs';
 
-import { streamText, StreamingTextResponse } from 'ai';
-import OpenAI from 'openai';
+import { auth } from '@/app/(auth)/auth';
+import {
+  createStreamId,
+  deleteChatById,
+  getChatById,
+  getMessageCountByUserId,
+  saveChat,
+  saveMessages,
+} from '@/lib/db/queries';
+import { postRequestBodySchema } from './schema';
+import { ChatSDKError } from '@/lib/errors';
+import { generateUUID } from '@/lib/utils';
+import { generateTitleFromUserMessage } from '../../actions';
+import type { VisibilityType } from '@/components/visibility-selector';
+import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+export async function POST(request: Request) {
+  console.log('📥 POST /api/chat iniciado');
 
-export const runtime = 'edge';
-
-export async function POST(req: Request) {
-  const json = await req.json();
-  const { message, selectedChatModel } = json;
-
-  const userInput = typeof message?.parts?.[0]?.text === 'string'
-    ? message.parts[0].text
-    : '';
-
-  if (!userInput) {
-    return new Response('Invalid user input', { status: 400 });
+  let requestBody;
+  try {
+    const json = await request.json();
+    console.log('📨 JSON recibido:', json);
+    requestBody = postRequestBodySchema.parse(json);
+  } catch (error) {
+    console.error('❌ Error al parsear JSON:', error);
+    return new ChatSDKError('bad_request:api').toResponse();
   }
 
-  const { textStream } = await streamText({
-    model: openai.chat({ model: selectedChatModel }),
+  const { id, message, selectedChatModel, selectedVisibilityType } = requestBody;
+  const session = await auth();
+  if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
+
+  const messageCount = await getMessageCountByUserId({
+    id: session.user.id,
+    differenceInHours: 24,
+  });
+
+  if (messageCount > 100) {
+    return new ChatSDKError('rate_limit:chat').toResponse();
+  }
+
+  const chat = await getChatById({ id });
+  if (!chat) {
+    const firstPart = message.parts[0];
+    const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
+    const title = await generateTitleFromUserMessage({
+      message: {
+        role: 'user',
+        parts: [{ type: 'text', text: userInput }],
+        id: crypto.randomUUID?.() ?? 'temp-id',
+      },
+    });
+    await saveChat({
+      id,
+      userId: session.user.id,
+      title,
+      visibility: selectedVisibilityType,
+    });
+    console.log('💬 Nuevo chat creado:', title);
+  } else if (chat.userId !== session.user.id) {
+    return new ChatSDKError('forbidden:chat').toResponse();
+  }
+
+  await saveMessages({
     messages: [
       {
+        chatId: id,
+        id: message.id,
         role: 'user',
-        content: userInput,
+        parts: message.parts,
+        attachments: [],
+        createdAt: new Date(),
       },
     ],
   });
 
-  return new StreamingTextResponse(textStream);
+  const streamId = generateUUID();
+  await createStreamId({ streamId, chatId: id });
+
+  console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
+  const firstPart = message.parts[0];
+  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
+  console.log('📝 Prompt enviado al assistant:', userInput);
+
+  let responseText: string;
+
+  try {
+    responseText = await runAssistantWithStream({
+      userInput,
+      assistantId: process.env.OPENAI_ASSISTANT_ID!,
+    });
+
+    console.log('🧠 Assistant respondió con:', responseText);
+  } catch (err) {
+    console.error('❌ Error al llamar OpenAI:', err);
+    return new Response(JSON.stringify({ error: 'AI request failed' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${responseText}\n\n`));
+      controller.close();
+    },
+  });
+
+  console.log('📡 Enviando respuesta como SSE');
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  });
+}
+
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id');
+
+  if (!id) {
+    return new ChatSDKError('bad_request:api').toResponse();
+  }
+
+  const session = await auth();
+  if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
+
+  const chat = await getChatById({ id });
+  if (chat.userId !== session.user.id) {
+    return new ChatSDKError('forbidden:chat').toResponse();
+  }
+
+  const deletedChat = await deleteChatById({ id });
+  return Response.json(deletedChat, { status: 200 });
 }
