@@ -42,7 +42,7 @@ function PureArtifactMessages({
   return (
     <div
       ref={messagesContainerRef}
-      className="flex flex-col gap-4 h-full items-center overflow-y-scroll px-4 pt-20"
+      className="flex flex-col w-full max-w-3xl h-full overflow-y-auto px-4 sm:px-6 py-10 gap-5 bg-volare-beige dark:bg-zinc-900 transition-colors duration-300"
     >
       {messages.map((message, index) => (
         <PreviewMessage
@@ -51,9 +51,7 @@ function PureArtifactMessages({
           message={message}
           isLoading={status === 'streaming' && index === messages.length - 1}
           vote={
-            votes
-              ? votes.find((vote) => vote.messageId === message.id)
-              : undefined
+            votes?.find((vote) => vote.messageId === message.id)
           }
           setMessages={setMessages}
           regenerate={regenerate}
