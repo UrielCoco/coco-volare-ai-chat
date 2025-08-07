@@ -1,5 +1,6 @@
 'use client';
 
+import { DefaultChatTransport } from 'ai';
 import { useChat } from '@ai-sdk/react';
 import { useEffect, useState } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
@@ -62,40 +63,19 @@ export function Chat({
     messages: initialMessages,
     experimental_throttle: 100,
     generateId: generateUUID,
-    api: '/api/chat',
-    fetch: async (url, { body }) => {
-      const response = await fetchWithErrorHandlers(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let text = '';
-
-      if (reader) {
-        const { value } = await reader.read();
-        text += decoder.decode(value);
-
-        const dataLine = text.split('data: ')[1];
-        if (dataLine) {
-          return {
-            role: 'assistant',
-            parts: [{ type: 'text', text: dataLine.trim() }],
-          } satisfies ChatMessage;
-        }
-      }
-
-      throw new Error('No se recibió una respuesta válida del servidor');
-    },
-    body: ({ messages, id }) => ({
-      id,
-      message: messages.at(-1),
-      selectedChatModel: 'assistant-openai',
-      selectedVisibilityType: visibilityType,
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+      fetch: fetchWithErrorHandlers,
+      prepareSendMessagesRequest({ messages, id }) {
+        return {
+          body: {
+            id,
+            message: messages[messages.length - 1],
+            selectedChatModel: 'assistant-openai',
+            selectedVisibilityType: visibilityType,
+          },
+        };
+      },
     }),
     onData: (dataPart) => {
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
@@ -115,6 +95,7 @@ export function Chat({
 
   const searchParams = useSearchParams();
   const query = searchParams.get('query');
+
   const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
 
   useEffect(() => {
@@ -204,5 +185,4 @@ export function Chat({
     </>
   );
 }
-
 export default Chat;
