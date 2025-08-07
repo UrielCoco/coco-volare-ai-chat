@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChatMessage } from '@/lib/types';
 import Messages from './messages';
+import type { ChatMessage } from '@/lib/types';
+import { v4 as uuidv4 } from 'uuid';
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -15,9 +16,9 @@ export default function Chat() {
     if (!input.trim()) return;
 
     const userMessage: ChatMessage = {
-      id: Date.now().toString(),
+      id: uuidv4(),
       role: 'user',
-      content: input,
+      parts: [{ type: 'text', text: input }],
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -30,10 +31,13 @@ export default function Chat() {
         body: JSON.stringify({
           message: {
             role: 'user',
-            parts: [{ text: userMessage.content }],
+            parts: [{ text: input }],
           },
           selectedChatModel: 'gpt-3.5-turbo',
         }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
       });
 
       if (!response.ok) throw new Error('Error fetching response');
@@ -41,9 +45,9 @@ export default function Chat() {
       const data = await response.json();
 
       const assistantMessage: ChatMessage = {
-        id: Date.now().toString() + '-assistant',
+        id: uuidv4(),
         role: 'assistant',
-        content: data.reply || 'No response',
+        parts: [{ type: 'text', text: data.reply || 'No response' }],
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -61,7 +65,15 @@ export default function Chat() {
 
   return (
     <div className="flex flex-col w-full max-w-2xl mx-auto p-4">
-      <Messages messages={messages} />
+      <Messages
+        messages={messages}
+        isLoading={loading}
+        votes={[]}
+        setMessages={({ messages }) => setMessages(messages)}
+        regenerate={() => {}}
+        isReadonly={false}
+        chatId="local-chat"
+      />
       <form onSubmit={handleSubmit} className="mt-4 flex gap-2">
         <input
           ref={inputRef}
