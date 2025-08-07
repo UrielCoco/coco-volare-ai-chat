@@ -46,4 +46,11 @@ export type CustomUIDataTypes = {
 };
 
 // 📌 TIPO FINAL DE MENSAJE PARA USAR EN COMPONENTES
-export type ChatMessage = UIMessage<CustomUIDataTypes, ChatTools>;
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  parts: {
+    type: 'text';
+    text: string;
+  }[];
+}

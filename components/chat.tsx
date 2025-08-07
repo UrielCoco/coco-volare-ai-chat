@@ -69,8 +69,8 @@ export default function Chat() {
         messages={messages}
         isLoading={loading}
         votes={[]}
-        setMessages={({ messages }) => setMessages(messages)}
-        regenerate={() => {}}
+        setMessages={setMessages}
+        regenerate={async() => {}}
         isReadonly={false}
         chatId="local-chat"
       />

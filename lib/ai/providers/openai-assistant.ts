@@ -21,12 +21,19 @@ export async function runAssistantWithStream(userMessage: string) {
 
   let runStatus;
   do {
-    await new Promise((r) => setTimeout(r, 1000));
-    runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    runStatus = await openai.beta.threads.runs.retrieve(run.id, {
+      thread_id: thread.id,
+    });
   } while (runStatus.status !== 'completed');
 
   const messages = await openai.beta.threads.messages.list(thread.id);
   const lastMessage = messages.data.find((m) => m.role === 'assistant');
 
-  return lastMessage?.content[0]?.text?.value ?? "No response";
+  const textPart = lastMessage?.content.find((c) => c.type === 'text');
+  if (textPart?.type === 'text') {
+    return textPart.text.value;
+  }
+
+  return 'No response';
 }
