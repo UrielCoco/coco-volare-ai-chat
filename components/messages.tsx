@@ -34,4 +34,41 @@ export default function Messages({
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
-  }
+  }, [messages, isLoading]);
+
+  return (
+    <div
+      ref={messagesRef}
+      className="flex flex-col gap-4 pb-8 px-4 overflow-y-auto w-full"
+      style={{ maxHeight: 'calc(100vh - 200px)' }} // 👈 Ajusta según tu layout
+    >
+      <AnimatePresence mode="popLayout">
+        {messages.map((message) => {
+          const vote = votes.find((v) => v.messageId === message.id);
+
+          return (
+            <motion.div
+              key={message.id}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.2 }}
+            >
+              <PreviewMessage
+                key={message.id}
+                message={message}
+                chatId={chatId}
+                vote={vote}
+                isLoading={isLoading}
+                setMessages={setMessages}
+                regenerate={regenerate}
+                isReadonly={isReadonly}
+                requiresScrollPadding={false}
+              />
+            </motion.div>
+          );
+        })}
+      </AnimatePresence>
+    </div>
+  );
+}
