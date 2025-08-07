@@ -1,142 +1,64 @@
-export const runtime = 'nodejs';
+// ✅ Archivo corregido: /app/(chat)/api/chat/route.ts
 
-import { auth } from '@/app/(auth)/auth';
-import {
-  createStreamId,
-  deleteChatById,
-  getChatById,
-  getMessageCountByUserId,
-  saveChat,
-  saveMessages,
-} from '@/lib/db/queries';
-import { postRequestBodySchema } from './schema';
-import { ChatSDKError } from '@/lib/errors';
-import { generateUUID } from '@/lib/utils';
-import { generateTitleFromUserMessage } from '../../actions';
-import type { VisibilityType } from '@/components/visibility-selector';
-import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
+import { OpenAI } from '@ai-sdk/openai';
+import { streamText } from 'ai';
+import { StreamingTextResponse } from 'ai';
+import { auth } from '@/auth';
+import { ratelimit } from '@/lib/rate-limit';
+import { recordChatHistory } from '@/lib/chat-history';
+import { generateTitleFromUserMessage } from '@/lib/generate-title';
 
-export async function POST(request: Request) {
-  console.log('📥 POST /api/chat iniciado');
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
 
-  let requestBody;
-  try {
-    const json = await request.json();
-    console.log('📨 JSON recibido:', json);
-    requestBody = postRequestBodySchema.parse(json);
-  } catch (error) {
-    console.error('❌ Error al parsear JSON:', error);
-    return new ChatSDKError('bad_request:api').toResponse();
-  }
+export const runtime = 'edge';
 
-  const { id, message, selectedChatModel, selectedVisibilityType } = requestBody;
+export async function POST(req: Request) {
+  const json = await req.json();
+  const { id, message, selectedChatModel, selectedVisibilityType } = json;
+
   const session = await auth();
-  if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
+  if (!session) return new Response('Unauthorized', { status: 401 });
 
-  const messageCount = await getMessageCountByUserId({
-    id: session.user.id,
-    differenceInHours: 24,
-  });
+  const userInput = typeof message?.parts?.[0]?.text === 'string'
+    ? message.parts[0].text
+    : '';
 
-  if (messageCount > 100) {
-    return new ChatSDKError('rate_limit:chat').toResponse();
+  if (!userInput) {
+    return new Response('Invalid user input', { status: 400 });
   }
 
-  const chat = await getChatById({ id });
-  if (!chat) {
-    const firstPart = message.parts[0];
-    const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
-    const title = await generateTitleFromUserMessage({
-      message: {
-        role: 'user',
-        parts: [{ type: 'text', text: userInput }],
-        id: crypto.randomUUID?.() ?? 'temp-id',
-      },
-    });
-    await saveChat({
-      id,
-      userId: session.user.id,
-      title,
-      visibility: selectedVisibilityType,
-    });
-    console.log('💬 Nuevo chat creado:', title);
-  } else if (chat.userId !== session.user.id) {
-    return new ChatSDKError('forbidden:chat').toResponse();
-  }
+  const rateLimit = await ratelimit(session.user.id);
+  if (!rateLimit.success) return new Response('Rate limit exceeded', { status: 429 });
 
-  await saveMessages({
+  const { textStream, done } = await streamText({
+    model: openai.chat({ model: selectedChatModel }),
     messages: [
       {
-        chatId: id,
-        id: message.id,
         role: 'user',
-        parts: message.parts,
-        attachments: [],
-        createdAt: new Date(),
+        content: userInput,
       },
     ],
   });
 
-  const streamId = generateUUID();
-  await createStreamId({ streamId, chatId: id });
-
-  console.log('🚀 Iniciando stream con modelo:', selectedChatModel);
-  const firstPart = message.parts[0];
-  const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
-  console.log('📝 Prompt enviado al assistant:', userInput);
-
-  let responseText: string;
-
-  try {
-    responseText = await runAssistantWithStream({
-      userInput,
-      assistantId: process.env.OPENAI_ASSISTANT_ID!,
+  done.finally(async () => {
+    const title = await generateTitleFromUserMessage({
+      message: {
+        id,
+        role: 'user',
+        parts: [{ type: 'text', text: userInput }],
+      },
     });
 
-    console.log('🧠 Assistant respondió con:', responseText);
-  } catch (err) {
-    console.error('❌ Error al llamar OpenAI:', err);
-    return new Response(JSON.stringify({ error: 'AI request failed' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
+    await recordChatHistory({
+      chatId: id,
+      userId: session.user.id,
+      title,
+      visibility: selectedVisibilityType,
+      messages: [message],
     });
-  }
-
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(`data: ${responseText}\n\n`));
-      controller.close();
-    },
   });
 
-  console.log('📡 Enviando respuesta como SSE');
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    },
-  });
-}
-
-export async function DELETE(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const id = searchParams.get('id');
-
-  if (!id) {
-    return new ChatSDKError('bad_request:api').toResponse();
-  }
-
-  const session = await auth();
-  if (!session?.user) return new ChatSDKError('unauthorized:chat').toResponse();
-
-  const chat = await getChatById({ id });
-  if (chat.userId !== session.user.id) {
-    return new ChatSDKError('forbidden:chat').toResponse();
-  }
-
-  const deletedChat = await deleteChatById({ id });
-  return Response.json(deletedChat, { status: 200 });
+  return new StreamingTextResponse(textStream);
 }
