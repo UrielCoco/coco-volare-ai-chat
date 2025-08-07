@@ -46,5 +46,3 @@ export type CustomUIDataTypes = {
 };
 
 
-//  TIPO FINAL DE MENSAJE PARA USAR EN COMPONENTES
-export type ChatMessage = UIMessage<CustomUIDataTypes, ChatTools>;
