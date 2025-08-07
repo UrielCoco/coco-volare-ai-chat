@@ -127,6 +127,8 @@ const PurePreviewMessage = ({
                 );
               }
 
+
+              
               // 🛡️ Omitimos si no hay texto válido
               return null;
             })}
