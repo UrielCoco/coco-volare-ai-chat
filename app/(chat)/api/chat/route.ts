@@ -46,7 +46,12 @@ export async function POST(request: Request) {
   if (!chat) {
     const firstPart = message.parts[0];
     const userInput = typeof firstPart === 'string' ? firstPart : (firstPart as any)?.text ?? '';
-    const title = await generateTitleFromUserMessage({ message: { role: 'user', content: userInput } });
+    const title = await generateTitleFromUserMessage({
+      message: {
+        role: 'user',
+        parts: [{ type: 'text', text: userInput }],
+      },
+    });
     await saveChat({
       id,
       userId: session.user.id,
