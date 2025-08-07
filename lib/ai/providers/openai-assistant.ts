@@ -31,6 +31,8 @@ export async function runAssistantWithStream(userInput: string) {
     .map((msg) => msg.content.map((c) => ('text' in c ? c.text.value : '')).join('\n'))
     .join('\n');
 
+
+    
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(reply));

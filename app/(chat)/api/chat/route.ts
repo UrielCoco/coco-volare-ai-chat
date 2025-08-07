@@ -10,6 +10,8 @@ export async function POST(req: Request) {
     return new Response('Invalid user input', { status: 400 });
   }
 
+
+  
   try {
     const { textStream } = await runAssistantWithStream(userInput);
     return new Response(textStream, {
