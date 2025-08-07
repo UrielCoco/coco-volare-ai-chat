@@ -1,32 +1,22 @@
-// app/(chat)/api/chat/route.ts
+import { runAssistantWithStream } from '@/lib/ai/providers/openai-assistant';
 
-import { NextRequest } from 'next/server';
-import OpenAI from 'openai';
+export const runtime = 'edge';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+export async function POST(req: Request) {
+  const json = await req.json();
+  const userInput = json?.message?.parts?.[0]?.text;
 
-export const runtime = 'nodejs';
-
-export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const { message, selectedChatModel } = body;
-
-  const userInput = message?.parts?.[0]?.text;
-  if (!userInput) {
-    return new Response('Missing user input', { status: 400 });
+  if (!userInput || typeof userInput !== 'string') {
+    return new Response('Invalid user input', { status: 400 });
   }
 
-  const completion = await openai.chat.completions.create({
-    model: selectedChatModel || 'gpt-3.5-turbo',
-    messages: [
-      {
-        role: 'user',
-        content: userInput,
-      },
-    ],
-    stream: false,
-  });
-
-  const assistantMessage = completion.choices[0]?.message?.content ?? 'No response';
-  return Response.json({ reply: assistantMessage });
+  try {
+    const { textStream } = await runAssistantWithStream(userInput);
+    return new Response(textStream, {
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  } catch (err) {
+    console.error('Error in assistant stream:', err);
+    return new Response('Failed to run assistant', { status: 500 });
+  }
 }
