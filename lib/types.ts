@@ -45,6 +45,5 @@ export type CustomUIDataTypes = {
   finish: null;
 };
 
-
-//  TIPO FINAL DE MENSAJE PARA USAR EN COMPONENTES
+// 📌 TIPO FINAL DE MENSAJE PARA USAR EN COMPONENTES
 export type ChatMessage = UIMessage<CustomUIDataTypes, ChatTools>;
