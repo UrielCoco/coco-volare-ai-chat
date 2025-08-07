@@ -1,3 +1,4 @@
+
 // Ajustes para asegurar renderizado correcto del mensaje AI streaming
 'use client';
 
@@ -64,7 +65,7 @@ const PurePreviewMessage = ({
           )}
         >
           {message.role === 'assistant' && (
-            <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-background">
+            <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
               <div className="translate-y-px">
                 <SparklesIcon size={14} />
               </div>
@@ -91,7 +92,6 @@ const PurePreviewMessage = ({
               </div>
             )}
 
-            {/* Mostrar texto si existe */}
             {message.parts.map((part, index) => {
               const { type } = part;
               const key = `message-${message.id}-part-${index}`;
@@ -117,9 +117,13 @@ const PurePreviewMessage = ({
 
                     <div
                       data-testid="message-content"
-                      className={cn('flex flex-col gap-4', {
-                        'bg-primary text-primary-foreground px-3 py-2 rounded-xl': message.role === 'user',
-                      })}
+                      className={cn(
+                        'flex flex-col gap-4 px-4 py-3 rounded-2xl shadow-md',
+                        {
+                          'bg-[#c5a970] text-white rounded-br-none': message.role === 'user',
+                          'bg-[#000000] text-white rounded-bl-none': message.role === 'assistant',
+                        }
+                      )}
                     >
                       <Markdown>{sanitizeText(part.text)}</Markdown>
                     </div>
@@ -127,12 +131,8 @@ const PurePreviewMessage = ({
                 );
               }
 
-
-              
-              // 🛡️ Omitimos si no hay texto válido
               return null;
             })}
-
 
             {!isReadonly && (
               <MessageActions
