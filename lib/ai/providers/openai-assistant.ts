@@ -1,55 +1,32 @@
+// lib/ai/providers/openai-assistant.ts
+
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-export async function runAssistantWithStream({
-  userInput,
-  assistantId,
-}: {
-  userInput: string;
-  assistantId: string;
-}) {
-  // 1. Crea thread
+export async function runAssistantWithStream(userMessage: string) {
+  const assistantId = process.env.OPENAI_ASSISTANT_ID;
+  if (!assistantId) throw new Error("Missing OPENAI_ASSISTANT_ID");
+
   const thread = await openai.beta.threads.create();
 
-  // 2. Agrega mensaje del usuario
   await openai.beta.threads.messages.create(thread.id, {
     role: 'user',
-    content: userInput,
+    content: userMessage,
   });
 
-  // 3. Ejecuta el agente
   const run = await openai.beta.threads.runs.create(thread.id, {
     assistant_id: assistantId,
   });
 
-  // 4. Espera a que termine
-let runStatus;
-do {
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  runStatus = await openai.beta.threads.runs.retrieve(
-    run.id,
-    { thread_id: thread.id },
-    {}
-  );
-} while (runStatus.status !== 'completed');
+  let runStatus;
+  do {
+    await new Promise((r) => setTimeout(r, 1000));
+    runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+  } while (runStatus.status !== 'completed');
 
-  // 5. Recupera la respuesta
   const messages = await openai.beta.threads.messages.list(thread.id);
+  const lastMessage = messages.data.find((m) => m.role === 'assistant');
 
-  const lastAssistantMessage = messages.data.find(
-    (msg) => msg.role === 'assistant'
-  );
-
-  const textBlock = lastAssistantMessage?.content.find(
-    (block) => block.type === 'text'
-  );
-
-  if (textBlock && textBlock.type === 'text') {
-    return textBlock.text.value;
-  } else {
-    return 'No se pudo obtener una respuesta de texto del asistente.';
-  }
+  return lastMessage?.content[0]?.text?.value ?? "No response";
 }
