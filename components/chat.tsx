@@ -93,7 +93,7 @@ export default function Chat() {
         <button
           type="submit"
           disabled={loading || !input.trim()}
-          className="bg-volare-blue hover:bg-volare-black transition-colors duration-300 text-white rounded-full p-3 disabled:opacity-50"
+          className="bg-black hover:opacity-90 transition-colors duration-300 text-white rounded-full p-3 disabled:opacity-50"
         >
           {loading ? '...' : <PaperPlaneIcon className="w-5 h-5" />}
         </button>
