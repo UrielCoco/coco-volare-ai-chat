@@ -28,7 +28,7 @@ export default function Messages({
 }: Props) {
   const messagesRef = useRef<HTMLDivElement>(null);
 
-  // 👇 Autoscroll al final de los mensajes
+  // Autoscroll al final de los mensajes
   useEffect(() => {
     const el = messagesRef.current;
     if (el) {
@@ -39,8 +39,8 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col gap-4 pb-8 px-4 overflow-y-auto w-full"
-      style={{ maxHeight: 'calc(100vh - 200px)' }} // 👈 Ajusta según tu layout
+      className="flex flex-col gap-6 px-6 pt-6 pb-10 overflow-y-auto w-full bg-gray-50 dark:bg-zinc-900"
+      style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
       <AnimatePresence mode="popLayout">
         {messages.map((message) => {
@@ -52,7 +52,8 @@ export default function Messages({
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              transition={{ duration: 0.2 }}
+              transition={{ type: 'spring', stiffness: 180, damping: 16 }}
+              className="w-full flex"
             >
               <PreviewMessage
                 key={message.id}
