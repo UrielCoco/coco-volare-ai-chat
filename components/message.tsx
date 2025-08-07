@@ -96,7 +96,7 @@ const PurePreviewMessage = ({
               const { type } = part;
               const key = `message-${message.id}-part-${index}`;
 
-              if (type === 'text') {
+              if (type === 'text' && part.text && typeof part.text === 'string') {
                 return (
                   <div key={key} className="flex flex-row gap-2 items-start">
                     {message.role === 'user' && !isReadonly && (
@@ -127,9 +127,10 @@ const PurePreviewMessage = ({
                 );
               }
 
-              // Otros tipos de herramientas no tocados aquí para simplificar...
+              // 🛡️ Omitimos si no hay texto válido
               return null;
             })}
+
 
             {!isReadonly && (
               <MessageActions

@@ -89,7 +89,7 @@ export function Chat({
       setMessages((prevMessages) => {
         const lastMessage = prevMessages[prevMessages.length - 1];
         if (lastMessage && lastMessage.role === 'assistant') {
-          const lastText = lastMessage.parts[0]?.text || '';
+          const lastText = typeof lastMessage.parts?.[0]?.text === 'string' ? lastMessage.parts[0].text : '';
           const updatedLastMessage = {
             ...lastMessage,
             parts: [{ type: 'text', text: lastText + dataPart }],
