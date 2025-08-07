@@ -49,6 +49,11 @@ export function Chat({
   const { setDataStream } = useDataStream();
 
   const [input, setInput] = useState<string>('');
+  const [attachments, setAttachments] = useState<Array<Attachment>>([]);
+  const isArtifactVisible = useArtifactSelector((state) => state.isVisible);
+  const searchParams = useSearchParams();
+  const query = searchParams.get('query');
+  const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
 
   const {
     messages,
@@ -66,19 +71,46 @@ export function Chat({
     transport: new DefaultChatTransport({
       api: '/api/chat',
       fetch: fetchWithErrorHandlers,
-      prepareSendMessagesRequest({ messages, id }) {
+      prepareSendMessagesRequest({ messages, id, body }) {
         return {
           body: {
             id,
-            message: messages[messages.length - 1],
+            message: messages.at(-1),
             selectedChatModel: 'assistant-openai',
             selectedVisibilityType: visibilityType,
+            ...body,
           },
         };
       },
     }),
     onData: (dataPart) => {
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
+      setMessages((prevMessages) => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+
+        if (lastMessage && lastMessage.role === 'assistant') {
+          const updatedPart = {
+            type: 'text' as const,
+            text: ((lastMessage.parts[0] as any)?.text || '') + dataPart,
+          };
+
+          const updatedMessage = {
+            ...lastMessage,
+            parts: [updatedPart],
+          };
+
+          return [...prevMessages.slice(0, -1), updatedMessage];
+        }
+
+        return [
+          ...prevMessages,
+          {
+            id: generateUUID(),
+            role: 'assistant',
+            parts: [{ type: 'text', text: dataPart }],
+          },
+        ];
+      });
     },
     onFinish: () => {
       mutate(unstable_serialize(getChatHistoryPaginationKey));
@@ -93,11 +125,6 @@ export function Chat({
     },
   });
 
-  const searchParams = useSearchParams();
-  const query = searchParams.get('query');
-
-  const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
-
   useEffect(() => {
     if (query && !hasAppendedQuery) {
       sendMessage({
@@ -109,14 +136,6 @@ export function Chat({
       window.history.replaceState({}, '', `/chat/${id}`);
     }
   }, [query, sendMessage, hasAppendedQuery, id]);
-
-  const { data: votes } = useSWR<Array<Vote>>(
-    messages.length >= 2 ? `/api/vote?chatId=${id}` : null,
-    fetcher,
-  );
-
-  const [attachments, setAttachments] = useState<Array<Attachment>>([]);
-  const isArtifactVisible = useArtifactSelector((state) => state.isVisible);
 
   useAutoResume({
     autoResume,
@@ -139,7 +158,7 @@ export function Chat({
         <Messages
           chatId={id}
           status={status}
-          votes={votes}
+          votes={useSWR<Array<Vote>>(messages.length >= 2 ? `/api/vote?chatId=${id}` : null, fetcher).data}
           messages={messages}
           setMessages={setMessages}
           regenerate={regenerate}
@@ -178,11 +197,12 @@ export function Chat({
         messages={messages}
         setMessages={setMessages}
         regenerate={regenerate}
-        votes={votes}
+        votes={useSWR<Array<Vote>>(messages.length >= 2 ? `/api/vote?chatId=${id}` : null, fetcher).data}
         isReadonly={isReadonly}
         selectedVisibilityType={visibilityType}
       />
     </>
   );
 }
+
 export default Chat;
