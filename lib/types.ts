@@ -21,13 +21,19 @@ export interface Attachment {
 }
 
 // ✅ Mensaje del chat usado en la UI
-export interface ChatMessage {
+/*export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   createdAt?: Date;
   parts: MessagePart[];
   attachments?: Attachment[];
-}
+  content: string;
+}*/
+export type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+};
 
 // ✅ Herramientas AI
 export type DataPart = { type: 'append-message'; message: string };
