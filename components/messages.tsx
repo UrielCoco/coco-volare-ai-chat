@@ -36,4 +36,19 @@ export function Messages({
                 chatId={chatId}
                 message={message}
                 vote={votes?.find((v) => v.messageId === message.id)}
-                isLoading
+                isLoading={status === 'in_progress'}
+                setMessages={setMessages}
+                regenerate={regenerate}
+                isReadonly={isReadonly}
+                requiresScrollPadding={
+                  index === messages.length - 1 && isArtifactVisible
+                }
+              />
+            </Fragment>
+          ))}
+        </AnimatePresence>
+        <ScrollAnchor trackVisibility={status === 'in_progress'} />
+      </div>
+    </section>
+  );
+}
