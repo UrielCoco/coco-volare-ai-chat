@@ -48,7 +48,7 @@ export function Chat({
   const { mutate } = useSWRConfig();
   const { setDataStream } = useDataStream();
 
-  const [input, setInput] = useState<string>('');
+  const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Array<Attachment>>([]);
   const isArtifactVisible = useArtifactSelector((state) => state.isVisible);
   const searchParams = useSearchParams();
@@ -84,32 +84,27 @@ export function Chat({
       },
     }),
     onData: (dataPart) => {
+      console.log('[STREAM]', dataPart);
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
       setMessages((prevMessages) => {
         const lastMessage = prevMessages[prevMessages.length - 1];
-
         if (lastMessage && lastMessage.role === 'assistant') {
-          const updatedPart = {
-            type: 'text' as const,
-            text: ((lastMessage.parts[0] as any)?.text || '') + dataPart,
-          };
-
-          const updatedMessage = {
+          const lastText = lastMessage.parts[0]?.text || '';
+          const updatedLastMessage = {
             ...lastMessage,
-            parts: [updatedPart],
+            parts: [{ type: 'text', text: lastText + dataPart }],
           };
-
-          return [...prevMessages.slice(0, -1), updatedMessage];
+          return [...prevMessages.slice(0, -1), updatedLastMessage];
+        } else {
+          return [
+            ...prevMessages,
+            {
+              id: generateUUID(),
+              role: 'assistant',
+              parts: [{ type: 'text', text: dataPart }],
+            },
+          ];
         }
-
-        return [
-          ...prevMessages,
-          {
-            id: generateUUID(),
-            role: 'assistant',
-            parts: [{ type: 'text', text: dataPart }],
-          },
-        ];
       });
     },
     onFinish: () => {
@@ -128,10 +123,9 @@ export function Chat({
   useEffect(() => {
     if (query && !hasAppendedQuery) {
       sendMessage({
-        role: 'user' as const,
+        role: 'user',
         parts: [{ type: 'text', text: query }],
       });
-
       setHasAppendedQuery(true);
       window.history.replaceState({}, '', `/chat/${id}`);
     }
@@ -158,7 +152,10 @@ export function Chat({
         <Messages
           chatId={id}
           status={status}
-          votes={useSWR<Array<Vote>>(messages.length >= 2 ? `/api/vote?chatId=${id}` : null, fetcher).data}
+          votes={useSWR<Array<Vote>>(
+            messages.length >= 2 ? `/api/vote?chatId=${id}` : null,
+            fetcher
+          ).data}
           messages={messages}
           setMessages={setMessages}
           regenerate={regenerate}
@@ -197,7 +194,10 @@ export function Chat({
         messages={messages}
         setMessages={setMessages}
         regenerate={regenerate}
-        votes={useSWR<Array<Vote>>(messages.length >= 2 ? `/api/vote?chatId=${id}` : null, fetcher).data}
+        votes={useSWR<Array<Vote>>(
+          messages.length >= 2 ? `/api/vote?chatId=${id}` : null,
+          fetcher
+        ).data}
         isReadonly={isReadonly}
         selectedVisibilityType={visibilityType}
       />
