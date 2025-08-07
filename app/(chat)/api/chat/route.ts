@@ -50,6 +50,7 @@ export async function POST(request: Request) {
       message: {
         role: 'user',
         parts: [{ type: 'text', text: userInput }],
+        id: crypto.randomUUID?.() ?? 'temp-id',
       },
     });
     await saveChat({
