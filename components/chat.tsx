@@ -84,29 +84,55 @@ export function Chat({
       },
     }),
     onData: (dataPart) => {
-      console.log('[STREAM]', dataPart);
+      if (!dataPart || typeof dataPart !== 'string') {
+        console.warn('[🚫 Invalid dataPart]', dataPart);
+        return;
+      }
+
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
+
       setMessages((prevMessages) => {
         const lastMessage = prevMessages[prevMessages.length - 1];
-        if (lastMessage && lastMessage.role === 'assistant') {
-          const lastText = typeof lastMessage.parts?.[0]?.text === 'string' ? lastMessage.parts[0].text : '';
+
+        if (
+          lastMessage &&
+          lastMessage.role === 'assistant' &&
+          lastMessage.parts?.[0]?.type === 'text'
+        ) {
+          const lastText =
+            typeof lastMessage.parts[0].text === 'string'
+              ? lastMessage.parts[0].text
+              : '';
+
           const updatedLastMessage = {
             ...lastMessage,
-            parts: [{ type: 'text', text: lastText + dataPart }],
+            parts: [
+              {
+                type: 'text',
+                text: lastText + dataPart,
+              },
+            ],
           };
+
           return [...prevMessages.slice(0, -1), updatedLastMessage];
-        } else {
-          return [
-            ...prevMessages,
-            {
-              id: generateUUID(),
-              role: 'assistant',
-              parts: [{ type: 'text', text: dataPart }],
-            },
-          ];
         }
+
+        return [
+          ...prevMessages,
+          {
+            id: generateUUID(),
+            role: 'assistant',
+            parts: [
+              {
+                type: 'text',
+                text: dataPart,
+              },
+            ],
+          },
+        ];
       });
     },
+
     onFinish: () => {
       mutate(unstable_serialize(getChatHistoryPaginationKey));
     },
