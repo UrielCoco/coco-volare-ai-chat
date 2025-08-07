@@ -34,7 +34,7 @@ export default function Chat() {
             role: 'user',
             parts: [{ text: input }],
           },
-          selectedChatModel: 'gpt-3.5-turbo',
+          selectedChatModel: 'gpt-4o',
         }),
         headers: {
           'Content-Type': 'application/json',
