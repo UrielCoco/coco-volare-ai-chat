@@ -40,10 +40,12 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col gap-3 md:gap-4 py-4 px-4 overflow-y-auto w-full pb-[96px]"
-      style={{ maxHeight: 'calc(100vh - 200px)' }}
+      className="flex flex-col gap-3 md:gap-4 py-4 px-4 overflow-y-auto w-full"
+      style={{
+        maxHeight: 'calc(100vh - 200px)',
+        paddingBottom: 'var(--composer-h)', // usar altura real del composer
+      }}
     >
-
       {/* 📌 Placeholder inicial */}
       <AnimatePresence>
         {messages.length === 0 && !isLoading && (
@@ -53,17 +55,14 @@ export default function Messages({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
-            className="mx-auto my-5 max-w-xl text-center text-sm md:text-base 
-                       rounded-xl 
+            className="mx-auto my-10 max-w-xl text-center text-sm md:text-base 
+                       rounded-xl border border-white/10 bg-white/5 
                        px-4 py-3 backdrop-blur"
           >
-            <p className="font-small justify-center">Coco Volare</p>
-            <p className="font-small justify-center">Intelligence</p>
-            <p className="mt-1 opacity-90">
-              Hello! / ¡Hola!
-              <div className="flex justify-center py-4">
-                <img src="../images/thinking.gif" alt="..." className="w-20 h-20 opacity-80" />
-              </div>
+            <p className="font-medium">¡Bienvenido a Coco Volare!</p>
+            <p className="mt-1 opacity-80">
+              Escribe tu primer mensaje para iniciar la conversación.
+              Estoy listo para ayudarte a planear un viaje privado, de grupo o de negocios.
             </p>
           </motion.div>
         )}
@@ -98,7 +97,7 @@ export default function Messages({
         })}
       </AnimatePresence>
 
-      {/* ✅ Este div asegura que el scroll llegue hasta abajo */}
+      {/* ✅ Ancla de scroll */}
       <div ref={scrollAnchorRef} />
     </div>
   );
