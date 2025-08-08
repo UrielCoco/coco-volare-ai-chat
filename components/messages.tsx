@@ -109,8 +109,7 @@ export default function Messages({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.2 }}
-            className="self-start rounded-2xl bg-black text-white/80 border border-white/10 
-                       px-4 py-2 shadow-sm"
+            className="chat-message self-start max-w-[80%] md:max-w-[70%]"
             aria-live="polite"
           >
             <span className="inline-flex items-center gap-2">
