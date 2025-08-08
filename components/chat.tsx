@@ -85,7 +85,7 @@ export default function Chat() {
       className="relative flex flex-col w-full mx-auto bg-white dark:bg-zinc-900"
       style={{ ['--composer-h' as any]: `${composerH}px` }} // variable CSS
     >
-      <div className="min-h-[100dvh] overflow-y-auto px-0 py-0 scroll-smooth"> 
+      <div className="min-h-screen overflow-y-auto px-0 py-0 scroll-smooth"> 
         <Messages //
           messages={messages}
           isLoading={loading}
@@ -101,7 +101,6 @@ export default function Chat() {
         ref={formRef}
         onSubmit={handleSubmit}
         className="fixed bottom-0 left-0 right-0 w-full mx-auto bg-black  border-t border-transparent dark:border-transparent flex p-4 sm:p-9 gap-3 items-center z-50"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }} // ← respeta notch inferior
       >
         <input
           ref={inputRef}
