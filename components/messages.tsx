@@ -40,7 +40,7 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col  px-4 pt-4 w-full py-4 gap-3" // md:gap-4  overflow-y-auto
+      className="flex flex-col  px-4 pt-4 w-full py-4 gap-3 md:gap-4" //   overflow-y-auto
       style={{
         maxHeight: 'calc(100vh - 200px)',
         paddingBottom: 'var(--composer-h)', // usar altura real del composer
