@@ -67,7 +67,7 @@ export default function Chat() {
   return (
     <div className="relative w-full max-w-2xl mx-auto bg-white dark:bg-zinc-900">
     
-      <div className="min-h-screen pb-32 overflow-y-auto px-0 py-6 sm:p-8 scroll-smooth">
+      <div className="min-h-screen pb-16 overflow-y-auto px-0 py-6 sm:p-8 scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
