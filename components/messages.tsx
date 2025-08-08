@@ -59,11 +59,10 @@ export default function Messages({
                        rounded-xl border border-white/10 bg-white/5 
                        px-4 py-3 backdrop-blur"
           >
-            <p className="font-medium">¡Bienvenido a Coco Volare!</p>
-            <p className="mt-1 opacity-80">
-              Escribe tu primer mensaje para iniciar la conversación.
-              Estoy listo para ayudarte a planear un viaje privado, de grupo o de negocios.
-            </p>
+            <p className="font-medium">¡Coco Volare!</p>
+            <p className="font-medium">Intelligence</p>
+            <img src="../images/thinking.gif" alt="..." className="w-12 h-12 opacity-100" />
+            
           </motion.div>
         )}
       </AnimatePresence>
