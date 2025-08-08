@@ -116,9 +116,11 @@ export default function Messages({
               {/* Avatar igual que en message.tsx */}
               <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
                 <div className="translate-y-px">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M8 0a8 8 0 1 0 8 8A8 8 0 0 0 8 0Z"/>
-                  </svg>
+                  <img
+                    src="../images/thinking.gif"
+                    alt="..."
+                    className="w-full h-full object-cover"
+                  />
                 </div>
               </div>
 
