@@ -56,10 +56,13 @@ export default function Messages({
                        rounded-xl border border-white/10 bg-white/5 
                        px-4 py-3 backdrop-blur"
           >
-            <p className="font-medium">¡Bienvenido a Coco Volare!</p>
+            <p className="font-medium">Coco Volare Intelligence</p>
+            <p className="font-medium">¡Bienvenido! / Welcome!</p>
             <p className="mt-1 opacity-80">
-              Escribe tu primer mensaje para iniciar la conversación.
-              Estoy listo para ayudarte a planear un viaje privado, de grupo o de negocios.
+              Logo aqui
+              <div className="flex justify-center py-4">
+                <img src="../images/thinking.gif" alt="..." className="w-40 h-40 opacity-100" />
+              </div>
             </p>
           </motion.div>
         )}
