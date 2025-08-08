@@ -27,12 +27,13 @@ export default function Messages({
   chatId,
 }: Props) {
   const messagesRef = useRef<HTMLDivElement>(null);
+  const scrollAnchorRef = useRef<HTMLDivElement>(null);
 
-  // 👇 Autoscroll al final de los mensajes
+  // ✅ Autoscroll suave al final
   useEffect(() => {
-    const el = messagesRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
+    const anchor = scrollAnchorRef.current;
+    if (anchor) {
+      anchor.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, isLoading]);
 
@@ -40,7 +41,7 @@ export default function Messages({
     <div
       ref={messagesRef}
       className="flex flex-col gap-4 pb-8 px-4 overflow-y-auto w-full"
-      style={{ maxHeight: 'calc(100vh - 200px)' }} // 👈 Ajusta según tu layout
+      style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
       <AnimatePresence mode="popLayout">
         {messages.map((message) => {
@@ -69,6 +70,9 @@ export default function Messages({
           );
         })}
       </AnimatePresence>
+
+      {/* ✅ Este div asegura que el scroll llegue hasta abajo */}
+      <div ref={scrollAnchorRef} />
     </div>
   );
 }
