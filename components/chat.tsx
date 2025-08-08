@@ -65,8 +65,8 @@ export default function Chat() {
   }, []);
 
   return (
-    <div className="flex flex-col w-full max-w-2xl h-screen mx-auto bg-white dark:bg-zinc-900 overflow-hidden">
-    //<div className="flex flex-col w-full max-w-2xl h-[90vh] mx-auto border border-gray-100 dark:border-zinc-800 rounded-2xl shadow-volare bg-white dark:bg-zinc-900 overflow-hidden transition-all duration-300 ease-in-out">
+    
+    <div className="flex flex-col w-full max-w-2xl h-screen mx-auto border border-gray-100 dark:border-zinc-800 rounded-2xl shadow-volare bg-white dark:bg-zinc-900 overflow-hidden transition-all duration-300 ease-in-out">
       <div className="flex-1 overflow-y-auto px-0 py-6 sm:p-8">
         <Messages
           messages={messages}
@@ -99,7 +99,7 @@ export default function Chat() {
           {loading ? '...' : <PaperPlaneIcon className="w-5 h-5" />}
         </button>
       </form>
-    //</div>
+    
     </div>
 
   );
