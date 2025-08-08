@@ -1,5 +1,4 @@
 
-// Ajustes para asegurar renderizado correcto del mensaje AI streaming
 'use client';
 
 import cx from 'classnames';
@@ -95,6 +94,14 @@ const PurePreviewMessage = ({
             {message.parts.map((part, index) => {
               const { type } = part;
               const key = `message-${message.id}-part-${index}`;
+
+              if (message.role === 'assistant' && isLoading) {
+                return (
+                  <div key={key} className="flex justify-center py-4">
+                    <img src="/thinking.gif" alt="Pensando..." className="w-12 h-12 opacity-80" />
+                  </div>
+                );
+              }
 
               if (type === 'text' && part.text && typeof part.text === 'string') {
                 return (
