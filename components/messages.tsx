@@ -40,9 +40,10 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col gap-3 md:gap-4 py-4 pb-24 px-4 overflow-y-auto w-full"
+      className="flex flex-col gap-3 md:gap-4 py-4 px-4 overflow-y-auto w-full pb-[96px]"
       style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
+
       {/* 📌 Placeholder inicial */}
       <AnimatePresence>
         {messages.length === 0 && !isLoading && (
@@ -56,8 +57,8 @@ export default function Messages({
                        rounded-xl 
                        px-4 py-3 backdrop-blur"
           >
-            <p className="font-small">Coco Volare Intelligence</p>
-            <p className="font-small">Intelligence</p>
+            <p className="font-medium justify-center">Coco Volare</p>
+            <p className="font-small justify-center">Intelligence</p>
             <p className="mt-1 opacity-90">
               Hello! / ¡Hola!
               <div className="flex justify-center py-4">
