@@ -67,7 +67,7 @@ export default function Chat() {
   return (
     <div className="relative flex flex-col flex flex-col w-full mx-auto bg-white dark:bg-zinc-900">
     
-      <div className="min-h-screen overflow-y-auto px-0 py-6 sm:p-8 scroll-smooth">
+      <div className="min-h-screen overflow-y-auto px-0 py-6  scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
@@ -81,7 +81,7 @@ export default function Chat() {
 
       <form
         onSubmit={handleSubmit}
-        className="fixed bottom-0 left-0 right-0 w-full max-w-2xl mx-auto bg-black p-4 sm:p-6 border-t border-gray-200 dark:border-zinc-700 flex gap-3 items-center z-50"
+        className="fixed bottom-0 left-0 right-0 w-full  mx-auto bg-black p-4 sm:p-9 border-t border-gray-200 dark:border-zinc-700 flex gap-3 items-center z-50"
       >
         <input
           ref={inputRef}
