@@ -53,15 +53,15 @@ export default function Messages({
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
             className="mx-auto my-10 max-w-xl text-center text-sm md:text-base 
-                       rounded-xl border border-white/10 bg-white/5 
+                       rounded-xl   
                        px-4 py-3 backdrop-blur"
           >
             <p className="font-medium">Coco Volare Intelligence</p>
             <p className="mt-1 ">
               ¡Bienvenido! / Welcome!
-              <div className="flex justify-center py-4">
-                <img src="../images/thinking.gif" alt="..." className="w-30 h-30 opacity-100" />
-              </div>
+              
+                <img src="../images/thinking.gif" alt="..." className=" flex justify-center  w-60 h-60 " />
+              
             </p>
           </motion.div>
         )}
