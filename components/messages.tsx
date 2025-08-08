@@ -100,6 +100,31 @@ export default function Messages({
         })}
       </AnimatePresence>
 
+      {/* ✨ Indicador de "escribiendo…" (aparece solo cuando hay mensajes y está cargando) */}
+      <AnimatePresence>
+        {isLoading && messages.length > 0 && (
+          <motion.div
+            key="typing-indicator"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
+            className="self-start rounded-2xl bg-black text-white/80 border border-white/10 
+                       px-4 py-2 shadow-sm"
+            aria-live="polite"
+          >
+            <span className="inline-flex items-center gap-2">
+              Pensando
+              <span className="inline-flex gap-1">
+                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+                <span className="animate-bounce">•</span>
+                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+              </span>
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ✅ Ancla de scroll */}
       <div ref={scrollAnchorRef} />
     </div>
