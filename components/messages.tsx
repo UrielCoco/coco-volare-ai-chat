@@ -40,7 +40,7 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col py-4 pb-1 px-4 overflow-y-auto w-full"
+      className="flex flex-col gap-3 md:gap-4 py-4 pb-24 px-4 overflow-y-auto w-full"
       style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
       <AnimatePresence mode="popLayout">
@@ -50,10 +50,11 @@ export default function Messages({
           return (
             <motion.div
               key={message.id}
+              className="chat-message"
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              transition={{ duration: 0.2 }}
+              transition={{ duration: 0.3 }}
             >
               <PreviewMessage
                 key={message.id}

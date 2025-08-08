@@ -67,7 +67,7 @@ export default function Chat() {
   return (
     <div className="relative flex flex-col flex flex-col w-full mx-auto bg-white dark:bg-zinc-900">
     
-      <div className="min-h-screen overflow-y-auto px-0 py-0 gap-4  scroll-smooth">
+      <div className="min-h-screen overflow-y-auto px-0 py-0 scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
