@@ -40,7 +40,7 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col  pb-1 px-4 overflow-y-auto w-full"
+      className="flex flex-col py-4 pb-1 px-4 overflow-y-auto w-full"
       style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
       <AnimatePresence mode="popLayout">
