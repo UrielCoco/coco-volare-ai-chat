@@ -18,7 +18,7 @@ export const viewport = {
 
 const poppins = Poppins({
   subsets: ['latin'],
-  weight: ['400', '600'], // puedes agregar más si quieres
+  weight: ['400', '500', '600', '700'],
   display: 'swap',
   variable: '--font-poppins',
 });
@@ -52,16 +52,14 @@ export default async function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={poppins.variable}
+      className={poppins.variable}      // ← conservamos la variable por si la usas en Tailwind
     >
       <head>
         <script
-          dangerouslySetInnerHTML={{
-            __html: THEME_COLOR_SCRIPT,
-          }}
+          dangerouslySetInnerHTML={{ __html: THEME_COLOR_SCRIPT }}
         />
       </head>
-      <body className="antialiased">
+      <body className={`${poppins.className} antialiased`}>  {/* ← aplicamos Poppins ya */}
         <ThemeProvider
           attribute="class"
           defaultTheme="system"
