@@ -56,8 +56,8 @@ export default function Messages({
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
             className="mx-auto my-20 max-w-xl text-center text-sm md:text-base 
-                       rounded-xl border border-white/10 bg-white/5 
-                       px-4 py-3 backdrop-blur"
+                       rounded-xl  
+                       px-4 py-3 backdrop-blur" // border border-white/10 bg-white/5 backdrop-blur
           >
             <p className="font-medium">¡Coco Volare!</p>
             <p className="font-small">Intelligence</p>
