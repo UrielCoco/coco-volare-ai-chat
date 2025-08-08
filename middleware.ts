@@ -10,6 +10,12 @@ export async function middleware(request: NextRequest) {
     return new Response('pong', { status: 200 });
   }
 
+  // ✅ IGNORAR COMPLETAMENTE EL EMBED (clave para Shopify)
+  //    Nada de auth ni redirecciones aquí para evitar loops en iframe.
+  if (pathname.startsWith('/_embed')) {
+    return NextResponse.next();
+  }
+
   // ✅ Ignorar rutas de auth
   if (pathname.startsWith('/api/auth')) {
     return NextResponse.next();
@@ -30,6 +36,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // 🔒 Si no hay token, redirige a auth de guest
+  //    (pero nunca para /_embed, ya excluido arriba)
   if (!token) {
     const redirectUrl = encodeURIComponent(request.url);
     return NextResponse.redirect(
@@ -45,7 +52,10 @@ export async function middleware(request: NextRequest) {
 
   return NextResponse.next();
 }
+
 export const runtime = 'nodejs';
+
+// 👇 Ajuste del matcher para excluir /_embed y archivos estáticos
 export const config = {
   matcher: [
     '/',
@@ -53,6 +63,7 @@ export const config = {
     '/api/:path*',
     '/login',
     '/register',
-    '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
+    // Excluimos _next, estáticos y _embed (importantísimo)
+    '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|_embed).*)',
   ],
 };
