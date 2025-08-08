@@ -81,7 +81,7 @@ export default function Chat() {
 
       <form
         onSubmit={handleSubmit}
-        className="sticky p-0 sm:p-6 border-t border-gray-200 dark:border-zinc-700 bg-black flex gap-3 items-center"
+        className=" p-4 sm:p-4 border-t border-gray-200 dark:border-zinc-700 bg-black flex gap-3 items-center"
       >
         <input
           ref={inputRef}
