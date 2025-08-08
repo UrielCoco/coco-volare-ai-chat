@@ -80,7 +80,7 @@ export default function Chat() {
 
       <form
         onSubmit={handleSubmit}
-        className="p-4 sm:p-6 border-t border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 flex gap-3 items-center"
+        className="p-4 sm:p-6 border-t border-gray-200 dark:border-zinc-700 bg-black flex gap-3 items-center"
       >
         <input
           ref={inputRef}
@@ -88,12 +88,12 @@ export default function Chat() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Escribe tu mensaje..."
-          className="flex-1 px-5 py-3 rounded-full border border-gray-300 dark:border-zinc-600 bg-gray-100 dark:bg-zinc-800 text-black dark:text-white placeholder-gray-500 dark:placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
+          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-zinc-900 text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
         />
         <button
           type="submit"
           disabled={loading || !input.trim()}
-          className="bg-black hover:opacity-90 transition-colors duration-300 text-white rounded-full p-3 disabled:opacity-50"
+          className="bg-white text-black hover:bg-gray-100 transition-colors duration-300 rounded-full p-3 disabled:opacity-50"
         >
           {loading ? '...' : <PaperPlaneIcon className="w-5 h-5" />}
         </button>
