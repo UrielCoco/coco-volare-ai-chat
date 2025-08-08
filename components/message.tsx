@@ -97,9 +97,14 @@ const PurePreviewMessage = ({
 
               if (message.role === 'assistant' && isLoading) {
                 return (
-                  <div key={key} className="flex justify-center py-4">
-                    <img src="../images/thinking.gif" alt="..." className="p-10 opacity-100" />
-                  </div>
+                  <span className="inline-flex items-center gap-2">
+              
+                    <span className="inline-flex gap-1">
+                      <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+                      <span className="animate-bounce">•</span>
+                      <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+                    </span>
+                  </span>
                 );
               }
 

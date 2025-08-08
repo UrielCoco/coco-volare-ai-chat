@@ -114,7 +114,7 @@ export default function Messages({
             aria-live="polite"
           >
             <span className="inline-flex items-center gap-2">
-              Pensando
+              
               <span className="inline-flex gap-1">
                 <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
                 <span className="animate-bounce">•</span>
