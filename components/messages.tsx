@@ -57,11 +57,11 @@ export default function Messages({
                        px-4 py-3 backdrop-blur"
           >
             <p className="font-medium">Coco Volare Intelligence</p>
-            <p className="font-medium">¡Bienvenido! / Welcome!</p>
-            <p className="mt-1 opacity-80">
-              Logo aqui
-              <div className="flex justify-center py-4">
-                <img src="../images/thinking.gif" alt="..." className="w-40 h-40 opacity-100" />
+            <p className="font-medium"></p>
+            <p className="mt-1 ">
+              ¡Bienvenido! / Welcome!
+              <div className="flex justify-center py-2">
+                <img src="../images/thinking.gif" alt="..." className="w-30 h-30 opacity-100" />
               </div>
             </p>
           </motion.div>
