@@ -65,7 +65,7 @@ export default function Chat() {
   }, []);
 
   return (
-    <div className="relative w-full max-w-2xl mx-auto bg-white dark:bg-zinc-900">
+    <div className="relative flex flex-col flex flex-col w-full mx-auto bg-white dark:bg-zinc-900">
     
       <div className="min-h-screen overflow-y-auto px-0 py-6 sm:p-8 scroll-smooth">
         <Messages
