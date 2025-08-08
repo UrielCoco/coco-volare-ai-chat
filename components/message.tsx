@@ -65,9 +65,11 @@ const PurePreviewMessage = ({
         >
           {message.role === 'assistant' && (
             <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
-              <div className="translate-y-px">
-                <SparklesIcon size={14} />
-              </div>
+              <img
+                src="../images/thinking.gif"   // usa la misma ruta que ya te funciona
+                alt="Coco Volare"
+                className="w-full h-full object-cover"
+              />
             </div>
           )}
 
