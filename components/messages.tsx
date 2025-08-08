@@ -56,8 +56,8 @@ export default function Messages({
                        rounded-xl 
                        px-4 py-3 backdrop-blur"
           >
-            <p className="font-medium">Coco Volare Intelligence</p>
-            <p className="font-medium">¡Bienvenido! / Welcome!</p>
+            <p className="font-small">Coco Volare Intelligence</p>
+            
             <p className="mt-1 opacity-90">
               Next destination? / ¿Siguiente destino?
               <div className="flex justify-center py-4">
