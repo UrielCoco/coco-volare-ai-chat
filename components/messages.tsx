@@ -57,9 +57,9 @@ export default function Messages({
                        px-4 py-3 backdrop-blur"
           >
             <p className="font-small">Coco Volare Intelligence</p>
-            
+            <p className="font-small">Intelligence</p>
             <p className="mt-1 opacity-90">
-              Next destination? / ¿Siguiente destino?
+              Hello! / ¡Hola!
               <div className="flex justify-center py-4">
                 <img src="../images/thinking.gif" alt="..." className="w-40 h-40" />
               </div>
