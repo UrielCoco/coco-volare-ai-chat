@@ -85,8 +85,8 @@ export default function Chat() {
       className="relative flex flex-col w-full mx-auto bg-white dark:bg-zinc-900"
       style={{ ['--composer-h' as any]: `${composerH}px` }} // variable CSS
     >
-      <div className="min-h-screen  px-0 py-0 scroll-smooth">
-        <Messages
+      <div className="min-h-screen  px-0 py-0 scroll-smooth"> 
+        <Messages //overflow-y-auto
           messages={messages}
           isLoading={loading}
           votes={[]}
