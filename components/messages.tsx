@@ -111,19 +111,16 @@ export default function Messages({
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.2 }}
             className="chat-message self-start max-w-[80%] md:max-w-[70%]"
-            aria-live="polite"
           >
-            <span className="inline-flex items-center gap-2">
-              
-              <span className="inline-flex gap-1">
-                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
-                <span className="animate-bounce">•</span>
-                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
-              </span>
-            </span>
+            <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
+              <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+              <span className="animate-bounce">•</span>
+              <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
+
 
       {/* ✅ Ancla de scroll */}
       <div ref={scrollAnchorRef} />
