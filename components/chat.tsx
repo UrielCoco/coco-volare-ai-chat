@@ -65,6 +65,7 @@ export default function Chat() {
   }, []);
 
   return (
+    <div className="flex flex-col w-full max-w-2xl h-screen mx-auto bg-white dark:bg-zinc-900 overflow-hidden">
     <div className="flex flex-col w-full max-w-2xl h-[90vh] mx-auto border border-gray-100 dark:border-zinc-800 rounded-2xl shadow-volare bg-white dark:bg-zinc-900 overflow-hidden transition-all duration-300 ease-in-out">
       <div className="flex-1 overflow-y-auto px-0 py-6 sm:p-8">
         <Messages
@@ -80,7 +81,7 @@ export default function Chat() {
 
       <form
         onSubmit={handleSubmit}
-        className="p-4 sm:p-6 border-t border-gray-200 dark:border-zinc-700 bg-black flex gap-3 items-center"
+        className="sticky bottom-0 p-4 sm:p-6 border-t border-gray-200 dark:border-zinc-700 bg-black flex gap-3 items-center"
       >
         <input
           ref={inputRef}
@@ -99,5 +100,7 @@ export default function Chat() {
         </button>
       </form>
     </div>
+    </div>
+
   );
 }
