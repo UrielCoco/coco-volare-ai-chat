@@ -55,7 +55,7 @@ export default function Messages({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
-            className="mx-auto my-10 max-w-xl text-center text-sm md:text-base 
+            className="mx-auto my-20 max-w-xl text-center text-sm md:text-base 
                        rounded-xl border border-white/10 bg-white/5 
                        px-4 py-3 backdrop-blur"
           >
