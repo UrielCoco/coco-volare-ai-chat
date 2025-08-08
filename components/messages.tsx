@@ -44,6 +44,7 @@ export default function Messages({
       style={{
         maxHeight: 'calc(100vh - 200px)',
         paddingBottom: 'var(--composer-h)', // usar altura real del composer
+        paddingTop: 'env(safe-area-inset-top)', // ← evita quedar bajo la barra de estado
       }}
     >
       {/* 📌 Placeholder inicial */}
