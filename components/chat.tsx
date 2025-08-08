@@ -82,7 +82,7 @@ export default function Chat() {
 
   return (
     <div
-      className="relative flex flex-col w-full min-h-screen mx-auto bg-white dark:bg-zinc-900"
+      className="relative flex flex-col w-full min-h-[100dvh] mx-auto bg-white dark:bg-zinc-900"
       style={{ ['--composer-h' as any]: `${composerH}px` }} // variable CSS
     >
       {/* Área de conversación: ocupa todo el alto disponible y hace scroll interno */}
