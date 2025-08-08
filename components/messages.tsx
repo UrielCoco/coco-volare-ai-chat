@@ -40,11 +40,9 @@ export default function Messages({
   return (
     <div
       ref={messagesRef}
-      className="flex flex-col  px-4 pt-4 w-full overflow-y-auto py-4 gap-3 md:gap-4" //   overflow-y-auto
+      className="flex flex-col flex-1 px-4 pt-4 w-full overflow-y-auto gap-3 md:gap-4"
       style={{
-        maxHeight: 'calc(100vh - 200px)',
-        paddingBottom: 'var(--composer-h)', // usar altura real del composer
-        
+        paddingBottom: 'var(--composer-h)', // igual a la altura real del composer
       }}
     >
       {/* 📌 Placeholder inicial */}
@@ -56,9 +54,7 @@ export default function Messages({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.2 }}
-            className="mx-auto my-20 max-w-xl text-center text-sm md:text-base 
-                       rounded-xl  
-                       px-4 py-3 backdrop-blur" // border border-white/10 bg-white/5 backdrop-blur
+            className="mx-auto my-20 max-w-xl text-center text-sm md:text-base rounded-xl px-4 py-3 backdrop-blur"
           >
             <p className="font-medium">¡Coco Volare!</p>
             <p className="font-small">Intelligence</p>
@@ -101,7 +97,7 @@ export default function Messages({
         })}
       </AnimatePresence>
 
-      {/* ✨ Indicador de "escribiendo…" (aparece solo cuando hay mensajes y está cargando) */}
+      {/* ✨ Indicador de "escribiendo…" */}
       <AnimatePresence>
         {isLoading && messages.length > 0 && (
           <motion.div
@@ -114,14 +110,12 @@ export default function Messages({
           >
             <div className="flex gap-4 w-full">
               {/* Avatar igual que en message.tsx */}
-              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
-                <div className="translate-y-px">
-                  <img
-                    src="../images/thinking.gif"
-                    alt="..."
-                    className="w-full h-full object-cover"
-                  />
-                </div>
+              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
+                <img
+                  src="../images/thinking.gif"
+                  alt="..."
+                  className="w-full h-full object-cover"
+                />
               </div>
 
               {/* Burbuja de puntos */}
@@ -134,8 +128,6 @@ export default function Messages({
           </motion.div>
         )}
       </AnimatePresence>
-
-
 
       {/* ✅ Ancla de scroll */}
       <div ref={scrollAnchorRef} />
