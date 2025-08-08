@@ -61,7 +61,7 @@ export default function Messages({
             <p className="mt-1 opacity-90">
               Hello! / ¡Hola!
               <div className="flex justify-center py-4">
-                <img src="../images/thinking.gif" alt="..." className="w-40 h-40" />
+                <img src="../images/thinking.gif" alt="..." className="w-40 h-40 opacity-80" />
               </div>
             </p>
           </motion.div>
