@@ -110,16 +110,29 @@ export default function Messages({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.2 }}
-            className="chat-message self-start max-w-[80%] md:max-w-[70%]"
+            className="w-full mx-auto max-w-3xl px-4 group/message"
           >
-            <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
-              <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
-              <span className="animate-bounce">•</span>
-              <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+            <div className="flex gap-4 w-full">
+              {/* Avatar igual que en message.tsx */}
+              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
+                <div className="translate-y-px">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M8 0a8 8 0 1 0 8 8A8 8 0 0 0 8 0Z"/>
+                  </svg>
+                </div>
+              </div>
+
+              {/* Burbuja de puntos */}
+              <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
+                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+                <span className="animate-bounce">•</span>
+                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+              </div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+
 
 
       {/* ✅ Ancla de scroll */}
