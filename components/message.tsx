@@ -1,4 +1,3 @@
-
 'use client';
 
 import cx from 'classnames';
@@ -66,7 +65,7 @@ const PurePreviewMessage = ({
           {message.role === 'assistant' && (
             <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
               <img
-                src="../images/thinking.gif"   // usa la misma ruta que ya te funciona
+                src="../images/thinking.gif"   
                 alt="Coco Volare"
                 className="w-full h-full object-cover"
               />
@@ -96,8 +95,6 @@ const PurePreviewMessage = ({
             {message.parts.map((part, index) => {
               const { type } = part;
               const key = `message-${message.id}-part-${index}`;
-
-
 
               if (type === 'text' && part.text && typeof part.text === 'string') {
                 return (
@@ -137,14 +134,17 @@ const PurePreviewMessage = ({
               return null;
             })}
 
+            {/* Ocultamos las acciones visualmente sin alterar lógica */}
             {!isReadonly && (
-              <MessageActions
-                key={`action-${message.id}`}
-                chatId={chatId}
-                message={message}
-                vote={vote}
-                isLoading={isLoading}
-              />
+              <div className="hidden" aria-hidden>
+                <MessageActions
+                  key={`action-${message.id}`}
+                  chatId={chatId}
+                  message={message}
+                  vote={vote}
+                  isLoading={isLoading}
+                />
+              </div>
             )}
           </div>
         </div>
