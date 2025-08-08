@@ -43,6 +43,28 @@ export default function Messages({
       className="flex flex-col gap-3 md:gap-4 py-4 pb-24 px-4 overflow-y-auto w-full"
       style={{ maxHeight: 'calc(100vh - 200px)' }}
     >
+      {/* 📌 Placeholder inicial */}
+      <AnimatePresence>
+        {messages.length === 0 && !isLoading && (
+          <motion.div
+            key="initial-placeholder"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.2 }}
+            className="mx-auto my-10 max-w-xl text-center text-sm md:text-base 
+                       rounded-xl border border-white/10 bg-white/5 
+                       px-4 py-3 backdrop-blur"
+          >
+            <p className="font-medium">¡Bienvenido a Coco Volare!</p>
+            <p className="mt-1 opacity-80">
+              Escribe tu primer mensaje para iniciar la conversación.
+              Estoy listo para ayudarte a planear un viaje privado, de grupo o de negocios.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence mode="popLayout">
         {messages.map((message) => {
           const vote = votes.find((v) => v.messageId === message.id);
