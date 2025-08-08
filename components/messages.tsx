@@ -61,8 +61,11 @@ export default function Messages({
           >
             <p className="font-medium">¡Coco Volare!</p>
             <p className="font-medium">Intelligence</p>
-            <img src="../images/thinking.gif" alt="..." className="p-4 opacity-100" />
-            
+            <img
+              src="../images/thinking.gif"
+              alt="..."
+              className="block mx-auto w-1/3 h-auto p-4 opacity-100"
+            />
           </motion.div>
         )}
       </AnimatePresence>
