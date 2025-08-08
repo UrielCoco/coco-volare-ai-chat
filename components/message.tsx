@@ -98,7 +98,7 @@ const PurePreviewMessage = ({
               if (message.role === 'assistant' && isLoading) {
                 return (
                   <div key={key} className="flex justify-center py-4">
-                    <img src="../images/thinking.gif" alt="..." className="w-12 h-12 opacity-100" />
+                    <img src="../images/thinking.gif" alt="..." className="p-10 opacity-100" />
                   </div>
                 );
               }
