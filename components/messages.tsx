@@ -61,7 +61,7 @@ export default function Messages({
           >
             <p className="font-medium">¡Coco Volare!</p>
             <p className="font-medium">Intelligence</p>
-            <img src="../images/thinking.gif" alt="..." className="w-12 h-12 opacity-100" />
+            <img src="../images/thinking.gif" alt="..." className="w-30 h-30 opacity-100" />
             
           </motion.div>
         )}
