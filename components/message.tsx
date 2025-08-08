@@ -95,8 +95,7 @@ const PurePreviewMessage = ({
               const { type } = part;
               const key = `message-${message.id}-part-${index}`;
 
-              
-              }
+
 
 
 
