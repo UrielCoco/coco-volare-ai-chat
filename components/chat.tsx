@@ -79,6 +79,8 @@ export default function Chat() {
         />
       </div>
 
+
+
       <form
         onSubmit={handleSubmit}
         className="fixed bottom-0 left-0 right-0 w-full  mx-auto bg-black p-4 sm:p-9 border-t border-gray-200 dark:border-zinc-700 flex gap-3 items-center z-50"
