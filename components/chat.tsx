@@ -16,13 +16,13 @@ export default function Chat() {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96); // fallback por defecto
 
-  // ✅ Medición segura del alto del composer (no truena si falta ResizeObserver)
+  // ✅ Medición segura del alto del composer
   useEffect(() => {
     const el = formRef.current;
     if (!el) return;
 
     const update = () => setComposerH(el.offsetHeight || 96);
-    update(); // primera medición
+    update();
 
     let ro: ResizeObserver | null = null;
     try {
@@ -42,7 +42,7 @@ export default function Chat() {
     };
   }, []);
 
-  // ✅ Envío robusto que no revienta si el middleware devuelve HTML/redirect
+  // ✅ Envío del mensaje
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -67,14 +67,12 @@ export default function Chat() {
         }),
       });
 
-      // Si el middleware redirige (login, etc.), no intentes parsear JSON
       if (response.redirected) {
         const txt = await response.text();
         throw new Error(`Redirigido a: ${response.url} :: ${txt.slice(0, 120)}…`);
       }
 
       const ct = response.headers.get('content-type') || '';
-
       if (!response.ok) {
         const errText = ct.includes('application/json')
           ? JSON.stringify(await response.json())
@@ -110,10 +108,10 @@ export default function Chat() {
 
   return (
     <div
-      className="relative flex flex-col w-full min-h-[100dvh] mx-auto bg-white dark:bg-zinc-900"
-      style={{ ['--composer-h' as any]: `${composerH}px` }} // variable CSS
+      className="relative flex flex-col w-full min-h-[100dvh] mx-auto bg-transparent dark:bg-transparent"
+      style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
-      {/* Área de conversación: ocupa todo el alto disponible y hace scroll interno */}
+      {/* Área de conversación */}
       <div className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth">
         <Messages
           messages={messages}
