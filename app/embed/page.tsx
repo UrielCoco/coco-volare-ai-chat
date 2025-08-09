@@ -1,4 +1,4 @@
-// app/_embed/page.tsx
+// app/embed/page.tsx
 'use client';
 
 // ⬅️ opción A: si tu Chat está en /components/chat.tsx
