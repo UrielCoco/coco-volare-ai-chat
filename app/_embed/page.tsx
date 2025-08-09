@@ -2,7 +2,7 @@
 'use client';
 
 // ⬅️ opción A: si tu Chat está en /components/chat.tsx
-import Chat from '../../components/chat';
+import Chat from '@/components/chat';
 
 // ⬅️ opción B: si tu Chat está en /app/chat.tsx (poco común)
 /// import Chat from '@/app/chat';
