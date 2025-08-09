@@ -1,7 +1,5 @@
 // app/_embed/layout.tsx
-export const metadata = {
-  title: 'Coco Volare · Chat (Embed)',
-};
+export const metadata = { title: 'Coco Volare · Chat (Embed)' };
 
 export default function EmbedLayout({ children }: { children: React.ReactNode }) {
   return (
