@@ -16,23 +16,33 @@ export default function Chat() {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96); // fallback por defecto
 
+  // ✅ Medición segura del alto del composer (no truena si falta ResizeObserver)
   useEffect(() => {
-    if (!formRef.current) return;
     const el = formRef.current;
+    if (!el) return;
 
-    const update = () => setComposerH(el.offsetHeight);
+    const update = () => setComposerH(el.offsetHeight || 96);
     update(); // primera medición
 
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
+    let ro: ResizeObserver | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
+        ro = new ResizeObserver(() => {
+          try { update(); } catch {}
+        });
+        ro.observe(el);
+      }
+    } catch {}
+
     window.addEventListener('resize', update);
 
     return () => {
-      ro.disconnect();
+      try { ro && ro.disconnect(); } catch {}
       window.removeEventListener('resize', update);
     };
   }, []);
 
+  // ✅ Envío robusto que no revienta si el middleware devuelve HTML/redirect
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -50,14 +60,32 @@ export default function Chat() {
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: { role: 'user', parts: [{ text: input }] },
+          message: { role: 'user', parts: [{ text: userMessage.parts[0].text }] },
           selectedChatModel: 'gpt-4o',
         }),
-        headers: { 'Content-Type': 'application/json' },
       });
 
-      if (!response.ok) throw new Error('Error fetching response');
+      // Si el middleware redirige (login, etc.), no intentes parsear JSON
+      if (response.redirected) {
+        const txt = await response.text();
+        throw new Error(`Redirigido a: ${response.url} :: ${txt.slice(0, 120)}…`);
+      }
+
+      const ct = response.headers.get('content-type') || '';
+
+      if (!response.ok) {
+        const errText = ct.includes('application/json')
+          ? JSON.stringify(await response.json())
+          : await response.text();
+        throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+      }
+
+      if (!ct.includes('application/json')) {
+        const text = await response.text();
+        throw new Error(`Respuesta no-JSON: ${text.slice(0, 200)}`);
+      }
 
       const data = await response.json();
 
@@ -70,7 +98,7 @@ export default function Chat() {
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
       console.error('Error sending message:', error);
-      alert('Hubo un error al enviar el mensaje.');
+      alert('No se pudo enviar el mensaje. Intenta de nuevo.');
     } finally {
       setLoading(false);
     }

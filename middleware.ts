@@ -58,6 +58,7 @@ export const runtime = 'nodejs';
 // ⛑️ Importante: ya no metemos /api/:path* en el matcher para que NINGUNA API pase por el middleware.
 // (Si prefieres mantenerlo, no hay problema porque arriba whitelisteamos /api/chat.)
 export const config = {
+  
   matcher: [
     '/',
     '/chat/:id',
