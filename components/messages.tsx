@@ -56,7 +56,7 @@ export default function Messages({
             transition={{ duration: 0.2 }}
             className="mx-auto my-20 max-w-xl text-center text-sm md:text-base rounded-xl px-4 py-3 backdrop-blur"
           >
-            <p className="font-medium">¡Coco Volare!</p>
+            <p className="font-medium">Coco Volare</p>
             <p className="font-small">Intelligence</p>
             <img
               src="../images/thinking.gif"
