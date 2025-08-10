@@ -112,13 +112,7 @@ export default function Chat() {
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
       {/* Área de conversación */}
-      <div
-        className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{
-          // Reserva espacio real para el composer + safe area (iOS)
-          paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-        }}
-      >
+      <div className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
@@ -130,36 +124,27 @@ export default function Chat() {
         />
       </div>
 
-      {/* Barra del composer: negra con blur, y responsiva */}
-      <div
-        className="fixed inset-x-0 bottom-0 z-50 supports-[backdrop-filter]:backdrop-blur-md bg-black/70 dark:bg-black/70"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      <form
+        ref={formRef}
+        onSubmit={handleSubmit}
+        className="fixed bottom-0 left-0 right-0 w-full mx-auto bg-black border-t border-transparent dark:border-transparent flex p-4 sm:p-9 gap-3 items-center z-50"
       >
-        <div className="mx-auto max-w-3xl px-3 sm:px-4 pb-3 sm:pb-4">
-          <form
-            ref={formRef}
-            onSubmit={handleSubmit}
-            className="w-full flex items-center gap-2 sm:gap-3"
-          >
-            <input
-              ref={inputRef}
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="..."
-              className="min-w-0 flex-1 px-4 sm:px-5 py-3 rounded-full border border-gray-700 bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
-            />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="flex-shrink-0 grid place-items-center rounded-full h-11 w-11 sm:h-12 sm:w-12 bg-white text-black hover:bg-gray-100 transition-colors duration-300 disabled:opacity-50"
-              aria-label="Enviar"
-            >
-              {loading ? '...' : <PaperPlaneIcon className="w-5 h-5" />}
-            </button>
-          </form>
-        </div>
-      </div>
+        <input
+          ref={inputRef}
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="..."
+          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-white/70 dark:bg-white/70 text-black dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
+        />
+        <button
+          type="submit"
+          disabled={loading || !input.trim()}
+          className="bg-white text-black hover:bg-gray-100 transition-colors duration-300 rounded-full p-3 disabled:opacity-50"
+        >
+          {loading ? '...' : <PaperPlaneIcon className="w-5 h-5" />}
+        </button>
+      </form>
     </div>
   );
 }
