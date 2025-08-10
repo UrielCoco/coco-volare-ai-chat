@@ -29,20 +29,29 @@ export default function Messages({
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
 
+  // Usamos la misma constante en todos lados para evitar desajustes
+  const SPACER = 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 20px)';
+
   const toBottom = () => {
     const anchor = anchorRef.current;
     const el = scrollRef.current;
-    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    if (el) el.scrollTop = el.scrollHeight; // fallback duro
+    if (anchor) {
+      // Respeta scrollPaddingBottom
+      anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+    if (el) {
+      // Fallback duro por si el smooth se interrumpe
+      el.scrollTop = el.scrollHeight;
+    }
   };
 
-  // 🔽 Baja cuando llega un mensaje nuevo o cambia el loading
+  // Baja cuando cambia el número de mensajes o el estado de carga
   useLayoutEffect(() => {
     const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
     return () => cancelAnimationFrame(id);
   }, [messages.length, isLoading]);
 
-  // 🔽 Baja mientras el contenido crece (typewriter/markdown)
+  // Baja mientras el contenido crece (typewriter/markdown)
   useEffect(() => {
     const root = scrollRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
@@ -63,10 +72,10 @@ export default function Messages({
       ref={scrollRef}
       className="flex flex-col flex-1 px-4 pt-4 w-full overflow-y-auto gap-3 md:gap-4"
       style={{
-        // reserva espacio para que nada quede debajo del form fijo
-        paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-        // hace que scrollIntoView respete ese espacio
-        scrollPaddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
+        // Reserva espacio para que nada quede detrás del form fijo
+        paddingBottom: SPACER,
+        // Hace que scrollIntoView deje holgura al fondo
+        scrollPaddingBottom: SPACER,
       }}
     >
       {/* Placeholder inicial (opcional) */}
@@ -101,6 +110,8 @@ export default function Messages({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
               transition={{ duration: 0.3 }}
+              // Si algún día haces scrollIntoView del propio mensaje, esto evita que quede debajo del form
+              style={{ scrollMarginBottom: SPACER }}
             >
               <PreviewMessage
                 key={message.id}
@@ -118,7 +129,7 @@ export default function Messages({
         })}
       </AnimatePresence>
 
-      {/* ✨ Indicador de "pensando…" — con margen para no quedar debajo del form */}
+      {/* Indicador "pensando…" con margen para no quedar oculto */}
       <AnimatePresence>
         {isLoading && messages.length > 0 && (
           <motion.div
@@ -128,13 +139,11 @@ export default function Messages({
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.2 }}
             className="w-full mx-auto max-w-3xl px-4 group/message mb-3"
-            style={{
-              marginBottom: 'max(12px, calc(env(safe-area-inset-bottom)))',
-            }}
+            style={{ marginBottom: `max(12px, env(safe-area-inset-bottom))`, scrollMarginBottom: SPACER }}
           >
             <div className="flex gap-4 w-full">
               <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
-                <img src="../images/thinking.gif" alt="..." className="w-full h-full object-cover" />
+                <img src="../images/Intelligence.gif" alt="..." className="w-full h-full object-cover" />
               </div>
               <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
                 <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
@@ -146,7 +155,10 @@ export default function Messages({
         )}
       </AnimatePresence>
 
-      {/* Ancla de scroll */}
+      {/* Spacer real al fondo para garantizar holgura visual */}
+      <div style={{ height: SPACER }} />
+
+      {/* Ancla de scroll (el target del scrollIntoView) */}
       <div ref={anchorRef} style={{ height: 1 }} />
     </div>
   );
