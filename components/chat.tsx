@@ -135,7 +135,7 @@ export default function Chat() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="..."
-          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
+          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-white/70 dark:bg-white/70 text-black dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
         />
         <button
           type="submit"
