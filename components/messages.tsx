@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { PreviewMessage } from './message';
 import type { ChatMessage } from '@/lib/types';
@@ -29,20 +29,53 @@ export default function Messages({
   const messagesRef = useRef<HTMLDivElement>(null);
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
 
-  // ✅ Autoscroll suave al final
-  useEffect(() => {
+  // 🔽 Función central para bajar al final
+  const scrollToBottom = () => {
     const anchor = scrollAnchorRef.current;
-    if (anchor) {
-      anchor.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages, isLoading]);
+    const parent = messagesRef.current;
+    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (parent) parent.scrollTop = parent.scrollHeight;
+  };
+
+  // ✅ Autoscroll al añadir mensajes / cambiar loading
+  useLayoutEffect(() => {
+    const raf = requestAnimationFrame(() => setTimeout(scrollToBottom, 0));
+    return () => cancelAnimationFrame(raf);
+  }, [messages.length, isLoading]);
+
+  // ✅ Observa cambios en DOM (streaming / typewriter) y baja
+  useEffect(() => {
+    const root = messagesRef.current;
+    if (!root || typeof MutationObserver === 'undefined') return;
+
+    let rafId: number | null = null;
+    const onMutate = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(scrollToBottom);
+    };
+
+    const mo = new MutationObserver(onMutate);
+    mo.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    return () => {
+      mo.disconnect();
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, []);
 
   return (
     <div
       ref={messagesRef}
       className="flex flex-col flex-1 px-4 pt-4 w-full overflow-y-auto gap-3 md:gap-4"
       style={{
-        paddingBottom: 'var(--composer-h)', // igual a la altura real del composer
+        // Reserva el espacio del composer + safe area
+        paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
+        // Para que scrollIntoView respete el espacio del composer
+        scrollPaddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
       }}
     >
       {/* 📌 Placeholder inicial */}
@@ -57,7 +90,6 @@ export default function Messages({
             className="mx-auto my-20 max-w-xl text-center text-sm md:text-base rounded-xl px-4 py-3 backdrop-blur"
           >
             <p className="font-medium">www.CocoVolare.com</p>
-            
             <img
               src="../images/Texts.gif"
               alt="..."
@@ -97,40 +129,8 @@ export default function Messages({
         })}
       </AnimatePresence>
 
-      {/* ✨ Indicador de "escribiendo…" */}
-      <AnimatePresence>
-        {isLoading && messages.length > 0 && (
-          <motion.div
-            key="typing-indicator"
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.2 }}
-            className="w-full mx-auto max-w-3xl px-4 group/message"
-          >
-            <div className="flex gap-4 w-full">
-              {/* Avatar igual que en message.tsx */}
-              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
-                <img
-                  src="../images/Intelligence.gif"
-                  alt="..."
-                  className="w-full h-full object-cover"
-                />
-              </div>
-
-              {/* Burbuja de puntos */}
-              <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
-                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
-                <span className="animate-bounce">•</span>
-                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* ✅ Ancla de scroll */}
-      <div ref={scrollAnchorRef} />
+      <div ref={scrollAnchorRef} style={{ height: 1 }} />
     </div>
   );
 }
