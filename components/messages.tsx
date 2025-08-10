@@ -1,136 +1,77 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import cx from 'classnames';
 import { AnimatePresence, motion } from 'framer-motion';
-import { PreviewMessage } from './message';
-import type { ChatMessage } from '@/lib/types';
+import { memo, useState, useEffect } from 'react';
 import type { Vote } from '@/lib/db/schema';
-import type { UseChatHelpers } from '@ai-sdk/react';
+import { DocumentToolCall, DocumentToolResult } from './document';
+import { PencilEditIcon, SparklesIcon } from './icons';
+import { Markdown } from './markdown';
+import { MessageActions } from './message-actions';
+import { PreviewAttachment } from './preview-attachment';
+import { Weather } from './weather';
+import equal from 'fast-deep-equal';
+import { cn, sanitizeText } from '@/lib/utils';
+import { Button } from './ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
-interface Props {
-  messages: ChatMessage[];
-  isLoading: boolean;
-  votes: Vote[];
-  setMessages: UseChatHelpers<ChatMessage>['setMessages'];
-  regenerate: UseChatHelpers<ChatMessage>['regenerate'];
-  isReadonly: boolean;
-  chatId: string;
+/* .......................... resto de imports y código existente .......................... */
+
+// Simple typewriter component for assistant messages
+function TypewriterText({ text, speed = 15 }: { text: string; speed?: number }) {
+  const [len, setLen] = useState(0);
+
+  useEffect(() => {
+    setLen(0);
+  }, [text]);
+
+  useEffect(() => {
+    if (!text) return;
+    // Reveal quickly: ~speed ms per char
+    const step = () => setLen((prev) => (prev < text.length ? prev + 1 : prev));
+    const id = setInterval(step, Math.max(5, speed));
+    return () => clearInterval(id);
+  }, [text, speed]);
+
+  return <>{text.slice(0, len)}</>;
 }
 
-export default function Messages({
-  messages,
-  isLoading,
-  votes,
-  setMessages,
-  regenerate,
-  isReadonly,
-  chatId,
-}: Props) {
-  const messagesRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<HTMLDivElement>(null);
-
-  // ✅ Autoscroll suave al final
-  useEffect(() => {
-    const anchor = scrollAnchorRef.current;
-    if (anchor) {
-      anchor.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages, isLoading]);
+/* ------------------------------ PurePreviewMessage ------------------------------ */
+const PurePreviewMessage = (/* tus props existentes aquí */) => {
+  /* ... todo tu código previo sin cambios ... */
 
   return (
+    /* ... dentro del mapeo de parts, localiza el bloque del bubble ... */
     <div
-      ref={messagesRef}
-      className="flex flex-col flex-1 px-4 pt-4 w-full overflow-y-auto gap-3 md:gap-4"
-      style={{
-        paddingBottom: 'var(--composer-h)', // igual a la altura real del composer
-      }}
+      className={cx(
+        'flex flex-col gap-4 px-4 py-3 rounded-2xl shadow-md leading-relaxed',
+        {
+          'bg-[#c5a970] text-white rounded-br-none': message.role === 'user',
+          'bg-[#000000] text-white rounded-bl-none': message.role === 'assistant',
+        }
+      )}
     >
-      {/* 📌 Placeholder inicial */}
-      <AnimatePresence>
-        {messages.length === 0 && !isLoading && (
-          <motion.div
-            key="initial-placeholder"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.2 }}
-            className="mx-auto my-20 max-w-xl text-center text-sm md:text-base rounded-xl px-4 py-3 backdrop-blur"
-          >
-            <p className="font-medium">www.CocoVolare.com</p>
-            
-            <img
-              src="../images/Texts.gif"
-              alt="..."
-              className="block mx-auto w-2/3 h-auto p-4 opacity-100"
-            />
-            <p className="font-medium"></p>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence mode="popLayout">
-        {messages.map((message) => {
-          const vote = votes.find((v) => v.messageId === message.id);
-
-          return (
-            <motion.div
-              key={message.id}
-              className="chat-message"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              transition={{ duration: 0.3 }}
-            >
-              <PreviewMessage
-                key={message.id}
-                message={message}
-                chatId={chatId}
-                vote={vote}
-                isLoading={isLoading}
-                setMessages={setMessages}
-                regenerate={regenerate}
-                isReadonly={isReadonly}
-                requiresScrollPadding={false}
-              />
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
-
-      {/* ✨ Indicador de "escribiendo…" */}
-      <AnimatePresence>
-        {isLoading && messages.length > 0 && (
-          <motion.div
-            key="typing-indicator"
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.2 }}
-            className="w-full mx-auto max-w-3xl px-4 group/message"
-          >
-            <div className="flex gap-4 w-full">
-              {/* Avatar igual que en message.tsx */}
-              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
-                <img
-                  src="../images/thinking.gif"
-                  alt="..."
-                  className="w-full h-full object-cover"
-                />
-              </div>
-
-              {/* Burbuja de puntos */}
-              <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
-                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
-                <span className="animate-bounce">•</span>
-                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ✅ Ancla de scroll */}
-      <div ref={scrollAnchorRef} />
+      {message.role === 'assistant' ? (
+        <Markdown>
+          <TypewriterText text={sanitizeText(part.text)} speed={12} />
+        </Markdown>
+      ) : (
+        <Markdown>{sanitizeText(part.text)}</Markdown>
+      )}
     </div>
+    /* ... resto del render ... */
   );
-}
+};
+
+/* ------------------------------ memo export ------------------------------ */
+export const PreviewMessage = memo(
+  PurePreviewMessage,
+  (prevProps, nextProps) => {
+    if (prevProps.isLoading !== nextProps.isLoading) return false;
+    if (prevProps.message.id !== nextProps.message.id) return false;
+    if (prevProps.requiresScrollPadding !== nextProps.requiresScrollPadding) return false;
+    if (!equal(prevProps.message.parts, nextProps.message.parts)) return false;
+    if (!equal(prevProps.vote, nextProps.vote)) return false;
+    return true;
+  },
+);
