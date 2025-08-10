@@ -115,7 +115,7 @@ export default function Chat() {
       <div
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{
-          // Reserva espacio para el composer + safe area (iOS)
+          // Reserva espacio real para el composer + safe area (iOS)
           paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
         }}
       >
@@ -130,16 +130,16 @@ export default function Chat() {
         />
       </div>
 
-      {/* Composer fijo, adaptado a pantallas pequeñas */}
+      {/* Barra del composer: negra con blur, y responsiva */}
       <div
-        className="fixed inset-x-0 bottom-0 z-50 bg-transparent"
+        className="fixed inset-x-0 bottom-0 z-50 supports-[backdrop-filter]:backdrop-blur-md bg-black/70 dark:bg-black/70"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div className="mx-auto max-w-3xl px-3 sm:px-4 pb-3 sm:pb-4">
           <form
             ref={formRef}
             onSubmit={handleSubmit}
-            className="w-full flex items-center gap-2 sm:gap-3 bg-transparent"
+            className="w-full flex items-center gap-2 sm:gap-3"
           >
             <input
               ref={inputRef}
