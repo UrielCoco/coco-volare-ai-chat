@@ -112,7 +112,13 @@ export default function Chat() {
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
       {/* Área de conversación */}
-      <div className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth">
+      <div
+        className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
+        style={{
+          // Reserva espacio para el composer + safe area (iOS)
+          paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
+        }}
+      >
         <Messages
           messages={messages}
           isLoading={loading}
