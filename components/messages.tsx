@@ -59,9 +59,9 @@ export default function Messages({
             <p className="font-medium">Coco Volare</p>
             <p className="font-small">Intelligence</p>
             <img
-              src="../images/thinking.gif"
+              src="../images/Texts.gif"
               alt="..."
-              className="block mx-auto w-1/3 h-auto p-4 opacity-100"
+              className="block mx-auto w-2/3 h-auto p-4 opacity-100"
             />
             <p className="font-medium">www.CocoVolare.com</p>
           </motion.div>
