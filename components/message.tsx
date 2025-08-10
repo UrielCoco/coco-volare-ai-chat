@@ -2,7 +2,7 @@
 
 import cx from 'classnames';
 import { AnimatePresence, motion } from 'framer-motion';
-import { memo, useState } from 'react';
+import { memo, useState, useEffect } from 'react';
 import type { Vote } from '@/lib/db/schema';
 import { DocumentToolCall, DocumentToolResult } from './document';
 import { PencilEditIcon, SparklesIcon } from './icons';
@@ -20,6 +20,27 @@ import { MessageReasoning } from './message-reasoning';
 import type { UseChatHelpers } from '@ai-sdk/react';
 import type { ChatMessage } from '@/lib/types';
 import { useDataStream } from './data-stream-provider';
+
+/* ---------- Typewriter minimal y rápido (solo assistant) ---------- */
+function TypewriterText({ text, speed = 12 }: { text: string; speed?: number }) {
+  const [len, setLen] = useState(0);
+
+  // Reinicia cada vez que cambia el texto
+  useEffect(() => {
+    setLen(0);
+  }, [text]);
+
+  // Revela ~1 char cada `speed` ms (rápido y fluido)
+  useEffect(() => {
+    if (!text) return;
+    const id = setInterval(() => {
+      setLen((n) => (n < text.length ? n + 1 : n));
+    }, Math.max(5, speed));
+    return () => clearInterval(id);
+  }, [text, speed]);
+
+  return <>{text.slice(0, len)}</>;
+}
 
 const PurePreviewMessage = ({
   chatId,
@@ -125,7 +146,13 @@ const PurePreviewMessage = ({
                         }
                       )}
                     >
-                      <Markdown>{sanitizeText(part.text)}</Markdown>
+                      {message.role === 'assistant' ? (
+                        <Markdown>
+                          <TypewriterText text={sanitizeText(part.text)} speed={40} />
+                        </Markdown>
+                      ) : (
+                        <Markdown>{sanitizeText(part.text)}</Markdown>
+                      )}
                     </div>
                   </div>
                 );
