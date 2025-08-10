@@ -110,7 +110,7 @@ export default function Chat() {
   }, []);
 
   // Constante para reservar espacio y para scrollPadding (coherente con la altura medida)
-  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 12px)`;
+  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8 px)`;
 
   return (
     <div
