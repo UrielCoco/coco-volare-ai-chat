@@ -112,15 +112,7 @@ export default function Chat() {
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
       {/* Área de conversación */}
-      <div
-        className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{
-          // 🔽 Reserva espacio para que el último mensaje nunca quede detrás del form
-          paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-          // 🔽 Hace que scrollIntoView respete ese espacio
-          scrollPaddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-        }}
-      >
+      <div className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
@@ -136,7 +128,6 @@ export default function Chat() {
         ref={formRef}
         onSubmit={handleSubmit}
         className="fixed bottom-0 left-0 right-0 w-full mx-auto bg-black border-t border-transparent dark:border-transparent flex p-4 sm:p-9 gap-3 items-center z-50"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <input
           ref={inputRef}
