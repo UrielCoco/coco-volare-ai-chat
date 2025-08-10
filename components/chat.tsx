@@ -112,13 +112,7 @@ export default function Chat() {
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
       {/* Área de conversación */}
-      <div
-        className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{
-          // Reserva espacio real para el composer + safe area (iPad/iPhone)
-          paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom))',
-        }}
-      >
+      <div className="flex-1 overflow-y-auto px-0 py-0 scroll-smooth">
         <Messages
           messages={messages}
           isLoading={loading}
@@ -130,9 +124,9 @@ export default function Chat() {
         />
       </div>
 
-      {/* Composer sticky (no fixed) para evitar bugs de iPad con barras inferiores */}
+      {/* Composer fijo, adaptado a pantallas pequeñas */}
       <div
-        className="sticky bottom-0 z-[99999] bg-transparent"
+        className="fixed inset-x-0 bottom-0 z-50 bg-transparent"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div className="mx-auto max-w-3xl px-3 sm:px-4 pb-3 sm:pb-4">
