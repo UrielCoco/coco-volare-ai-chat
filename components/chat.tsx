@@ -134,8 +134,8 @@ export default function Chat() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Escribe tu mensaje..."
-          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-zinc-900 text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
+          placeholder="..."
+          className="flex-1 px-5 py-3 rounded-full border border-gray-700 bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300"
         />
         <button
           type="submit"
