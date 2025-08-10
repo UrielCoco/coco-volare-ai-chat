@@ -26,59 +26,50 @@ export default function Messages({
   isReadonly,
   chatId,
 }: Props) {
-  const messagesRef = useRef<HTMLDivElement>(null);
-  const scrollAnchorRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
 
-  // 🔽 Función central para bajar al final
-  const scrollToBottom = () => {
-    const anchor = scrollAnchorRef.current;
-    const parent = messagesRef.current;
+  const toBottom = () => {
+    const anchor = anchorRef.current;
+    const el = scrollRef.current;
     if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    if (parent) parent.scrollTop = parent.scrollHeight;
+    if (el) el.scrollTop = el.scrollHeight; // fallback duro
   };
 
-  // ✅ Autoscroll al añadir mensajes / cambiar loading
+  // 🔽 Baja cuando llega un mensaje nuevo o cambia el loading
   useLayoutEffect(() => {
-    const raf = requestAnimationFrame(() => setTimeout(scrollToBottom, 0));
-    return () => cancelAnimationFrame(raf);
+    const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
+    return () => cancelAnimationFrame(id);
   }, [messages.length, isLoading]);
 
-  // ✅ Observa cambios en DOM (streaming / typewriter) y baja
+  // 🔽 Baja mientras el contenido crece (typewriter/markdown)
   useEffect(() => {
-    const root = messagesRef.current;
+    const root = scrollRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
-
-    let rafId: number | null = null;
-    const onMutate = () => {
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(scrollToBottom);
-    };
-
-    const mo = new MutationObserver(onMutate);
-    mo.observe(root, {
-      childList: true,
-      subtree: true,
-      characterData: true,
+    let raf: number | null = null;
+    const mo = new MutationObserver(() => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(toBottom);
     });
-
+    mo.observe(root, { childList: true, subtree: true, characterData: true });
     return () => {
       mo.disconnect();
-      if (rafId) cancelAnimationFrame(rafId);
+      if (raf) cancelAnimationFrame(raf);
     };
   }, []);
 
   return (
     <div
-      ref={messagesRef}
+      ref={scrollRef}
       className="flex flex-col flex-1 px-4 pt-4 w-full overflow-y-auto gap-3 md:gap-4"
       style={{
-        // Reserva el espacio del composer + safe area
+        // reserva espacio para que nada quede debajo del form fijo
         paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-        // Para que scrollIntoView respete el espacio del composer
+        // hace que scrollIntoView respete ese espacio
         scrollPaddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
       }}
     >
-      {/* 📌 Placeholder inicial */}
+      {/* Placeholder inicial (opcional) */}
       <AnimatePresence>
         {messages.length === 0 && !isLoading && (
           <motion.div
@@ -95,7 +86,6 @@ export default function Messages({
               alt="..."
               className="block mx-auto w-2/3 h-auto p-4 opacity-100"
             />
-            <p className="font-medium"></p>
           </motion.div>
         )}
       </AnimatePresence>
@@ -103,7 +93,6 @@ export default function Messages({
       <AnimatePresence mode="popLayout">
         {messages.map((message) => {
           const vote = votes.find((v) => v.messageId === message.id);
-
           return (
             <motion.div
               key={message.id}
@@ -129,8 +118,36 @@ export default function Messages({
         })}
       </AnimatePresence>
 
-      {/* ✅ Ancla de scroll */}
-      <div ref={scrollAnchorRef} style={{ height: 1 }} />
+      {/* ✨ Indicador de "pensando…" — con margen para no quedar debajo del form */}
+      <AnimatePresence>
+        {isLoading && messages.length > 0 && (
+          <motion.div
+            key="typing-indicator"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
+            className="w-full mx-auto max-w-3xl px-4 group/message mb-3"
+            style={{
+              marginBottom: 'max(12px, calc(env(safe-area-inset-bottom)))',
+            }}
+          >
+            <div className="flex gap-4 w-full">
+              <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
+                <img src="../images/thinking.gif" alt="..." className="w-full h-full object-cover" />
+              </div>
+              <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
+                <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+                <span className="animate-bounce">•</span>
+                <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Ancla de scroll */}
+      <div ref={anchorRef} style={{ height: 1 }} />
     </div>
   );
 }
