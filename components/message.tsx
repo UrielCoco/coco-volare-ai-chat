@@ -21,16 +21,14 @@ import type { UseChatHelpers } from '@ai-sdk/react';
 import type { ChatMessage } from '@/lib/types';
 import { useDataStream } from './data-stream-provider';
 
-/* ---------- Typewriter minimal y rápido (solo assistant) ---------- */
-function TypewriterText({ text, speed = 12 }: { text: string; speed?: number }) {
+/* ---------- Hook: devuelve STRING para cumplir con <Markdown>{string}</Markdown> ---------- */
+function useTypewriter(text: string, speed = 12) {
   const [len, setLen] = useState(0);
 
-  // Reinicia cada vez que cambia el texto
   useEffect(() => {
     setLen(0);
   }, [text]);
 
-  // Revela ~1 char cada `speed` ms (rápido y fluido)
   useEffect(() => {
     if (!text) return;
     const id = setInterval(() => {
@@ -39,7 +37,13 @@ function TypewriterText({ text, speed = 12 }: { text: string; speed?: number }) 
     return () => clearInterval(id);
   }, [text, speed]);
 
-  return <>{text.slice(0, len)}</>;
+  return text.slice(0, len); // ← SIEMPRE string
+}
+
+/* ---------- Wrapper: usa el hook y pasa STRING a Markdown ---------- */
+function AssistantMarkdown({ text, speed = 20 }: { text: string; speed?: number }) {
+  const typed = useTypewriter(text, speed);
+  return <Markdown>{typed}</Markdown>;
 }
 
 const PurePreviewMessage = ({
@@ -86,7 +90,7 @@ const PurePreviewMessage = ({
           {message.role === 'assistant' && (
             <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
               <img
-                src="../images/thinking.gif"   
+                src="../images/thinking.gif"
                 alt="Coco Volare"
                 className="w-full h-full object-cover"
               />
@@ -118,6 +122,8 @@ const PurePreviewMessage = ({
               const key = `message-${message.id}-part-${index}`;
 
               if (type === 'text' && part.text && typeof part.text === 'string') {
+                const safe = sanitizeText(part.text);
+
                 return (
                   <div key={key} className="flex flex-row gap-2 items-start">
                     {message.role === 'user' && !isReadonly && (
@@ -147,11 +153,10 @@ const PurePreviewMessage = ({
                       )}
                     >
                       {message.role === 'assistant' ? (
-                        <Markdown>
-                          <TypewriterText text={sanitizeText(part.text)} speed={40} />
-                        </Markdown>
+                        // 👇 Aquí ya pasamos STRING a Markdown (no ReactNode)
+                        <AssistantMarkdown text={safe} speed={20} />
                       ) : (
-                        <Markdown>{sanitizeText(part.text)}</Markdown>
+                        <Markdown>{safe}</Markdown>
                       )}
                     </div>
                   </div>
