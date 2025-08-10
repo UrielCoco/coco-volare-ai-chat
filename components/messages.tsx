@@ -56,14 +56,14 @@ export default function Messages({
             transition={{ duration: 0.2 }}
             className="mx-auto my-20 max-w-xl text-center text-sm md:text-base rounded-xl px-4 py-3 backdrop-blur"
           >
-            <p className="font-medium">Coco Volare</p>
-            <p className="font-small">Intelligence</p>
+            <p className="font-medium">www.CocoVolare.com</p>
+            
             <img
               src="../images/Texts.gif"
               alt="..."
               className="block mx-auto w-2/3 h-auto p-4 opacity-100"
             />
-            <p className="font-medium">www.CocoVolare.com</p>
+            <p className="font-medium"></p>
           </motion.div>
         )}
       </AnimatePresence>
