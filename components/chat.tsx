@@ -12,13 +12,15 @@ export default function Chat() {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // 🔹 Ref y estado para medir altura del composer
-  const formRef = useRef<HTMLFormElement | null>(null);
+  // 🔹 Refs
+  const formRef = useRef<HTMLFormElement | null>(null);           // para submit/focus
+  const composerRef = useRef<HTMLDivElement | null>(null);        // para medir altura real (incluye paddings)
+
   const [composerH, setComposerH] = useState<number>(96); // fallback por defecto
 
-  // ✅ Medición segura del alto del composer
+  // ✅ Medición segura del alto del composer (wrapper con paddings)
   useEffect(() => {
-    const el = formRef.current;
+    const el = composerRef.current;
     if (!el) return;
 
     const update = () => setComposerH(el.offsetHeight || 96);
@@ -34,11 +36,12 @@ export default function Chat() {
       }
     } catch {}
 
-    window.addEventListener('resize', update);
+    const onResize = () => update();
+    window.addEventListener('resize', onResize);
 
     return () => {
       try { ro && ro.disconnect(); } catch {}
-      window.removeEventListener('resize', update);
+      window.removeEventListener('resize', onResize);
     };
   }, []);
 
@@ -106,6 +109,9 @@ export default function Chat() {
     inputRef.current?.focus();
   }, []);
 
+  // Constante para reservar espacio y para scrollPadding (coherente con la altura medida)
+  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 12px)`;
+
   return (
     <div
       className="relative flex flex-col w-full min-h-[100dvh] mx-auto bg-transparent dark:bg-transparent"
@@ -115,10 +121,8 @@ export default function Chat() {
       <div
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{
-          // Reserva espacio para que el último mensaje nunca quede debajo del form
-          paddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
-          // Hace que scrollIntoView respete ese espacio
-          scrollPaddingBottom: 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 12px)',
+          paddingBottom: SPACER,          // reserva real para que nada quede debajo del form
+          scrollPaddingBottom: SPACER,    // scrollIntoView respeta la holgura
         }}
       >
         <Messages
@@ -132,12 +136,15 @@ export default function Chat() {
         />
       </div>
 
-      {/* Composer fijo, 100% responsivo */}
+      {/* Barra del composer: negra con padding simétrico y responsivo */}
       <div
         className="fixed inset-x-0 bottom-0 z-50 bg-black"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        <div className="mx-auto max-w-3xl px-2 sm:px-4 pb-2 sm:pb-4">
+        <div
+          ref={composerRef}
+          className="mx-auto max-w-3xl px-2 sm:px-4 py-2 sm:py-4"
+        >
           <form
             ref={formRef}
             onSubmit={handleSubmit}
@@ -149,7 +156,7 @@ export default function Chat() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="..."
-              // 🔑 Responsivo: no se corta ni empuja al botón
+              // Responsivo: no se corta ni empuja al botón
               className="min-w-0 flex-1 px-3 sm:px-5 py-3 rounded-full border border-gray-700
                          bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500
                          focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300
@@ -159,7 +166,7 @@ export default function Chat() {
             <button
               type="submit"
               disabled={loading || !input.trim()}
-              // 🔑 Responsivo: tamaños por breakpoint, no se aplasta
+              // Responsivo: tamaños por breakpoint, no se aplasta
               className="flex-shrink-0 grid place-items-center rounded-full
                          h-10 w-10 sm:h-11 sm:w-11 md:h-12 md:w-12
                          bg-white text-black hover:bg-gray-100 transition-colors duration-300 disabled:opacity-50"
