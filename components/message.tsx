@@ -90,7 +90,7 @@ const PurePreviewMessage = ({
           {message.role === 'assistant' && (
             <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965]">
               <img
-                src="../images/thinking.gif"
+                src="../images/Intelligence.gif"
                 alt="Coco Volare"
                 className="w-full h-full object-cover"
               />
