@@ -1,28 +1,82 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
+// Ejecuta en runtime Node (no edge) para evitar límites de fetch/etc.
 export const runtime = "nodejs";
 
-function trace() { return `b${Date.now().toString(36)}${Math.floor(Math.random()*1e6).toString(36)}`; }
+/** Genera un traceId y/o usa el que mande el HUB para correlacionar logs */
+function traceIdFrom(body?: any) {
+  return (body?.traceId && String(body.traceId)) || `b${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const SYSTEM =
   "Eres el asistente de Coco Volare. Responde breve, claro y en español mexicano. Si falta contexto, pide datos puntuales.";
 
-export async function POST(req: NextRequest) {
-  const tid = trace();
-  try {
-    const body = await req.json().catch(() => ({} as any));
-    const message: string = String(body?.message || "").trim();
+/** Log unificado similar al HUB para depurar en Vercel */
+function log(level: "info" | "error", msg: string, meta: any, tid: string) {
+  console.log(JSON.stringify({ time: new Date().toISOString(), level, traceId: tid, msg, meta }));
+}
 
-    console.log(JSON.stringify({ time: new Date().toISOString(), level: "info", traceId: tid, msg: "assistant:recv", meta: { messagePreview: message.slice(0,160) } }));
+/** Parsea JSON o x-www-form-urlencoded por si algún caller raro lo manda así */
+async function parseBody(req: NextRequest): Promise<any> {
+  const ct = req.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    try {
+      return await req.json();
+    } catch {}
+  }
+  if (ct.includes("application/x-www-form-urlencoded")) {
+    const form = await req.formData();
+    return Object.fromEntries(form.entries());
+  }
+  // Fallback
+  try {
+    return await req.json();
+  } catch {
+    return {};
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const body = await parseBody(req);
+  const tid = traceIdFrom(body);
+
+  try {
+    const message: string = String(
+      body?.message ??
+        body?.text ??
+        body?.user_message ??
+        ""
+    ).trim();
+
+    const leadId = body?.leadId ?? body?.lead_id;
+    const contactId = body?.contactId ?? body?.contact_id;
+
+    log("info", "assistant:recv", {
+      messagePreview: message.slice(0, 160),
+      leadId: leadId || null,
+      contactId: contactId || null,
+    }, tid);
 
     if (!message) {
       return NextResponse.json({ error: "message requerido" }, { status: 400 });
     }
 
+    // Si no hay API key, regresamos un fallback útil para no romper el flujo durante pruebas.
+    const apiKey = process.env.OPENAI_API_KEY;
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    if (!apiKey) {
+      const fallback =
+        `Te entendí: "${message}". ¿Quieres cotización, reservar o conocer disponibilidad?`;
+      log("info", "assistant:reply", { replyPreview: fallback.slice(0, 160), mode: "fallback" }, tid);
+      return NextResponse.json({ reply: fallback, leadId, contactId, traceId: tid });
+    }
+
+    const openai = new OpenAI({ apiKey });
+
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model,
       temperature: 0.6,
       messages: [
         { role: "system", content: SYSTEM },
@@ -31,13 +85,18 @@ export async function POST(req: NextRequest) {
     });
 
     const reply =
-      completion.choices?.[0]?.message?.content?.toString().trim() || "Listo, ¿algo más?";
+      completion.choices?.[0]?.message?.content?.toString().trim() ||
+      "Listo, ¿algo más?";
 
-    console.log(JSON.stringify({ time: new Date().toISOString(), level: "info", traceId: tid, msg: "assistant:reply", meta: { replyPreview: reply.slice(0,160) } }));
+    log("info", "assistant:reply", { replyPreview: reply.slice(0, 160), model }, tid);
 
-    return NextResponse.json({ reply });
+    // Respuesta esperada por el HUB: { reply, ... }
+    return NextResponse.json({ reply, leadId, contactId, traceId: tid });
   } catch (e: any) {
-    console.log(JSON.stringify({ time: new Date().toISOString(), level: "error", traceId: tid, msg: "assistant:error", meta: { err: e?.message || String(e) } }));
-    return NextResponse.json({ error: "server error" }, { status: 500 });
+    log("error", "assistant:error", { err: e?.message || String(e) }, tid);
+    return NextResponse.json(
+      { reply: "Tuve un detalle técnico, pero ya estoy revisando. ¿Podrías explicarlo de otra forma?" },
+      { status: 200 }
+    );
   }
 }
