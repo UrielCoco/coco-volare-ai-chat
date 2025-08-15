@@ -12,6 +12,8 @@ export default function Chat() {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+
+
   // 🔹 Refs
   const formRef = useRef<HTMLFormElement | null>(null);           // para submit/focus
   const composerRef = useRef<HTMLDivElement | null>(null);        // para medir altura real (incluye paddings)
