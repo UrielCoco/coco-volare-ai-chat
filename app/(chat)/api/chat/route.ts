@@ -13,7 +13,7 @@ let dbLoaded = true;
 let db: any, webSessionThread: any, eq: any;
 try {
   log('loading DB module…');
-  const mod = await import('@/lib/db'); // NO cambies esta ruta
+  const mod = await import('@/lib/db');
   db = mod.db;
   webSessionThread = mod.webSessionThread;
   eq = (await import('drizzle-orm')).eq;
@@ -28,9 +28,16 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || '';
 const CHANNEL        = 'web-embed';
 
+function openaiHeaders() {
+  return {
+    Authorization: `Bearer ${OPENAI_API_KEY}`,
+    'Content-Type': 'application/json',
+    'OpenAI-Beta': 'assistants=v2', // 👈 REQUERIDO
+  };
+}
+
 // --------- pickMessage SUPER TOLERANTE ----------
 function extractFromRichContent(arr: any[]): string | undefined {
-  // Busca elementos con estructura típica {type:'text', text:'...'} ó { text:'...' } ó { value:'...' }
   for (const it of arr) {
     if (!it) continue;
     if (typeof it === 'string' && it.trim()) return it.trim();
@@ -45,27 +52,20 @@ function pickMessage(body: any): string | undefined {
   if (!body) return undefined;
   if (typeof body === 'string') return body;
 
-  // 1) campos directos
   const direct = body.message ?? body.input ?? body.content ?? body.text ?? body.prompt;
   if (typeof direct === 'string' && direct.trim()) return direct.trim();
 
-  // 2) message como objeto
   if (direct && typeof direct === 'object') {
-    // message.text / message.content (string)
     if (typeof direct.text === 'string' && direct.text.trim()) return direct.text.trim();
     if (typeof direct.content === 'string' && direct.content.trim()) return direct.content.trim();
-
-    // message.content como array enriquecido
     if (Array.isArray(direct.content)) {
       const t = extractFromRichContent(direct.content);
       if (t) return t;
     }
-    // message.parts como array
     if (Array.isArray(direct.parts)) {
       const t = extractFromRichContent(direct.parts);
       if (t) return t;
     }
-    // message.messages (algunas libs anidan)
     if (Array.isArray(direct.messages)) {
       const lastUser = [...direct.messages].reverse().find((m) => m?.role === 'user');
       if (lastUser?.content) {
@@ -78,7 +78,6 @@ function pickMessage(body: any): string | undefined {
     }
   }
 
-  // 3) payload estilo { messages: [...] }
   if (Array.isArray(body.messages)) {
     const lastUser = [...body.messages].reverse().find((m) => m?.role === 'user');
     if (lastUser?.content) {
@@ -90,7 +89,6 @@ function pickMessage(body: any): string | undefined {
     }
   }
 
-  // 4) payload estilo { parts: [...] } a nivel raíz
   if (Array.isArray(body.parts)) {
     const t = extractFromRichContent(body.parts);
     if (t) return t;
@@ -104,10 +102,7 @@ async function createAssistantThread(): Promise<string> {
   log('createAssistantThread: calling OpenAI…');
   const res = await fetch('https://api.openai.com/v1/threads', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: openaiHeaders(),
     body: JSON.stringify({}),
   });
   const txt = await res.text();
@@ -152,10 +147,7 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   log('runAssistant: sending user message…');
   const msgRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: openaiHeaders(),
     body: JSON.stringify({ role: 'user', content: userMessage }),
   });
   const msgTxt = await msgRes.text();
@@ -165,10 +157,7 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   log('runAssistant: creating run…');
   const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: openaiHeaders(),
     body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
   });
   const runTxt = await runRes.text();
@@ -180,7 +169,7 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   for (let i = 0; i < 60; i++) {
     const statusRes = await fetch(
       `https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`,
-      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
+      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'assistants=v2' } } // 👈 poll sólo necesita auth+beta
     );
     const statusTxt = await statusRes.text();
     const status = JSON.parse(statusTxt);
@@ -195,7 +184,7 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   log('runAssistant: fetching last assistant message…');
   const msgsRes = await fetch(
     `https://api.openai.com/v1/threads/${threadId}/messages?limit=10&order=desc`,
-    { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
+    { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'assistants=v2' } } // 👈 auth+beta
   );
   const msgsTxt = await msgsRes.text();
   log('runAssistant: list messages status=', msgsRes.status, 'body=', msgsTxt.slice(0, 200));
@@ -213,7 +202,6 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   return reply;
 }
 
-// --------- handler ----------
 export async function POST(req: NextRequest) {
   try {
     log('START');
@@ -236,15 +224,10 @@ export async function POST(req: NextRequest) {
     try { body = await req.json(); } catch {}
     log('incoming body keys=', Object.keys(body || {}));
 
-    // LOG extra del shape de message
     if (body?.message) {
-      log(
-        'body.message typeof=', typeof body.message,
-        'keys=', typeof body.message === 'object' ? Object.keys(body.message) : 'n/a'
-      );
-      if (Array.isArray(body?.message?.content)) {
-        log('body.message.content is array len=', body.message.content.length);
-      }
+      log('body.message typeof=', typeof body.message, 'keys=', typeof body.message === 'object' ? Object.keys(body.message) : 'n/a');
+      if (Array.isArray(body?.message?.content)) log('body.message.content len=', body.message.content.length);
+      if (Array.isArray(body?.message?.parts)) log('body.message.parts len=', body.message.parts.length);
     }
 
     const message = pickMessage(body);

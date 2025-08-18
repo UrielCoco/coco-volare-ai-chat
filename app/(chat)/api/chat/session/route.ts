@@ -13,7 +13,7 @@ let dbLoaded = true;
 let db: any, webSessionThread: any, eq: any;
 try {
   log('loading DB module…');
-  const mod = await import('@/lib/db'); // NO cambies esta ruta
+  const mod = await import('@/lib/db');
   db = mod.db;
   webSessionThread = mod.webSessionThread;
   eq = (await import('drizzle-orm')).eq;
@@ -27,14 +27,19 @@ try {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const CHANNEL = 'web-embed';
 
+function openaiHeaders() {
+  return {
+    Authorization: `Bearer ${OPENAI_API_KEY}`,
+    'Content-Type': 'application/json',
+    'OpenAI-Beta': 'assistants=v2', // 👈 REQUERIDO
+  };
+}
+
 async function createAssistantThread(): Promise<string> {
   log('createAssistantThread: calling OpenAI…');
   const res = await fetch('https://api.openai.com/v1/threads', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: openaiHeaders(),
     body: JSON.stringify({}),
   });
   const txt = await res.text();
@@ -60,7 +65,6 @@ export async function GET(_req: NextRequest) {
     const { sessionId } = getOrSetSessionId();
     log('sessionId=', sessionId);
 
-    // Sin DB: crea y responde
     if (!dbLoaded) {
       const threadId = await createAssistantThread();
       log('NO-DB path: returning threadId=', threadId);
@@ -70,7 +74,6 @@ export async function GET(_req: NextRequest) {
       );
     }
 
-    // Con DB
     try {
       log('DB path: searching existing mapping…');
       const rows = await db.select().from(webSessionThread).where(eq(webSessionThread.sessionId, sessionId));
@@ -91,11 +94,11 @@ export async function GET(_req: NextRequest) {
         createdAt: now,
         updatedAt: now,
       });
+
       log('DB path: inserted mapping for sessionId.');
       return NextResponse.json({ sessionId, threadId }, { status: 200 });
     } catch (dbErr: any) {
       err('DB path ERROR:', String(dbErr?.message || dbErr));
-      // fallback sin DB
       const threadId = await createAssistantThread();
       log('DB path fallback: returning threadId=', threadId);
       return new NextResponse(
