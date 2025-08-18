@@ -2,6 +2,7 @@
 
 import Chat from '@/components/chat';
 import { useEffect } from 'react';
+import InitThread from './InitThread';
 
 export default function EmbedPage() {
   useEffect(() => {
@@ -24,6 +25,8 @@ export default function EmbedPage() {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'transparent' }}>
+      {/* Inicializa cookie + threadId sin tocar tu UI */}
+      <InitThread />
       <Chat />
     </div>
   );

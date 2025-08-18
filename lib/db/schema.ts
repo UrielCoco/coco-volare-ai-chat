@@ -11,14 +11,19 @@ import {
   boolean,
 } from 'drizzle-orm/pg-core';
 
+/* =========================
+   Usuarios
+========================= */
 export const user = pgTable('User', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
   email: varchar('email', { length: 64 }).notNull(),
   password: varchar('password', { length: 64 }),
 });
-
 export type User = InferSelectModel<typeof user>;
 
+/* =========================
+   Chats
+========================= */
 export const chat = pgTable('Chat', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
   createdAt: timestamp('createdAt').notNull(),
@@ -30,11 +35,11 @@ export const chat = pgTable('Chat', {
     .notNull()
     .default('private'),
 });
-
 export type Chat = InferSelectModel<typeof chat>;
 
-// DEPRECATED: The following schema is deprecated and will be removed in the future.
-// Read the migration guide at https://chat-sdk.dev/docs/migration-guides/message-parts
+/* =========================
+   Mensajes (DEPRECATED)
+========================= */
 export const messageDeprecated = pgTable('Message', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
   chatId: uuid('chatId')
@@ -44,9 +49,11 @@ export const messageDeprecated = pgTable('Message', {
   content: json('content').notNull(),
   createdAt: timestamp('createdAt').notNull(),
 });
-
 export type MessageDeprecated = InferSelectModel<typeof messageDeprecated>;
 
+/* =========================
+   Mensajes v2 (vigente)
+========================= */
 export const message = pgTable('Message_v2', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
   chatId: uuid('chatId')
@@ -57,11 +64,11 @@ export const message = pgTable('Message_v2', {
   attachments: json('attachments').notNull(),
   createdAt: timestamp('createdAt').notNull(),
 });
-
 export type DBMessage = InferSelectModel<typeof message>;
 
-// DEPRECATED: The following schema is deprecated and will be removed in the future.
-// Read the migration guide at https://chat-sdk.dev/docs/migration-guides/message-parts
+/* =========================
+   Votes (DEPRECATED)
+========================= */
 export const voteDeprecated = pgTable(
   'Vote',
   {
@@ -79,9 +86,11 @@ export const voteDeprecated = pgTable(
     };
   },
 );
-
 export type VoteDeprecated = InferSelectModel<typeof voteDeprecated>;
 
+/* =========================
+   Votes v2 (vigente)
+========================= */
 export const vote = pgTable(
   'Vote_v2',
   {
@@ -99,9 +108,11 @@ export const vote = pgTable(
     };
   },
 );
-
 export type Vote = InferSelectModel<typeof vote>;
 
+/* =========================
+   Documentos
+========================= */
 export const document = pgTable(
   'Document',
   {
@@ -122,9 +133,11 @@ export const document = pgTable(
     };
   },
 );
-
 export type Document = InferSelectModel<typeof document>;
 
+/* =========================
+   Sugerencias
+========================= */
 export const suggestion = pgTable(
   'Suggestion',
   {
@@ -148,9 +161,11 @@ export const suggestion = pgTable(
     }),
   }),
 );
-
 export type Suggestion = InferSelectModel<typeof suggestion>;
 
+/* =========================
+   Streams
+========================= */
 export const stream = pgTable(
   'Stream',
   {
@@ -166,5 +181,17 @@ export const stream = pgTable(
     }),
   }),
 );
-
 export type Stream = InferSelectModel<typeof stream>;
+
+/* =========================
+   NUEVO: Mapeo sesión-web ↔ thread del Assistant
+========================= */
+export const webSessionThread = pgTable('WebSessionThread', {
+  sessionId: uuid('sessionId').primaryKey().notNull(),          // cookie cv_sid
+  threadId: varchar('threadId', { length: 128 }).notNull(),     // OpenAI thread_id
+  channel: varchar('channel', { length: 32 }).notNull(),        // 'web-embed'
+  chatId: uuid('chatId'),
+  createdAt: timestamp('createdAt').notNull(),
+  updatedAt: timestamp('updatedAt').notNull(),
+});
+export type WebSessionThread = InferSelectModel<typeof webSessionThread>;
