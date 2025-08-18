@@ -8,7 +8,7 @@ if (!ASSISTANT_ID) throw new Error('OPENAI_ASSISTANT_ID/ASSISTANT_ID missing');
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ===== Memorias simples en proceso (por thread) =====
+// ===== Memorias por thread (proceso) =====
 type LeadMemo = { leadId?: number };
 const THREAD_LEAD: Map<string, LeadMemo> = (global as any).__cvThreadLead || new Map();
 (global as any).__cvThreadLead = THREAD_LEAD;
@@ -42,6 +42,34 @@ async function callHub(hubBaseUrl: string, hubSecret: string, payload: any) {
   return { ok: resp.ok, status: resp.status, json };
 }
 
+// ===== Asegurar lead (auto-create si falta) =====
+async function ensureLeadId(
+  threadId: string,
+  hubBaseUrl: string,
+  hubSecret: string,
+  hint?: { name?: string; notes?: string; price?: number }
+): Promise<number> {
+  const memo = THREAD_LEAD.get(threadId);
+  if (memo?.leadId) return memo.leadId!;
+
+  const name = (hint?.name && String(hint.name).trim()) || `Lead desde chat ${threadId.slice(-6)}`;
+  const notes = (hint?.notes && String(hint.notes).trim()) || 'Creado automáticamente para asociar contacto/notas';
+  const price = typeof hint?.price === 'number' ? hint!.price : 0;
+
+  const r = await callHub(hubBaseUrl, hubSecret, {
+    action: 'create-lead',
+    name,
+    price,
+    notes,
+    source: 'webchat',
+  });
+
+  const created = ensureNum(r?.json?.data?.lead_id);
+  if (!created) throw new Error(`No fue posible crear lead automáticamente (${r.status})`);
+  THREAD_LEAD.set(threadId, { leadId: created });
+  return created!;
+}
+
 // ===== Tool handlers =====
 async function handleKommoTool(
   name: string,
@@ -50,14 +78,8 @@ async function handleKommoTool(
   hubBaseUrl: string,
   hubSecret: string
 ) {
-  const leadMemo = THREAD_LEAD.get(threadId) || {};
-
-  // inyecta lead_id si ya lo tenemos
-  const withLead = (obj: any) => {
-    const lid = ensureNum(obj?.lead_id) || leadMemo.leadId;
-    if (lid) obj.lead_id = lid;
-    return obj;
-  };
+  // Normaliza args
+  const norm = (v: any) => (v === undefined || v === null ? undefined : v);
 
   if (name === 'kommo_create_lead') {
     const payload = {
@@ -74,32 +96,47 @@ async function handleKommoTool(
   }
 
   if (name === 'kommo_attach_contact') {
-    const payload = withLead({
+    // 🔒 Garantiza lead_id antes de enlazar contacto
+    const lead_id =
+      ensureNum(args?.lead_id) ||
+      (await ensureLeadId(threadId, hubBaseUrl, hubSecret, {
+        name: args?.name,
+        notes: `Auto-lead para contacto ${args?.name || ''} ${args?.email || ''} ${args?.phone || ''}`,
+      }));
+
+    const payload = {
       action: 'attach-contact',
-      lead_id: args?.lead_id,
-      name: args?.name,
-      email: args?.email,
-      phone: args?.phone,
-      notes: args?.notes || '',
-    });
+      lead_id,
+      name: norm(args?.name),
+      email: norm(args?.email),
+      phone: norm(args?.phone),
+      notes: norm(args?.notes) || undefined,
+    };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
   }
 
   if (name === 'kommo_add_note') {
-    const payload = withLead({
+    const lead_id =
+      ensureNum(args?.lead_id) ||
+      (await ensureLeadId(threadId, hubBaseUrl, hubSecret, { notes: 'Auto-lead para notas' }));
+
+    const payload = {
       action: 'add-note',
-      lead_id: args?.lead_id,
-      text: String(args?.text || '').slice(0, 15000),
-      // transcript lo mandamos aparte cuando aplique
-    });
+      lead_id,
+      text: String(args?.text || '').slice(1, 15000), // evita string vacío "232"
+    };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
   }
 
   if (name === 'kommo_attach_transcript') {
+    const lead_id =
+      ensureNum(args?.lead_id) ||
+      (await ensureLeadId(threadId, hubBaseUrl, hubSecret, { notes: 'Auto-lead para transcript' }));
+
     const transcript = getTranscript(threadId);
-    const payload = withLead({ action: 'attach-transcript', lead_id: args?.lead_id, transcript });
+    const payload = { action: 'attach-transcript', lead_id, transcript };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
   }
@@ -136,13 +173,10 @@ export async function runAssistantWithTools(
   });
   pushTranscript(threadId, 'User', userText);
 
-  // 3) Run + resolver tools
+  // 3) Run + resolver tools (firma SDK de tu proyecto)
   let toolEvents: Array<{ name: string; status: number; ok: boolean }> = [];
   let run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
 
-  // ⚠️ En tu versión del SDK:
-  // retrieve(runId, { thread_id })
-  // submitToolOutputs(runId, { thread_id, tool_outputs })
   while (true) {
     run = await openai.beta.threads.runs.retrieve(run.id, { thread_id: threadId });
 
@@ -156,13 +190,8 @@ export async function runAssistantWithTools(
         const name = call.function?.name as string;
         const args = JSON.parse(call.function?.arguments || '{}');
 
-        // Inyecta lead_id si lo tenemos
-        if (!args?.lead_id) {
-          const memo = THREAD_LEAD.get(threadId);
-          if (memo?.leadId) args.lead_id = memo.leadId;
-        }
-
-        const out = await handleKommoTool(name, args, threadId, opts.hubBaseUrl, opts.hubSecret).catch(
+        // Si assistant no mandó lead_id, lo resolvemos nosotros adentro de cada tool
+        const out = await handleKommoTool(name, args, threadId!, opts.hubBaseUrl, opts.hubSecret).catch(
           (e) => JSON.stringify({ ok: false, error: String(e?.message || e) })
         );
         outputs.push({ tool_call_id: call.id, output: out });
@@ -171,15 +200,17 @@ export async function runAssistantWithTools(
         try {
           const parsed = JSON.parse(out);
           toolEvents.push({ name, status: Number(parsed?.status || 200), ok: !!parsed?.ok });
-          const lid = ensureNum(parsed?.json?.data?.lead_id) || ensureNum(parsed?.data?.lead_id);
-          if (lid) THREAD_LEAD.set(threadId, { leadId: lid });
+          const lid =
+            ensureNum(parsed?.json?.data?.lead_id) ||
+            ensureNum(parsed?.data?.lead_id);
+          if (lid) THREAD_LEAD.set(threadId!, { leadId: lid });
         } catch {
           toolEvents.push({ name, status: 200, ok: true });
         }
       }
 
       await openai.beta.threads.runs.submitToolOutputs(run.id, {
-        thread_id: threadId,
+        thread_id: threadId!,
         tool_outputs: outputs,
       });
     }
@@ -192,18 +223,18 @@ export async function runAssistantWithTools(
   }
 
   // 4) Último mensaje del assistant
-  const list = await openai.beta.threads.messages.list(threadId, { order: 'desc', limit: 5 });
+  const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 5 });
   const first = list.data.find((m) => m.role === 'assistant');
   const reply =
     first?.content?.map((c: any) => ('text' in c ? c.text?.value : '')).join('\n').trim() || '';
 
-  if (reply) pushTranscript(threadId, 'Assistant', reply);
+  if (reply) pushTranscript(threadId!, 'Assistant', reply);
 
   // 5) Adjuntar transcripción si ya hay lead
-  const memo = THREAD_LEAD.get(threadId);
+  const memo = THREAD_LEAD.get(threadId!);
   if (memo?.leadId) {
     try {
-      const transcript = getTranscript(threadId);
+      const transcript = getTranscript(threadId!);
       if (transcript && transcript.length > 80) {
         await callHub(opts.hubBaseUrl, opts.hubSecret, {
           action: 'attach-transcript',
@@ -216,5 +247,5 @@ export async function runAssistantWithTools(
     }
   }
 
-  return { reply, threadId, toolEvents };
+  return { reply, threadId: threadId!, toolEvents };
 }
