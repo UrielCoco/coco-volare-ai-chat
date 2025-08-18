@@ -1,4 +1,3 @@
-// lib/ai/providers/openai-assistant.ts
 import OpenAI from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
@@ -52,11 +51,8 @@ function toolsSchema() {
         description: 'Agrega una nota de texto a un lead existente en Kommo.',
         parameters: {
           type: 'object',
-          properties: {
-            lead_id: { type: 'number' },
-            text: { type: 'string' },
-          },
-          required: ['lead_id', 'text'],
+          properties: { lead_id: { type: 'number' }, text: { type: 'string' } },
+          required: ['lead_id','text'],
         },
       },
     },
@@ -67,10 +63,7 @@ function toolsSchema() {
         description: 'Adjunta toda la conversación actual como notas al lead.',
         parameters: {
           type: 'object',
-          properties: {
-            lead_id: { type: 'number' },
-            title: { type: 'string' },
-          },
+          properties: { lead_id: { type: 'number' }, title: { type: 'string' } },
           required: ['lead_id'],
         },
       },
@@ -88,12 +81,10 @@ async function createThread() {
 }
 
 async function addUserMessage(threadId: string, content: string) {
-  // Firma estable: (threadId, { role, content })
   return messagesAny.create(threadId, { role: 'user', content });
 }
 
 async function createRun(threadId: string, params: { assistant_id: string; tools?: any[] }) {
-  // Soportar ambas firmas: (threadId, params) y ({ thread_id, ... })
   try {
     return await runsAny.create(threadId, params);
   } catch {
@@ -102,7 +93,6 @@ async function createRun(threadId: string, params: { assistant_id: string; tools
 }
 
 async function retrieveRun(threadId: string, runId: string) {
-  // Soportar (threadId, runId) y (runId, { thread_id })
   try {
     return await runsAny.retrieve(threadId, runId);
   } catch {
@@ -111,7 +101,6 @@ async function retrieveRun(threadId: string, runId: string) {
 }
 
 async function submitToolOutputs(threadId: string, runId: string, tool_outputs: any[]) {
-  // Soportar (threadId, runId, { tool_outputs }) y (runId, { thread_id, tool_outputs })
   try {
     return await runsAny.submitToolOutputs(threadId, runId, { tool_outputs });
   } catch {
@@ -120,20 +109,17 @@ async function submitToolOutputs(threadId: string, runId: string, tool_outputs: 
 }
 
 async function listMessages(threadId: string, limit = 100) {
-  // Firma estable: (threadId, { limit })
   return (openai as any).beta.threads.messages.list(threadId, { limit });
 }
 
-/** ---------- Utilidad: sacar texto seguro de mensajes ---------- */
+/** ---------- Utilidad: sacar texto seguro ---------- */
 function extractTextFromMessage(m: any): string {
   if (!m?.content) return '';
   const parts = Array.isArray(m.content) ? m.content : [];
   const texts: string[] = [];
   for (const p of parts) {
     if (!p || typeof p !== 'object') continue;
-    // Tipos más comunes
     if (p.type === 'text' && p.text?.value) texts.push(p.text.value);
-    // Algunos SDKs pueden exponer variantes:
     else if (p.type === 'input_text' && p.input_text?.value) texts.push(p.input_text.value);
     else if (p?.[p.type]?.text) texts.push(String(p[p.type].text));
   }
@@ -162,7 +148,7 @@ export async function runAssistantWithTools(
   // 3) Correr Assistant con tools
   let run = await createRun(threadId, { assistant_id: assistantId, tools: toolsSchema() });
 
-  // 4) Loop de estado
+  // 4) Loop
   while (true) {
     run = await retrieveRun(threadId, run.id);
 
@@ -178,15 +164,14 @@ export async function runAssistantWithTools(
 
         try {
           if (name === 'kommo_upsert') {
-            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo/upsert', args);
+            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo', { action: 'upsert', ...args });
             outputs.push({ tool_call_id: tc.id, output: JSON.stringify(result) });
 
           } else if (name === 'kommo_add_note') {
-            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo/add-note', args);
+            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo', { action: 'add-note', ...args });
             outputs.push({ tool_call_id: tc.id, output: JSON.stringify(result) });
 
           } else if (name === 'kommo_attach_transcript') {
-            // Transcript del thread
             const msgsRes = await listMessages(threadId, 100);
             const lines: string[] = [];
             const data = Array.isArray(msgsRes?.data) ? msgsRes.data : [];
@@ -197,7 +182,8 @@ export async function runAssistantWithTools(
             }
             const transcript = lines.join('\n\n');
 
-            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo/attach-transcript', {
+            const result = await callHub(hubBaseUrl, hubSecret, '/api/kommo', {
+              action: 'attach-transcript',
               lead_id: args?.lead_id,
               title: args?.title,
               transcript,
@@ -219,7 +205,7 @@ export async function runAssistantWithTools(
     if (['failed', 'cancelled', 'expired'].includes(run.status)) {
       throw new Error(`Run ${run.status}`);
     }
-  
+
     await new Promise((r) => setTimeout(r, 500));
   }
 
