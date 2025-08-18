@@ -14,6 +14,7 @@ try {
   dbLoaded = false;
 }
 
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID!;
 const CHANNEL        = 'web-embed';
