@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/* ---------- Helpers de compatibilidad con la API beta (idénticos a tu versión previa) ---------- */
+/* ---------- Helpers beta (compatibilidad) ---------- */
 const runsAny = (openai as any).beta.threads.runs;
 const messagesAny = (openai as any).beta.threads.messages;
 
@@ -36,7 +36,7 @@ function extractTextFromMessage(m: any): string {
 async function callHub(hubBaseUrl: string, secret: string, path: string, payload: any) {
   const base = hubBaseUrl.replace(/\/+$/, '');
   const u = new URL(base + path);
-  // fallback por query además del header
+  // fallback por query además del header (por si alguna CDN quita headers)
   if (secret) u.searchParams.set('secret', secret);
 
   const r = await fetch(u.toString(), {
@@ -49,21 +49,21 @@ async function callHub(hubBaseUrl: string, secret: string, path: string, payload
   return data;
 }
 
-/* ---------- TOOLS: orden que pediste ---------- */
+/* ---------- TOOLS (Lead primero → Contacto después) ---------- */
 function toolsSchema() {
   return [
     {
       type: 'function',
       function: {
         name: 'kommo_create_lead',
-        description: 'Crea un lead en Kommo SIN contacto. Úsalo cuando se identifica intención de compra o una oportunidad.',
+        description: 'Crea un lead en Kommo SIN contacto. Si no conoces pipeline/status exactos, NO los envíes.',
         parameters: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Nombre interno del lead (o usa algo descriptivo del viaje/consulta)' },
+            name: { type: 'string', description: 'Nombre del lead o descripción del viaje/consulta' },
             price: { type: 'number' },
-            pipeline_id: { type: 'number' },
-            status_id: { type: 'number' },
+            pipeline_id: { type: 'number', minimum: 1, description: 'ID de pipeline válido. Envíalo solo si estás seguro.' },
+            status_id: { type: 'number', minimum: 1, description: 'ID de estado válido. Envíalo solo si estás seguro.' },
             tags: { type: 'array', items: { type: 'string' } },
             source: { type: 'string' },
             notes: { type: 'string' },
@@ -76,14 +76,14 @@ function toolsSchema() {
       type: 'function',
       function: {
         name: 'kommo_update_lead',
-        description: 'Actualiza campos del lead existente (precio, etapa, tags, custom_fields) y opcionalmente agrega nota.',
+        description: 'Actualiza campos del lead (solo envía pipeline/status si conoces IDs válidos).',
         parameters: {
           type: 'object',
           properties: {
             lead_id: { type: 'number' },
             price: { type: 'number' },
-            pipeline_id: { type: 'number' },
-            status_id: { type: 'number' },
+            pipeline_id: { type: 'number', minimum: 1, description: 'ID de pipeline válido.' },
+            status_id: { type: 'number', minimum: 1, description: 'ID de estado válido.' },
             tags: { type: 'array', items: { type: 'string' } },
             custom_fields: { type: 'object' },
             notes: { type: 'string' }
