@@ -28,24 +28,78 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || '';
 const CHANNEL        = 'web-embed';
 
-// --------- helpers ----------
-function pickMessage(body: any): string | undefined {
-  if (!body) return undefined;
-  if (typeof body === 'string') return body;
-  const direct = body.message ?? body.input ?? body.content ?? body.text ?? body.prompt;
-  if (typeof direct === 'string' && direct.trim()) return direct.trim();
-  if (Array.isArray(body.parts) && body.parts.length) {
-    const f = body.parts[0];
-    const t = (f?.text ?? f?.content);
-    if (typeof t === 'string' && t.trim()) return t.trim();
-  }
-  if (Array.isArray(body.messages)) {
-    const lastUser = [...body.messages].reverse().find((m) => m?.role === 'user');
-    if (lastUser?.content && typeof lastUser.content === 'string') return lastUser.content.trim();
+// --------- pickMessage SUPER TOLERANTE ----------
+function extractFromRichContent(arr: any[]): string | undefined {
+  // Busca elementos con estructura típica {type:'text', text:'...'} ó { text:'...' } ó { value:'...' }
+  for (const it of arr) {
+    if (!it) continue;
+    if (typeof it === 'string' && it.trim()) return it.trim();
+    if (typeof it?.text === 'string' && it.text.trim()) return it.text.trim();
+    if (typeof it?.value === 'string' && it.value.trim()) return it.value.trim();
+    if (typeof it?.content === 'string' && it.content.trim()) return it.content.trim();
   }
   return undefined;
 }
 
+function pickMessage(body: any): string | undefined {
+  if (!body) return undefined;
+  if (typeof body === 'string') return body;
+
+  // 1) campos directos
+  const direct = body.message ?? body.input ?? body.content ?? body.text ?? body.prompt;
+  if (typeof direct === 'string' && direct.trim()) return direct.trim();
+
+  // 2) message como objeto
+  if (direct && typeof direct === 'object') {
+    // message.text / message.content (string)
+    if (typeof direct.text === 'string' && direct.text.trim()) return direct.text.trim();
+    if (typeof direct.content === 'string' && direct.content.trim()) return direct.content.trim();
+
+    // message.content como array enriquecido
+    if (Array.isArray(direct.content)) {
+      const t = extractFromRichContent(direct.content);
+      if (t) return t;
+    }
+    // message.parts como array
+    if (Array.isArray(direct.parts)) {
+      const t = extractFromRichContent(direct.parts);
+      if (t) return t;
+    }
+    // message.messages (algunas libs anidan)
+    if (Array.isArray(direct.messages)) {
+      const lastUser = [...direct.messages].reverse().find((m) => m?.role === 'user');
+      if (lastUser?.content) {
+        if (typeof lastUser.content === 'string' && lastUser.content.trim()) return lastUser.content.trim();
+        if (Array.isArray(lastUser.content)) {
+          const t = extractFromRichContent(lastUser.content);
+          if (t) return t;
+        }
+      }
+    }
+  }
+
+  // 3) payload estilo { messages: [...] }
+  if (Array.isArray(body.messages)) {
+    const lastUser = [...body.messages].reverse().find((m) => m?.role === 'user');
+    if (lastUser?.content) {
+      if (typeof lastUser.content === 'string' && lastUser.content.trim()) return lastUser.content.trim();
+      if (Array.isArray(lastUser.content)) {
+        const t = extractFromRichContent(lastUser.content);
+        if (t) return t;
+      }
+    }
+  }
+
+  // 4) payload estilo { parts: [...] } a nivel raíz
+  if (Array.isArray(body.parts)) {
+    const t = extractFromRichContent(body.parts);
+    if (t) return t;
+  }
+
+  return undefined;
+}
+
+// --------- OpenAI helpers ----------
 async function createAssistantThread(): Promise<string> {
   log('createAssistantThread: calling OpenAI…');
   const res = await fetch('https://api.openai.com/v1/threads', {
@@ -159,6 +213,7 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   return reply;
 }
 
+// --------- handler ----------
 export async function POST(req: NextRequest) {
   try {
     log('START');
@@ -181,11 +236,22 @@ export async function POST(req: NextRequest) {
     try { body = await req.json(); } catch {}
     log('incoming body keys=', Object.keys(body || {}));
 
+    // LOG extra del shape de message
+    if (body?.message) {
+      log(
+        'body.message typeof=', typeof body.message,
+        'keys=', typeof body.message === 'object' ? Object.keys(body.message) : 'n/a'
+      );
+      if (Array.isArray(body?.message?.content)) {
+        log('body.message.content is array len=', body.message.content.length);
+      }
+    }
+
     const message = pickMessage(body);
     log('message present=', !!message);
     if (!message) {
       return new NextResponse(
-        JSON.stringify({ error: 'message es requerido', detail: 'Accepted: message|input|content|text|prompt|parts[0].text|messages[].content' }),
+        JSON.stringify({ error: 'message es requerido', detail: 'Accepted: message{string|{text|content|parts}} | input | text | prompt | messages[]' }),
         { status: 400, headers: { 'content-type': 'application/json', 'x-cv-reason': 'missing-message' } }
       );
     }
