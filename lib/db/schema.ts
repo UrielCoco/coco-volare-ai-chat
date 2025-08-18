@@ -187,11 +187,15 @@ export type Stream = InferSelectModel<typeof stream>;
    NUEVO: Mapeo sesión-web ↔ thread del Assistant
 ========================= */
 export const webSessionThread = pgTable('WebSessionThread', {
-  sessionId: uuid('sessionId').primaryKey().notNull(),          // cookie cv_sid
-  threadId: varchar('threadId', { length: 128 }).notNull(),     // OpenAI thread_id
-  channel: varchar('channel', { length: 32 }).notNull(),        // 'web-embed'
+  sessionId: uuid('sessionId').primaryKey().notNull(),
+  threadId: varchar('threadId', { length: 128 }).notNull(),
+  channel: varchar('channel', { length: 32 }).notNull(),
   chatId: uuid('chatId'),
   createdAt: timestamp('createdAt').notNull(),
   updatedAt: timestamp('updatedAt').notNull(),
+
+  // 👇 NUEVO PARA KOMMO
+  kommoLeadId: varchar('kommoLeadId', { length: 64 }),
+  kommoContactId: varchar('kommoContactId', { length: 64 }),
 });
 export type WebSessionThread = InferSelectModel<typeof webSessionThread>;
