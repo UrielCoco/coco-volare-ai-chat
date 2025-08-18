@@ -3,7 +3,7 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrSetSessionId } from '@/lib/chat/cookies';
 
-// ⚠️ Usamos la DB si está disponible; si falla, seguimos sin romper el flujo.
+// Usamos la DB si está disponible; si falla, seguimos sin romper el flujo.
 let dbLoaded = true;
 let db: any, webSessionThread: any, eq: any;
 try {

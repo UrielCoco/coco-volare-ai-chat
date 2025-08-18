@@ -22,5 +22,5 @@ if (!globalForPg.__pgPool) globalForPg.__pgPool = pool;
 export const db = globalForPg.__drizzleDb || drizzle(pool);
 if (!globalForPg.__drizzleDb) globalForPg.__drizzleDb = db;
 
-// Re-exporta tus tablas/esquemas
-export * from '../db/schema'; // ajusta la ruta si tu schema está en otro lugar
+// ✅ CORRECCIÓN AQUÍ: re-export correcto del schema
+export * from './schema';
