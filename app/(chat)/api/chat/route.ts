@@ -2,45 +2,36 @@ export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrSetSessionId } from '@/lib/chat/cookies';
-import {
-  db,
-  webSessionThread,
-  type WebSessionThread as WebSessionThreadRow,
-} from '@/lib/db';
-import { eq } from 'drizzle-orm';
+
+let dbLoaded = true;
+let db: any, webSessionThread: any, eq: any;
+try {
+  const mod = await import('@/lib/db');
+  db = mod.db;
+  webSessionThread = mod.webSessionThread;
+  eq = (await import('drizzle-orm')).eq;
+} catch {
+  dbLoaded = false;
+}
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID!; // asst_...
+const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID!;
 const CHANNEL        = 'web-embed';
 
-// -------- helpers --------
 function pickMessage(body: any): string | undefined {
   if (!body) return undefined;
   if (typeof body === 'string') return body;
-  // nombres comunes
-  const direct =
-    body.message ??
-    body.input ??
-    body.content ??
-    body.text ??
-    body.prompt;
+  const direct = body.message ?? body.input ?? body.content ?? body.text ?? body.prompt;
   if (typeof direct === 'string' && direct.trim()) return direct.trim();
-
-  // SDKs que envían parts/attachments
   if (Array.isArray(body.parts) && body.parts.length) {
-    const first = body.parts[0];
-    if (first && typeof first === 'object') {
-      if (typeof first.text === 'string' && first.text.trim()) return first.text.trim();
-      if (typeof first.content === 'string' && first.content.trim()) return first.content.trim();
-    }
+    const f = body.parts[0];
+    const t = (f?.text ?? f?.content);
+    if (typeof t === 'string' && t.trim()) return t.trim();
   }
-
-  // chat payloads tipo { messages:[{role,content}] }
   if (Array.isArray(body.messages)) {
     const lastUser = [...body.messages].reverse().find((m) => m?.role === 'user');
     if (lastUser?.content && typeof lastUser.content === 'string') return lastUser.content.trim();
   }
-
   return undefined;
 }
 
@@ -58,26 +49,31 @@ async function createAssistantThread(): Promise<string> {
   return thData.id as string;
 }
 
-async function getOrCreateAssistantMap(sessionId: string): Promise<WebSessionThreadRow> {
-  const found = await db.select().from(webSessionThread).where(eq(webSessionThread.sessionId, sessionId));
-  if (found.length > 0) return found[0];
+async function getOrCreateThreadId(sessionId: string): Promise<string> {
+  if (!dbLoaded) return createAssistantThread();
 
-  const threadId = await createAssistantThread();
-  const now = new Date();
-  await db.insert(webSessionThread).values({
-    sessionId,
-    threadId,
-    channel: CHANNEL,
-    chatId: null,
-    createdAt: now,
-    updatedAt: now,
-  });
+  try {
+    const rows = await db.select().from(webSessionThread).where(eq(webSessionThread.sessionId, sessionId));
+    if (rows.length > 0) return rows[0].threadId;
 
-  return { sessionId, threadId, channel: CHANNEL, chatId: null, createdAt: now, updatedAt: now };
+    const threadId = await createAssistantThread();
+    const now = new Date();
+    await db.insert(webSessionThread).values({
+      sessionId,
+      threadId,
+      channel: CHANNEL,
+      chatId: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return threadId;
+  } catch {
+    // Falla DB ⇒ sigue
+    return createAssistantThread();
+  }
 }
 
 async function runAssistant(threadId: string, userMessage: string): Promise<string> {
-  // 1) mensaje del usuario
   const msgRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
     method: 'POST',
     headers: {
@@ -88,7 +84,6 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   });
   if (!msgRes.ok) throw new Error(`OpenAI add message failed: ${await msgRes.text()}`);
 
-  // 2) lanzar run
   const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
     method: 'POST',
     headers: {
@@ -100,7 +95,6 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   if (!runRes.ok) throw new Error(`OpenAI run failed: ${await runRes.text()}`);
   const run = await runRes.json();
 
-  // 3) poll simple
   for (let i = 0; i < 60; i++) {
     const statusRes = await fetch(
       `https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`,
@@ -114,7 +108,6 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
     await new Promise((r) => setTimeout(r, 1100));
   }
 
-  // 4) obtener última respuesta del assistant
   const msgsRes = await fetch(
     `https://api.openai.com/v1/threads/${threadId}/messages?limit=10&order=desc`,
     { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
@@ -132,11 +125,8 @@ async function runAssistant(threadId: string, userMessage: string): Promise<stri
   return reply;
 }
 
-// -------- handlers --------
-
 export async function POST(req: NextRequest) {
   try {
-    // ya no bloqueamos por PUBLIC_CHAT_MODE
     if (!OPENAI_API_KEY || !ASSISTANT_ID) {
       return new NextResponse(
         JSON.stringify({ error: 'Faltan OPENAI_API_KEY u OPENAI_ASSISTANT_ID' }),
@@ -145,11 +135,10 @@ export async function POST(req: NextRequest) {
     }
 
     const { sessionId } = getOrSetSessionId();
-
     let body: any = {};
     try { body = await req.json(); } catch {}
-    const message = pickMessage(body);
 
+    const message = pickMessage(body);
     if (!message) {
       return new NextResponse(
         JSON.stringify({ error: 'message es requerido', detail: 'Acepta message|input|content|text|prompt|parts[0].text' }),
@@ -157,28 +146,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // mapeo session → thread
-    let mapRow = await getOrCreateAssistantMap(sessionId);
+    let threadId = await getOrCreateThreadId(sessionId);
 
-    // si el cliente envía un threadId explícito, lo respetamos (si venía en el body)
+    // Si el cliente envía un threadId, úsalo y (si hay DB) persiste
     const incomingThreadId: string | undefined = body?.threadId;
-    if (incomingThreadId && incomingThreadId !== mapRow.threadId) {
-      const now = new Date();
-      await db
-        .update(webSessionThread)
-        .set({ threadId: incomingThreadId, updatedAt: now })
-        .where(eq(webSessionThread.sessionId, sessionId));
-      mapRow = { ...mapRow, threadId: incomingThreadId, updatedAt: now };
+    if (incomingThreadId && incomingThreadId !== threadId) {
+      threadId = incomingThreadId;
+      if (dbLoaded) {
+        try {
+          await db
+            .update(webSessionThread)
+            .set({ threadId, updatedAt: new Date() })
+            .where(eq(webSessionThread.sessionId, sessionId));
+        } catch {}
+      }
     }
 
-    const reply = await runAssistant(mapRow.threadId, message);
+    const reply = await runAssistant(threadId, message);
 
-    await db
-      .update(webSessionThread)
-      .set({ updatedAt: new Date() })
-      .where(eq(webSessionThread.sessionId, sessionId));
+    if (dbLoaded) {
+      try {
+        await db
+          .update(webSessionThread)
+          .set({ updatedAt: new Date() })
+          .where(eq(webSessionThread.sessionId, sessionId));
+      } catch {}
+    }
 
-    return NextResponse.json({ threadId: mapRow.threadId, reply }, { status: 200 });
+    return NextResponse.json({ threadId, reply }, { status: 200 });
   } catch (e: any) {
     console.error('CHAT API ERROR', e);
     return new NextResponse(
@@ -188,7 +183,6 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// (opcional) health-check rápido
 export async function GET() {
   return NextResponse.json({ ok: true }, { status: 200 });
 }
