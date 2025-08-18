@@ -219,7 +219,6 @@ export async function runAssistantWithTools(
     if (['failed', 'cancelled', 'expired'].includes(run.status)) {
       throw new Error(`Run ${run.status}`);
     }
-
     await new Promise((r) => setTimeout(r, 500));
   }
 
