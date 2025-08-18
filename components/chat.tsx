@@ -63,6 +63,10 @@ export default function Chat() {
     setLoading(true);
 
     try {
+      const threadId =
+        (typeof window !== 'undefined' && (window as any).cvThreadId) ||
+        (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
+        null;
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
