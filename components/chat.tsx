@@ -12,15 +12,11 @@ export default function Chat() {
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-
-
   // 🔹 Refs
-  const formRef = useRef<HTMLFormElement | null>(null);           // para submit/focus
-  const composerRef = useRef<HTMLDivElement | null>(null);        // para medir altura real (incluye paddings)
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const [composerH, setComposerH] = useState<number>(96); // fallback
 
-  const [composerH, setComposerH] = useState<number>(96); // fallback por defecto
-
-  // ✅ Medición segura del alto del composer (wrapper con paddings)
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -67,12 +63,14 @@ export default function Chat() {
         (typeof window !== 'undefined' && (window as any).cvThreadId) ||
         (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
         null;
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: { role: 'user', parts: [{ text: userMessage.parts[0].text }] },
           selectedChatModel: 'gpt-4o',
+          threadId, // 👈 MEMORIA
         }),
       });
 
@@ -88,13 +86,18 @@ export default function Chat() {
           : await response.text();
         throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
       }
-
       if (!ct.includes('application/json')) {
         const text = await response.text();
         throw new Error(`Respuesta no-JSON: ${text.slice(0, 200)}`);
       }
 
-      const data = await response.json();
+      const data = await response.json(); // { reply, threadId }
+
+      // 👇 Persistimos el threadId que regresa el server
+      if (data?.threadId) {
+        try { localStorage.setItem('cv_thread_id', data.threadId); } catch {}
+        (window as any).cvThreadId = data.threadId;
+      }
 
       const assistantMessage: ChatMessage = {
         id: uuidv4(),
@@ -115,8 +118,7 @@ export default function Chat() {
     inputRef.current?.focus();
   }, []);
 
-  // Constante para reservar espacio y para scrollPadding (coherente con la altura medida)
-  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8 px)`;
+  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`;
 
   return (
     <div
@@ -126,10 +128,7 @@ export default function Chat() {
       {/* Área de conversación */}
       <div
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{
-          paddingBottom: SPACER,          // reserva real para que nada quede debajo del form
-          scrollPaddingBottom: SPACER,    // scrollIntoView respeta la holgura
-        }}
+        style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
       >
         <Messages
           messages={messages}
@@ -142,37 +141,27 @@ export default function Chat() {
         />
       </div>
 
-      {/* Barra del composer: negra con padding simétrico y responsivo */}
+      {/* Composer */}
       <div
         className="fixed inset-x-0 bottom-0 z-50 bg-black"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        <div
-          ref={composerRef}
-          className="mx-auto max-w-3xl px-2 sm:px-4 py-2 sm:py-4"
-        >
-          <form
-            ref={formRef}
-            onSubmit={handleSubmit}
-            className="w-full flex items-center gap-2 sm:gap-3"
-          >
+        <div ref={composerRef} className="mx-auto max-w-3xl px-2 sm:px-4 py-2 sm:py-4">
+          <form ref={formRef} onSubmit={handleSubmit} className="w-full flex items-center gap-2 sm:gap-3">
             <input
               ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="..."
-              // Responsivo: no se corta ni empuja al botón
               className="min-w-0 flex-1 px-3 sm:px-5 py-3 rounded-full border border-gray-700
                          bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500
                          focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300
                          text-[16px] md:text-base"
             />
-
             <button
               type="submit"
               disabled={loading || !input.trim()}
-              // Responsivo: tamaños por breakpoint, no se aplasta
               className="flex-shrink-0 grid place-items-center rounded-full
                          h-10 w-10 sm:h-11 sm:w-11 md:h-12 md:w-12
                          bg-white text-black hover:bg-gray-100 transition-colors duration-300 disabled:opacity-50"
