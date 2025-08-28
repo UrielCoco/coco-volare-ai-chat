@@ -33,14 +33,19 @@ function getTranscript(threadId: string) {
 }
 
 async function callHub(hubBaseUrl: string, hubSecret: string, payload: any) {
-  const url = `${hubBaseUrl.replace(/\/$/, '')}/api/kommo?secret=${encodeURIComponent(hubSecret)}`;
+  const url = `${hubBaseUrl.replace(/\/$/, '')}/api/hub`;
   const resp = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-bridge-secret': hubSecret },
+    headers: {
+      'content-type': 'application/json',
+      'x-hub-secret': hubSecret,
+    },
     body: JSON.stringify(payload),
   });
-  const json = await resp.json().catch(() => ({}));
-  return { ok: resp.ok, status: resp.status, json };
+  const text = await resp.text();
+  let json: any = null;
+  try { json = JSON.parse(text); } catch {}
+  return { ok: resp.ok, status: resp.status, json, text };
 }
 
 // ====== Asegurar lead si falta (auto-create) ======
@@ -60,10 +65,7 @@ async function ensureLeadId(
 
   const r = await callHub(hubBaseUrl, hubSecret, {
     action: 'create-lead',
-    name,
-    price,
-    notes,
-    source: 'webchat',
+    payload: { name, price, notes, source: 'webchat' },
   });
   const created = ensureNum(r?.json?.data?.lead_id);
   if (!created) throw new Error(`Auto-create lead failed (${r.status})`);
@@ -71,7 +73,7 @@ async function ensureLeadId(
   return created!;
 }
 
-// ================= Tool Handlers =================
+// ================= Tool Handlers (Kommo + Hub) =================
 async function handleKommoTool(
   name: string,
   args: any,
@@ -84,10 +86,12 @@ async function handleKommoTool(
   if (name === 'kommo_create_lead') {
     const payload = {
       action: 'create-lead',
-      name: String(args?.name || 'Nuevo lead'),
-      price: args?.price ?? 0,
-      notes: String(args?.notes || ''),
-      source: args?.source || 'webchat',
+      payload: {
+        name: String(args?.name || 'Nuevo lead'),
+        price: args?.price ?? 0,
+        notes: String(args?.notes || ''),
+        source: args?.source || 'webchat',
+      },
     };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     const lid = ensureNum(r?.json?.data?.lead_id);
@@ -105,11 +109,13 @@ async function handleKommoTool(
 
     const payload = {
       action: 'attach-contact',
-      lead_id,
-      name: normalize(args?.name),
-      email: normalize(args?.email),
-      phone: normalize(args?.phone),
-      notes: normalize(args?.notes),
+      payload: {
+        lead_id,
+        name: normalize(args?.name),
+        email: normalize(args?.email),
+        phone: normalize(args?.phone),
+        notes: normalize(args?.notes),
+      },
     };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
@@ -121,7 +127,7 @@ async function handleKommoTool(
       (await ensureLeadId(threadId, hubBaseUrl, hubSecret, { notes: 'Auto-lead p/ notas' }));
 
     const text = String(args?.text || '').trim();
-    const payload = { action: 'add-note', lead_id, text };
+    const payload = { action: 'add-note', payload: { lead_id, text } };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
   }
@@ -131,12 +137,38 @@ async function handleKommoTool(
       ensureNum(args?.lead_id) ||
       (await ensureLeadId(threadId, hubBaseUrl, hubSecret, { notes: 'Auto-lead p/ transcript' }));
 
-    const payload = { action: 'attach-transcript', lead_id, transcript: getTranscript(threadId) };
+    const payload = {
+      action: 'attach-transcript',
+      payload: { lead_id, transcript: getTranscript(threadId) },
+    };
     const r = await callHub(hubBaseUrl, hubSecret, payload);
     return JSON.stringify(r);
   }
 
-  return JSON.stringify({ ok: false, error: `unknown tool: ${name}` });
+  return JSON.stringify({ ok: false, error: `unknown kommo tool: ${name}` });
+}
+
+async function handleHubTool(
+  name: string,
+  args: any,
+  hubBaseUrl: string,
+  hubSecret: string
+) {
+  // Mapea nombres → acciones del hub
+  const map: Record<string, string> = {
+    createItineraryDraft: 'itinerary.build',
+    priceQuote: 'quote',
+    renderBrandDoc: 'render',
+    sendProposal: 'send',
+  };
+  const action = map[name];
+  if (!action) return JSON.stringify({ ok: false, error: `unknown hub tool: ${name}` });
+
+  const r = await callHub(hubBaseUrl, hubSecret, { action, payload: args || {} });
+  if (!r.ok) {
+    return JSON.stringify({ ok: false, status: r.status, error: r.text || r.json });
+  }
+  return JSON.stringify(r.json || { ok: true });
 }
 
 // ================= Runner (SDK con runId primero) =================
@@ -165,8 +197,9 @@ export async function runAssistantWithTools(
   await openai.beta.threads.messages.create(threadId, { role: 'user', content: userText });
   pushTranscript(threadId, 'User', userText);
 
-  // 3) Definimos tools del run (independiente del Assistant del panel)
+  // 3) Definir tools (Kommo + Hub) para este run
   const tools: any[] = [
+    // ===== Kommo =====
     {
       type: 'function',
       function: {
@@ -233,20 +266,106 @@ export async function runAssistantWithTools(
         },
       },
     },
+
+    // ===== Hub (Itinerario / Quote / Render / Send) =====
+    {
+      type: 'function',
+      function: {
+        name: 'createItineraryDraft',
+        description: 'Genera un borrador oficial de itinerario (Coco Volare)',
+        parameters: {
+          type: 'object',
+          properties: {
+            travelerProfile: { type: 'string', enum: ['corporate', 'leisure', 'honeymoon', 'bleisure'] },
+            cityBases: { type: 'array', items: { type: 'string' }, minItems: 1 },
+            days: { type: 'number', minimum: 1, maximum: 31 },
+            currency: { type: 'string', enum: ['USD', 'COP', 'MXN', 'EUR'], default: 'USD' },
+            brandMeta: {
+              type: 'object',
+              properties: {
+                templateId: { type: 'string', enum: ['CV-LUX-01', 'CV-CORP-01', 'CV-ADVENTURE-01'] },
+                accent: { type: 'string', enum: ['gold', 'black', 'white'], default: 'gold' },
+                watermark: { type: 'boolean', default: true },
+              },
+              required: ['templateId'],
+              additionalProperties: false,
+            },
+            preferences: { type: 'object' },
+          },
+          required: ['travelerProfile', 'cityBases', 'days', 'brandMeta'],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'priceQuote',
+        description: 'Genera una cotización oficial con desglose y vigencia',
+        parameters: {
+          type: 'object',
+          properties: {
+            destination: { type: 'string' },
+            startDate: { type: 'string' },
+            endDate: { type: 'string' },
+            pax: { type: 'number', minimum: 1 },
+            category: { type: 'string', enum: ['3S', '4S', '5S'] },
+            extras: { type: 'array', items: { type: 'string' } },
+            currency: { type: 'string', enum: ['USD', 'COP', 'MXN', 'EUR'], default: 'USD' },
+          },
+          required: ['destination', 'startDate', 'endDate', 'pax', 'category'],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'renderBrandDoc',
+        description: 'Renderiza documento oficial (HTML/PDF) a partir de JSON',
+        parameters: {
+          type: 'object',
+          properties: {
+            templateId: { type: 'string', enum: ['CV-LUX-01', 'CV-CORP-01', 'CV-ADVENTURE-01', 'CV-TERMS-STD-01'] },
+            payloadJson: { type: 'object' },
+            output: { type: 'string', enum: ['pdf', 'html'], default: 'html' },
+            fileName: { type: 'string', default: 'Coco-Volare-Propuesta' },
+          },
+          required: ['templateId', 'payloadJson'],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'sendProposal',
+        description: 'Envía la propuesta al cliente (email/WhatsApp) usando un link de documento',
+        parameters: {
+          type: 'object',
+          properties: {
+            to: { type: 'string' },
+            channel: { type: 'string', enum: ['email', 'whatsapp'] },
+            docUrl: { type: 'string' },
+            message: { type: 'string' },
+          },
+          required: ['to', 'channel', 'docUrl'],
+          additionalProperties: false,
+        },
+      },
+    },
   ];
 
   const additionalInstructions = `
-- Usa el contexto del thread: no repitas lo que ya dijo el cliente.
-
-  1) Llama a kommo_create_lead con nombre descriptivo del viaje (price opcional, notes = resumen).
-  2) Si ya tienes nombre + (email o teléfono o instagram) Llama a kommo_attach_contact con name/email/phone y notes.
-  3) Si ya tienes destino o fechas agrega notas al lead. Llama a kommo_add_note 
-  4) Llama a kommo_add_note con un resumen del itinerario/preferencias.
-  5) Llama a kommo_attach_transcript para registrar la conversación cada que responde el cliente.
-- Si falta un dato, pregúntalo; no repitas preguntas ya respondidas.
+- Usa el contexto del thread; no repitas datos ya confirmados.
+- Cuando cuentes con destino + fechas + pax, llama a priceQuote.
+- Cuando tengas perfil, bases y días, llama a createItineraryDraft (formato Coco Volare).
+- Para entregar documento oficial, usa renderBrandDoc (PDF/HTML) con el último JSON válido y comparte el link.
+- Solo después de confirmar el destinatario, usa sendProposal para enviar por WhatsApp/email.
+- Registra en Kommo: crea lead, adjunta contacto cuando tengas nombre/whatsapp/email, agrega notas y transcripción.
 `.trim();
 
-  // 4) Run con tools y tool_choice auto
+  // 4) Run con tools
   let toolEvents: Array<{ name: string; status: number; ok: boolean }> = [];
   let run = await openai.beta.threads.runs.create(threadId, {
     assistant_id: ASSISTANT_ID,
@@ -255,31 +374,40 @@ export async function runAssistantWithTools(
     additional_instructions: additionalInstructions,
   });
 
-  // 5) Loop de ejecución (SDK: runId primero)
+  // 5) Loop de ejecución
   while (true) {
     run = await openai.beta.threads.runs.retrieve(run.id, { thread_id: threadId });
-    // Log útil (se verá en Vercel si lo deseas)
-    // console.log('CV:/assistant run status=', run.status);
-
     if (run.status === 'completed') break;
 
     if (run.status === 'requires_action') {
       const toolCalls = run.required_action?.submit_tool_outputs?.tool_calls || [];
-      // console.log('CV:/assistant toolCalls=', toolCalls.map(t => t.function?.name));
 
       const outputs: { tool_call_id: string; output: string }[] = [];
       for (const call of toolCalls) {
         const name = call.function?.name as string;
         const args = JSON.parse(call.function?.arguments || '{}');
 
-        const out = await handleKommoTool(name, args, threadId!, opts.hubBaseUrl, opts.hubSecret).catch(
-          (e) => JSON.stringify({ ok: false, error: String(e?.message || e) })
-        );
+        let out: string;
+        try {
+          if (name.startsWith('kommo_')) {
+            out = await handleKommoTool(name, args, threadId!, opts.hubBaseUrl, opts.hubSecret);
+          } else {
+            out = await handleHubTool(name, args, opts.hubBaseUrl, opts.hubSecret);
+          }
+        } catch (e: any) {
+          out = JSON.stringify({ ok: false, error: String(e?.message || e) });
+        }
+
         outputs.push({ tool_call_id: call.id, output: out });
 
+        // Log/result breve para route.ts
         try {
           const parsed = JSON.parse(out);
-          toolEvents.push({ name, status: Number(parsed?.status || 200), ok: !!parsed?.ok });
+          toolEvents.push({
+            name,
+            status: Number(parsed?.status || 200),
+            ok: !!(parsed?.ok ?? true),
+          });
           const lid =
             ensureNum(parsed?.json?.data?.lead_id) ||
             ensureNum(parsed?.data?.lead_id);
@@ -303,14 +431,14 @@ export async function runAssistantWithTools(
   }
 
   // 6) Última respuesta del assistant
-  const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 5 });
+  const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 8 });
   const first = list.data.find((m) => m.role === 'assistant');
   const reply =
     first?.content?.map((c: any) => ('text' in c ? c.text?.value : '')).join('\n').trim() || '';
 
   if (reply) pushTranscript(threadId!, 'Assistant', reply);
 
-  // 7) Adjunta transcripción si ya hay lead y el texto es suficiente
+  // 7) Adjunta transcripción si ya hay lead
   const memo = THREAD_LEAD.get(threadId!);
   if (memo?.leadId) {
     try {
@@ -318,8 +446,7 @@ export async function runAssistantWithTools(
       if (tx && tx.length > 80) {
         await callHub(opts.hubBaseUrl, opts.hubSecret, {
           action: 'attach-transcript',
-          lead_id: memo.leadId,
-          transcript: tx,
+          payload: { lead_id: memo.leadId, transcript: tx },
         });
       }
     } catch {
