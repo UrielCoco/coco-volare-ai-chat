@@ -1,3 +1,4 @@
+// /app/(chat)/api/chat/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { runAssistantWithTools } from "@/lib/ai/providers/openai-assistant";
 
@@ -16,9 +17,7 @@ const ALLOWED_ORIGINS = [
 function corsHeaders(req: NextRequest) {
   const origin = req.headers.get("origin") || "";
   const allow =
-    ALLOWED_ORIGINS.find((o) => o && origin.toLowerCase().startsWith(o.toLowerCase())) ||
-    "*"; // para debug; en prod puedes quitar "*" y dejar solo dominios exactos
-
+    ALLOWED_ORIGINS.find((o) => o && origin.toLowerCase().startsWith(o.toLowerCase())) || "*";
   return {
     "Access-Control-Allow-Origin": allow,
     "Access-Control-Allow-Credentials": "true",
@@ -28,7 +27,6 @@ function corsHeaders(req: NextRequest) {
     Vary: "Origin",
   };
 }
-
 function withCors(req: NextRequest, res: NextResponse) {
   const h = corsHeaders(req);
   Object.entries(h).forEach(([k, v]) => res.headers.set(k, v));
@@ -94,6 +92,30 @@ function pickText(body: any): string {
   return "";
 }
 
+/* ---------- Helpers ---------- */
+async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string; threadId: string }> {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.VERCEL_URL?.startsWith("http")
+      ? (process.env.VERCEL_URL as string)
+      : `https://${process.env.VERCEL_URL}`;
+
+  const sid =
+    req.headers.get("x-cv-session") ||
+    req.cookies.get("cv_session")?.value ||
+    "";
+
+  const url = `${baseUrl?.replace(/\/$/, "")}/api/chat/session` + (sid ? `?sid=${encodeURIComponent(sid)}` : "");
+  const r = await fetch(url, {
+    method: "GET",
+    headers: { "x-cv-session": sid || "" },
+    cache: "no-store",
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(`session fetch failed: ${r.status} ${JSON.stringify(j)}`);
+  return { sessionId: j.sessionId, threadId: j.threadId };
+}
+
 /* ---------- POST ---------- */
 export async function POST(req: NextRequest) {
   const started = Date.now();
@@ -112,7 +134,12 @@ export async function POST(req: NextRequest) {
     }
 
     const text = pickText(body);
-    console.log("CV:/api/chat START method=POST origin=", req.headers.get("origin"), "len=", text.length);
+    console.log(
+      "CV:/api/chat START method=POST origin=",
+      req.headers.get("origin"),
+      "len=",
+      text.length
+    );
 
     if (!text) {
       const res = NextResponse.json(
@@ -122,6 +149,10 @@ export async function POST(req: NextRequest) {
       return withCors(req, res);
     }
 
+    // 1) Asegurar threadId para esta sesión
+    const { sessionId, threadId } = await fetchSessionThread(req);
+
+    // 2) Hub config
     const hubBaseUrl =
       process.env.NEXT_PUBLIC_HUB_BASE_URL || process.env.HUB_BASE_URL;
     const hubSecret =
@@ -135,7 +166,9 @@ export async function POST(req: NextRequest) {
       return withCors(req, res);
     }
 
+    // 3) Ejecutar assistant con threadId persistente
     const result = await runAssistantWithTools(text, {
+      threadId,
       hubBaseUrl,
       hubSecret,
     });
@@ -145,10 +178,19 @@ export async function POST(req: NextRequest) {
         reply: result.reply,
         threadId: result.threadId,
         toolEvents: result.toolEvents,
+        sessionId,
         ms: Date.now() - started,
       },
       { status: 200 }
     );
+    // eco de sesión en cookie, para el cliente
+    res.cookies.set("cv_session", sessionId, {
+      httpOnly: false,
+      sameSite: "lax",
+      secure: true,
+      maxAge: 60 * 60 * 24 * 365,
+      path: "/",
+    });
     return withCors(req, res);
   } catch (err: any) {
     console.error("CV:/api/chat ERROR:", err);
