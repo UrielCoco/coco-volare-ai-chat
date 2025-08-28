@@ -266,14 +266,39 @@ export async function POST(req: NextRequest) {
     }
 
     // 6) Fallback: intenta retornar texto plano
-    const text = result?.text ?? "[sin stream disponible]";
-    console.warn("CV:/api/chat FALLBACK text returned");
-    return withCORS(
-      new Response(String(text), {
-        status: 200,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      })
-    );
+    // 6) Fallback robusto: resuelve Promise o arma texto desde partialResults
+let textOut = "";
+try {
+  if (typeof result?.text === "string") {
+    textOut = result.text;
+  } else if (result?.text && typeof result.text.then === "function") {
+    // ai@v5: text puede ser una Promise
+    textOut = await result.text;
+  } else if (result?.partialResults && typeof result.partialResults[Symbol.asyncIterator] === "function") {
+    // Ensambla desde el async iterator de partialResults (por si no hay .toDataStreamResponse)
+    const chunks: string[] = [];
+    for await (const part of result.partialResults as any) {
+      if (typeof part?.text === "string") chunks.push(part.text);
+      else if (typeof part?.delta === "string") chunks.push(part.delta);
+      else if (typeof part?.textDelta === "string") chunks.push(part.textDelta);
+    }
+    textOut = chunks.join("") || "[partialResults vacío]";
+  } else {
+    textOut = "[sin stream/text disponibles en result]";
+  }
+} catch (e: any) {
+  console.error("CV:/api/chat FALLBACK build text ERROR:", e?.message || e);
+  textOut = "[error construyendo fallback]";
+}
+
+console.warn("CV:/api/chat FALLBACK text returned (len=", textOut.length, ")");
+return withCORS(
+  new Response(textOut, {
+    status: 200,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  })
+);
+
   } catch (err: any) {
     console.error("CV:/api/chat UNCAUGHT ERROR:", err?.stack || err?.message || err);
     return withCORS(
