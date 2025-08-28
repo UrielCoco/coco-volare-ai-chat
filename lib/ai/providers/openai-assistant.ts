@@ -356,14 +356,32 @@ export async function runAssistantWithTools(
     },
   ];
 
-  const additionalInstructions = `
-- Usa el contexto del thread; no repitas datos ya confirmados.
-- Cuando cuentes con destino + fechas + pax, llama a priceQuote.
-- Cuando tengas perfil, bases y días, llama a createItineraryDraft (formato Coco Volare).
-- Para entregar documento oficial, usa renderBrandDoc (PDF/HTML) con el último JSON válido y comparte el link.
-- Solo después de confirmar el destinatario, usa sendProposal para enviar por WhatsApp/email.
-- Registra en Kommo: crea lead, adjunta contacto cuando tengas nombre/whatsapp/email, agrega notas y transcripción.
+const additionalInstructions = `
+REGLA CRÍTICA DE HERRAMIENTAS (NO OMITIR):
+- Si el usuario dice "itinerario", "itinerary", "borra(dor)", "propuesta", "cotiza", "cotización", "quote",
+  "render", "pdf", "html", "enviar", "whatsapp", "email":
+  DEBES realizar un function_call correspondiente INMEDIATAMENTE.
+- PROHIBIDO inventar documentos o links. Si no puedes llamar la tool, explica qué dato falta y PÍDELO en UNA sola pregunta.
+- Tras responder texto al cliente, si no has llamado tool cuando corresponde, CORRIGE de inmediato y LLÁMALA.
+
+CUÁNDO LLAMAR:
+1) createItineraryDraft → cuando tengas perfil (travelerProfile), cityBases y days. Si falta 1 dato, pregúntalo y luego llámala.
+2) priceQuote → cuando tengas destination, startDate, endDate, pax, category (3S/4S/5S). Si falta algo, pregúntalo y luego llámala.
+3) renderBrandDoc → cuando exista un itinerario o cotización válidos en contexto. Usa ese JSON como payloadJson. output: "pdf" o "html".
+4) sendProposal → SOLO tras confirmar to + channel + docUrl. Usa el link devuelto por renderBrandDoc.
+
+FORMATO MARCA:
+- Responde en texto elegante y breve, pero SIEMPRE acompaña la respuesta con la tool correspondiente cuando aplique.
+- Nunca declares que "ya está renderizado" si no llamaste renderBrandDoc.
+
+REGISTRO EN KOMMO (siempre que avances):
+- kommo_create_lead al 2º mensaje con intención clara.
+- kommo_attach_contact cuando tengas nombre o contacto.
+- kommo_add_note con destino/fechas/pax/preferencias o resumen de la propuesta.
+- kommo_attach_transcript periódicamente.
+
 `.trim();
+
 
   // 4) Run con tools
   let toolEvents: Array<{ name: string; status: number; ok: boolean }> = [];
