@@ -6,6 +6,53 @@ import type { ChatMessage } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
+/* ========= Helpers de sesión (frontend) ========= */
+const CV_SESSION_KEY = 'cv_session';
+
+async function fetchJson(input: RequestInfo, init?: RequestInit) {
+  const res = await fetch(input, init);
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    if (!res.ok) throw Object.assign(new Error(json?.error || res.statusText), { status: res.status, json });
+    return json;
+  } catch {
+    if (!res.ok) throw Object.assign(new Error(text || res.statusText), { status: res.status, text });
+    return text as any;
+  }
+}
+
+async function ensureWebSession(): Promise<{ sessionId: string; threadId: string }> {
+  // 1) lee sid del storage si existe
+  let sid = '';
+  try { sid = localStorage.getItem(CV_SESSION_KEY) || ''; } catch {}
+
+  // 2) pregunta al backend por la sesión (crea o recupera)
+  const url = sid ? `/api/chat/session?sid=${encodeURIComponent(sid)}` : `/api/chat/session`;
+  const data = await fetchJson(url, {
+    method: 'GET',
+    headers: sid ? { 'x-cv-session': sid } : undefined,
+    cache: 'no-store',
+  });
+
+  const sessionId = String(data?.sessionId || '');
+  const threadId  = String(data?.threadId  || '');
+
+  // 3) persiste sid en storage y window para depurar
+  if (sessionId) {
+    try { localStorage.setItem(CV_SESSION_KEY, sessionId); } catch {}
+    (window as any).cvSessionId = sessionId;
+  }
+  if (threadId) (window as any).cvThreadId = threadId;
+
+  return { sessionId, threadId };
+}
+
+function peekSessionId(): string {
+  try { return localStorage.getItem(CV_SESSION_KEY) || ''; } catch { return ''; }
+}
+
+/* ========= Componente ========= */
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -43,15 +90,24 @@ export default function Chat() {
     };
   }, []);
 
-  // ✅ Envío del mensaje
+  // ✅ Asegura sesión al montar (y enfoca input)
+  useEffect(() => {
+    inputRef.current?.focus();
+    ensureWebSession().catch((e) => {
+      console.warn('CV: ensureWebSession failed (fallback seguirá funcionando):', e);
+    });
+  }, []);
+
+  // ✅ Envío del mensaje (siempre con x-cv-session)
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    const raw = input.trim();
+    if (!raw) return;
 
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      parts: [{ type: 'text', text: input }],
+      parts: [{ type: 'text', text: raw }],
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -59,18 +115,20 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      const threadId =
-        (typeof window !== 'undefined' && (window as any).cvThreadId) ||
-        (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
-        null;
+      // garantiza sesión/thread y lee sid para header
+      await ensureWebSession();
+      const sid = peekSessionId();
 
+      // IMPORTANTE: manda formato `messages` con STRING para robustez
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sid ? { 'x-cv-session': sid } : {}),
+        },
         body: JSON.stringify({
-          message: { role: 'user', parts: [{ text: userMessage.parts[0].text }] },
-          selectedChatModel: 'gpt-4o',
-          threadId, // 👈 MEMORIA
+          messages: [{ role: 'user', content: raw }],
+          // selectedChatModel puede omitirse; el backend usa Assistant configurado en consola
         }),
       });
 
@@ -91,18 +149,16 @@ export default function Chat() {
         throw new Error(`Respuesta no-JSON: ${text.slice(0, 200)}`);
       }
 
-      const data = await response.json(); // { reply, threadId }
+      const data = await response.json(); // { reply, threadId, toolEvents, ... }
 
-      // 👇 Persistimos el threadId que regresa el server
-      if (data?.threadId) {
-        try { localStorage.setItem('cv_thread_id', data.threadId); } catch {}
-        (window as any).cvThreadId = data.threadId;
-      }
+      // (Opcional) expón thread y toolEvents para debug
+      if (data?.threadId) (window as any).cvThreadId = data.threadId;
+      if (Array.isArray(data?.toolEvents)) console.log('CV toolEvents:', data.toolEvents);
 
       const assistantMessage: ChatMessage = {
         id: uuidv4(),
         role: 'assistant',
-        parts: [{ type: 'text', text: data.reply || 'No response' }],
+        parts: [{ type: 'text', text: data.reply || 'Sin respuesta' }],
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -113,10 +169,6 @@ export default function Chat() {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`;
 
