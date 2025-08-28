@@ -1,106 +1,118 @@
-// /app/(chat)/api/chat/session/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
-import { db } from "@/lib/db"; // ajusta si tu cliente drizzle está en otra ruta
-import { webSessionThread } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+export const runtime = 'nodejs';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { NextRequest, NextResponse } from 'next/server';
+import { getOrSetSessionId } from '@/lib/chat/cookies';
 
-// ====== In-memory fallback (si DB truena) ======
-const SESSION_MAP: Map<string, { threadId: string; updatedAt: number }> =
-  (global as any).__cvSessionMap || new Map();
-(global as any).__cvSessionMap = SESSION_MAP;
+// --------- LOG HELPERS ----------
+const LOG_PREFIX = 'CV:/api/chat/session';
+const log = (...a: any[]) => console.log(LOG_PREFIX, ...a);
+const err = (...a: any[]) => console.error(LOG_PREFIX, ...a);
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing");
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-function uuidv4() {
-  // suficiente para sesión, no criptográfico
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0,
-      v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+// --------- DB (opcional, tolerante) ----------
+let dbLoaded = true;
+let db: any, webSessionThread: any, eq: any;
+try {
+  log('loading DB module…');
+  const mod = await import('@/lib/db');
+  db = mod.db;
+  webSessionThread = mod.webSessionThread;
+  eq = (await import('drizzle-orm')).eq;
+  log('DB module loaded.');
+} catch (e) {
+  dbLoaded = false;
+  err('DB module not available, continuing without DB. Detail:', String((e as any)?.message || e));
 }
 
-async function ensureThreadId(sessionId: string): Promise<string> {
-  // 1) DB first
-  try {
-    const rows = await db
-      .select({
-        sessionId: webSessionThread.sessionId,
-        threadId: webSessionThread.threadId,
-      })
-      .from(webSessionThread)
-      .where(eq(webSessionThread.sessionId, sessionId))
-      .limit(1);
+// --------- ENV ----------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const CHANNEL = 'web-embed';
 
-    if (rows?.[0]?.threadId) {
-      return rows[0].threadId;
+function openaiHeaders() {
+  return {
+    Authorization: `Bearer ${OPENAI_API_KEY}`,
+    'Content-Type': 'application/json',
+    'OpenAI-Beta': 'assistants=v2', // 👈 REQUERIDO
+  };
+}
+
+async function createAssistantThread(): Promise<string> {
+  log('createAssistantThread: calling OpenAI…');
+  const res = await fetch('https://api.openai.com/v1/threads', {
+    method: 'POST',
+    headers: openaiHeaders(),
+    body: JSON.stringify({}),
+  });
+  const txt = await res.text();
+  log('createAssistantThread: status=', res.status, 'body=', txt.slice(0, 200));
+  if (!res.ok) throw new Error(`OpenAI create thread failed: ${txt}`);
+  const data = JSON.parse(txt);
+  return data.id as string;
+}
+
+export async function GET(_req: NextRequest) {
+  try {
+    log('START');
+    log('ENV check: OPENAI_API_KEY=', OPENAI_API_KEY ? 'present' : 'absent', 'DB loaded=', dbLoaded);
+
+    if (!OPENAI_API_KEY) {
+      err('Missing OPENAI_API_KEY');
+      return new NextResponse(
+        JSON.stringify({ error: 'Missing OPENAI_API_KEY' }),
+        { status: 500, headers: { 'content-type': 'application/json', 'x-cv-reason': 'missing-openai-api-key' } }
+      );
     }
 
-    // no hay registro -> crear thread y guardar
-    const created = await openai.beta.threads.create({});
-    const threadId = created.id;
-    const now = new Date();
+    const { sessionId } = getOrSetSessionId();
+    log('sessionId=', sessionId);
 
-    await db.insert(webSessionThread).values({
-      sessionId,
-      threadId,
-      channel: "web",
-      createdAt: now,
-      updatedAt: now,
-      kommoLeadId: null,
-      kommoContactId: null,
-      chatId: null,
-    });
+    if (!dbLoaded) {
+      const threadId = await createAssistantThread();
+      log('NO-DB path: returning threadId=', threadId);
+      return new NextResponse(
+        JSON.stringify({ sessionId, threadId }),
+        { status: 200, headers: { 'content-type': 'application/json', 'x-cv-db': 'unavailable' } }
+      );
+    }
 
-    return threadId;
-  } catch (e) {
-    // 2) Fallback en memoria
-    console.warn("CV:/api/chat/session DB path failed, using MEMORY fallback", e);
-    const mem = SESSION_MAP.get(sessionId);
-    if (mem?.threadId) return mem.threadId;
+    try {
+      log('DB path: searching existing mapping…');
+      const rows = await db.select().from(webSessionThread).where(eq(webSessionThread.sessionId, sessionId));
+      log('DB path: rows found=', rows?.length || 0);
+      if (rows.length > 0) {
+        log('DB path: found threadId=', rows[0]?.threadId);
+        return NextResponse.json({ sessionId, threadId: rows[0].threadId }, { status: 200 });
+      }
 
-    const created = await openai.beta.threads.create({});
-    const threadId = created.id;
-    SESSION_MAP.set(sessionId, { threadId, updatedAt: Date.now() });
-    return threadId;
-  }
-}
+      log('DB path: creating new thread…');
+      const threadId = await createAssistantThread();
+      const now = new Date();
+      await db.insert(webSessionThread).values({
+        sessionId,
+        threadId,
+        channel: CHANNEL,
+        chatId: null,
+        createdAt: now,
+        updatedAt: now,
+      });
 
-export async function GET(req: NextRequest) {
-  try {
-    const sp = new URL(req.url).searchParams;
-    const headerSid = req.headers.get("x-cv-session") || "";
-    const cookieSid = req.cookies.get("cv_session")?.value || "";
-    let sessionId = headerSid || sp.get("sid") || cookieSid;
-
-    if (!sessionId) sessionId = uuidv4();
-
-    const threadId = await ensureThreadId(sessionId);
-
-    const res = NextResponse.json({
-      ok: true,
-      sessionId,
-      threadId,
-    });
-
-    // set cookie para el cliente (1 año)
-    res.cookies.set("cv_session", sessionId, {
-      httpOnly: false,
-      sameSite: "lax",
-      secure: true,
-      maxAge: 60 * 60 * 24 * 365,
-      path: "/",
-    });
-
-    return res;
+      log('DB path: inserted mapping for sessionId.');
+      return NextResponse.json({ sessionId, threadId }, { status: 200 });
+    } catch (dbErr: any) {
+      err('DB path ERROR:', String(dbErr?.message || dbErr));
+      const threadId = await createAssistantThread();
+      log('DB path fallback: returning threadId=', threadId);
+      return new NextResponse(
+        JSON.stringify({ sessionId, threadId }),
+        { status: 200, headers: { 'content-type': 'application/json', 'x-cv-db': `error:${String(dbErr?.message || dbErr)}` } }
+      );
+    }
   } catch (e: any) {
-    console.error("CV:/api/chat/session ERROR", e);
-    return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
+    err('UNCAUGHT:', e?.stack || e);
+    return new NextResponse(
+      JSON.stringify({ error: 'session error', detail: String(e?.message || e) }),
+      { status: 500, headers: { 'content-type': 'application/json', 'x-cv-reason': 'exception' } }
+    );
+  } finally {
+    log('END');
   }
 }
