@@ -1,356 +1,174 @@
-/* /app/(chat)/api/chat/route.ts – Handler antifalla + modo diagnóstico
-   - CHAT_DIAGNOSTIC_MODE=1 → responde inmediato (eco) para aislar problemas de red/front.
-   - Lee modelo del Assistant y usa streamText (con abort).
-   - Fallbacks garantizan Response siempre.
-*/
+export const runtime = 'nodejs';
 
-import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
-import OpenAI from "openai";
-import { streamText } from "ai";
-import { myProvider } from "@/lib/ai/providers";
-import {
-  hubBuildItinerary,
-  hubQuote,
-  hubRender,
-  hubSend,
-} from "@/lib/ai/tools-client";
+import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const maxDuration = 60; // Vercel Node limit
-
-/* ---------- CORS helpers ---------- */
-function withCORS(resp: Response) {
-  const r = new NextResponse(resp.body, resp);
-  r.headers.set("access-control-allow-origin", "*");
-  r.headers.set("access-control-allow-headers", "content-type");
-  r.headers.set("access-control-allow-methods", "POST,OPTIONS");
-  return r;
-}
-export async function OPTIONS() {
-  return withCORS(new Response(null, { status: 204 }));
-}
-
-/* ---------- Zod (igual que antes, comprimido) ---------- */
-const BrandMeta = z.object({
-  templateId: z.enum(["CV-LUX-01", "CV-CORP-01", "CV-ADVENTURE-01"]),
-  accent: z.enum(["gold", "black", "white"]).default("gold"),
-  watermark: z.boolean().default(true),
-});
-const Activity = z.object({
-  timeRange: z.string().optional(),
-  title: z.string(),
-  description: z.string(),
-  logistics: z.string().optional(),
-  icon: z.string().optional(),
-});
-const ItineraryDay = z.object({
-  dayNumber: z.number(),
-  title: z.string(),
-  date: z.string().optional(),
-  breakfastIncluded: z.boolean().default(true),
-  activities: z.array(Activity),
-  notes: z.string().optional(),
-});
-const ItineraryDraft = z.object({
-  brandMeta: BrandMeta,
-  travelerProfile: z.enum(["corporate", "leisure", "honeymoon", "bleisure"]),
-  currency: z.enum(["USD", "COP", "MXN", "EUR"]),
-  cityBases: z.array(z.string()),
-  days: z.array(ItineraryDay),
-});
-const QuoteItem = z.object({
-  sku: z.string(),
-  label: z.string(),
-  qty: z.number().int().positive(),
-  unitPrice: z.number().nonnegative(),
-  subtotal: z.number().nonnegative(),
-});
-const Line = z.object({ label: z.string(), amount: z.number().nonnegative() });
-const Quote = z.object({
-  currency: z.enum(["USD", "COP", "MXN", "EUR"]),
-  items: z.array(QuoteItem),
-  fees: z.array(Line).default([]),
-  taxes: z.array(Line).default([]),
-  total: z.number().nonnegative(),
-  validity: z.string(),
-  termsTemplateId: z.enum(["CV-TERMS-STD-01"]),
-});
-
-/* ---------- Tools “tool-like” ---------- */
-const createItineraryDraft = {
-  description: "Crea un borrador de itinerario en formato Coco Volare",
-  parameters: z.object({
-    travelerProfile: z.enum(["corporate", "leisure", "honeymoon", "bleisure"]),
-    cityBases: z.array(z.string()),
-    days: z.number().int().min(1).max(31),
-    currency: z.enum(["USD", "COP", "MXN", "EUR"]).default("USD"),
-    brandMeta: z.object({
-      templateId: z.enum(["CV-LUX-01", "CV-CORP-01", "CV-ADVENTURE-01"]),
-      accent: z.enum(["gold", "black", "white"]).default("gold"),
-      watermark: z.boolean().default(true),
-    }),
-    preferences: z.record(z.any()).optional(),
-  }),
-  execute: async (ctx: any) => {
-    const { parameters } = ctx ?? {};
-    const res = await hubBuildItinerary(parameters);
-    const parsed = ItineraryDraft.parse(res.itinerary);
-    return { itinerary: parsed };
-  },
-};
-const priceQuote = {
-  description: "Genera cotización con motor del hub",
-  parameters: z.object({
-    destination: z.string(),
-    startDate: z.string(),
-    endDate: z.string(),
-    pax: z.number().int().positive(),
-    category: z.enum(["3S", "4S", "5S"]),
-    extras: z.array(z.string()).optional(),
-    currency: z.enum(["USD", "COP", "MXN", "EUR"]).default("USD"),
-  }),
-  execute: async (ctx: any) => {
-    const { parameters } = ctx ?? {};
-    const res = await hubQuote(parameters);
-    const parsed = Quote.parse(res.quote);
-    return { quote: parsed };
-  },
-};
-const renderBrandDoc = {
-  description: "Renderiza documento oficial (HTML/PDF) a partir de JSON",
-  parameters: z.object({
-    templateId: z.enum([
-      "CV-LUX-01",
-      "CV-CORP-01",
-      "CV-ADVENTURE-01",
-      "CV-TERMS-STD-01",
-    ]),
-    payloadJson: z.any(),
-    output: z.enum(["pdf", "html"]).default("html"),
-    fileName: z.string().default("Coco-Volare-Propuesta"),
-  }),
-  execute: async (ctx: any) => {
-    const { parameters } = ctx ?? {};
-    const res = await hubRender(parameters);
-    return res;
-  },
-};
-const sendProposal = {
-  description: "Envía la propuesta al cliente (email/WhatsApp)",
-  parameters: z.object({
-    to: z.string(),
-    channel: z.enum(["email", "whatsapp"]),
-    docUrl: z.string().url(),
-    message: z.string().optional(),
-  }),
-  execute: async (ctx: any) => {
-    const { parameters } = ctx ?? {};
-    const res = await hubSend(parameters);
-    return res;
-  },
-};
-
-/* ---------- Modelo del Assistant ---------- */
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-let cachedAssistantModel: string | null = null;
-
-async function getAssistantModelId(): Promise<string> {
-  if (cachedAssistantModel) return cachedAssistantModel;
-  try {
-    const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-    const a = await client.beta.assistants.retrieve(ASSISTANT_ID);
-    cachedAssistantModel = a.model || "gpt-4o-mini";
-    console.log("CV:/api/chat assistant.model =", cachedAssistantModel);
-    return cachedAssistantModel;
-  } catch (e: any) {
-    console.error("CV:/api/chat assistant retrieve ERROR:", e?.message || e);
-    return "gpt-4o-mini";
+// ===== Session cookie (simple) =====
+const SESSION_COOKIE = 'cv_session_id';
+function getOrSetSessionId() {
+  const jar = cookies();
+  let sessionId = jar.get(SESSION_COOKIE)?.value;
+  if (!sessionId) {
+    sessionId = `sess_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+    jar.set(SESSION_COOKIE, sessionId, {
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 30, // 30 días
+    });
   }
+  return { sessionId };
 }
 
-/* ---------- Body parser con timeout ---------- */
-async function parseBodyWithTimeout(req: NextRequest, ms = 5000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const json = await req.json();
-    return json ?? {};
-  } finally {
-    clearTimeout(t);
+// ===== Thread cache sin DB (por sesión) =====
+const SESSION_THREADS: Map<string, string> =
+  (global as any).__cvSessionThreads || new Map<string, string>();
+(global as any).__cvSessionThreads = SESSION_THREADS;
+
+// ===== ENV =====
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const ASSISTANT_ID =
+  process.env.OPENAI_ASSISTANT_ID || process.env.ASSISTANT_ID || '';
+const HUB_BASE_URL =
+  process.env.NEXT_PUBLIC_HUB_BASE_URL || process.env.HUB_BASE_URL || '';
+const HUB_BRIDGE_SECRET =
+  process.env.HUB_BRIDGE_SECRET || process.env.WEBHOOK_SECRET || '';
+
+// ===== Logs =====
+const LOG = 'CV:/api/chat';
+const log = (...a: any[]) => console.log(LOG, ...a);
+const err = (...a: any[]) => console.error(LOG, ...a);
+
+// ===== Provider que ejecuta Assistant + tools→Hub/Kommo =====
+import { runAssistantWithTools } from '@/lib/ai/providers/openai-assistant';
+
+// ===== Util para extraer texto del body =====
+function pickText(body: any): string {
+  if (!body) return '';
+  const direct = body.message || body;
+  const pluck = (arr: any[]) =>
+    (arr || [])
+      .map((it) =>
+        typeof it?.text === 'string' ? it.text : typeof it === 'string' ? it : ''
+      )
+      .find((s) => s && String(s).trim());
+
+  if (typeof direct === 'string') return direct.trim();
+  if (typeof direct?.text === 'string') return direct.text.trim();
+  if (Array.isArray(direct?.parts)) {
+    const t = pluck(direct.parts);
+    if (t) return String(t).trim();
   }
+  if (Array.isArray(direct?.content)) {
+    const t = pluck(direct.content);
+    if (t) return String(t).trim();
+  }
+  if (Array.isArray(direct?.messages)) {
+    const lastUser = [...direct.messages].reverse().find((m) => m?.role === 'user');
+    if (typeof lastUser?.content === 'string') return lastUser.content.trim();
+    if (Array.isArray(lastUser?.content)) {
+      const t = pluck(lastUser.content);
+      if (t) return String(t).trim();
+    }
+  }
+  return '';
 }
 
-/* ---------- Handler ---------- */
 export async function POST(req: NextRequest) {
-  const t0 = Date.now();
-  console.log("CV:/api/chat POST start");
-
   try {
-    // 0) MODO DIAGNÓSTICO: respuesta inmediata
-    if (process.env.CHAT_DIAGNOSTIC_MODE === "1") {
-      const raw = await req.text().catch(() => "");
-      console.warn("CV:/api/chat DIAGNOSTIC_MODE=1 (bypass). rawLen=", raw.length);
-      return withCORS(
-        new Response(
-          JSON.stringify({ ok: true, mode: "diagnostic", echo: raw.slice(0, 2000) }),
-          { status: 200, headers: { "content-type": "application/json" } }
-        )
-      );
-    }
+    log('START');
+    log('ENV', {
+      hasOpenAI: !!OPENAI_API_KEY,
+      hasAssistant: !!ASSISTANT_ID,
+      hub: !!HUB_BASE_URL,
+      hubSecret: !!HUB_BRIDGE_SECRET,
+    });
 
-    // 1) Parse body (robusto)
-    let body: any = {};
-    try {
-      body = await parseBodyWithTimeout(req, 7000);
-    } catch (e: any) {
-      console.error("CV:/api/chat body parse TIMEOUT/ERROR:", e?.message || e);
-      // intentar leer texto por si el front mandó raw
-      const raw = await req.text().catch(() => "");
-      return withCORS(
-        new Response(JSON.stringify({ error: "bad_body", raw: raw.slice(0, 512) }), {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        })
-      );
-    }
-
-    let messages = Array.isArray(body?.messages) ? body.messages : [];
-    if (messages.length === 0) {
-      const text =
-        body?.text || body?.message || body?.prompt || body?.content || "";
-      if (typeof text === "string" && text.trim()) {
-        messages = [{ role: "user", content: String(text).trim() }];
-      }
-    }
-    console.log("CV:/api/chat messages.count =", messages.length);
-    if (messages.length === 0) {
-      return withCORS(
-        new Response(JSON.stringify({ error: "no_messages" }), {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        })
-      );
-    }
-
-    // 2) Modelo
-    const modelId = await getAssistantModelId().catch(() => "gpt-4o-mini");
-    console.log("CV:/api/chat using model =", modelId);
-
-    // 3) Stream con abort
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      console.error("CV:/api/chat TIMEOUT 20s – aborting stream");
-      controller.abort();
-    }, 20_000);
-
-    let result: any = null;
-    try {
-      result = await streamText({
-        model: myProvider.languageModel(modelId),
-        messages,
-        tools: {
-          createItineraryDraft: createItineraryDraft as any,
-          priceQuote: priceQuote as any,
-          renderBrandDoc: renderBrandDoc as any,
-          sendProposal: sendProposal as any,
-        },
-        experimental_telemetry: { isEnabled: true },
-        abortSignal: controller.signal as any,
-      });
-    } catch (e: any) {
-      console.error("CV:/api/chat streamText ERROR:", e?.message || e);
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    // 3a) Si hay método de stream → usarlo
-    if (result) {
-      const toResp =
-        result?.toDataStreamResponse || result?.toAIStreamResponse;
-      if (typeof toResp === "function") {
-        const resp: Response = toResp.call(result);
-        console.log(
-          "CV:/api/chat stream OK in",
-          Date.now() - t0,
-          "ms – headers:",
-          Object.fromEntries(resp.headers.entries())
-        );
-        return withCORS(resp);
-      }
-    }
-
-    // 4) Fallback: ensamblar texto
-    let textOut = "";
-    try {
-      if (typeof result?.text === "string") {
-        textOut = result.text;
-      } else if (result?.text && typeof result.text.then === "function") {
-        textOut = await result.text;
-      } else if (
-        result?.partialResults &&
-        typeof result.partialResults[Symbol.asyncIterator] === "function"
-      ) {
-        const chunks: string[] = [];
-        for await (const part of result.partialResults as any) {
-          if (typeof part?.text === "string") chunks.push(part.text);
-          else if (typeof part?.delta === "string") chunks.push(part.delta);
-          else if (typeof part?.textDelta === "string")
-            chunks.push(part.textDelta);
+    if (!OPENAI_API_KEY || !ASSISTANT_ID) {
+      err('Missing OpenAI envs');
+      return new NextResponse(
+        JSON.stringify({ error: 'Missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID' }),
+        {
+          status: 500,
+          headers: { 'content-type': 'application/json', 'x-cv-reason': 'missing-openai-env' },
         }
-        textOut = chunks.join("");
+      );
+    }
+    if (!HUB_BASE_URL || !HUB_BRIDGE_SECRET) {
+      err('Missing HUB envs');
+      return new NextResponse(
+        JSON.stringify({ error: 'Missing HUB_BASE_URL or HUB_BRIDGE_SECRET' }),
+        {
+          status: 500,
+          headers: { 'content-type': 'application/json', 'x-cv-reason': 'missing-hub-env' },
+        }
+      );
+    }
+
+    const { sessionId } = getOrSetSessionId();
+    log('sessionId=', sessionId);
+
+    // parse body (acepta JSON o texto)
+    const ct = req.headers.get('content-type') || '';
+    let body: any = {};
+    if (ct.includes('application/json')) {
+      body = (await req.json().catch(() => ({}))) || {};
+    } else {
+      const text = await req.text();
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = {};
       }
-    } catch (e: any) {
-      console.error("CV:/api/chat FALLBACK assemble ERROR:", e?.message || e);
     }
 
-    if (textOut && textOut.trim()) {
-      console.warn("CV:/api/chat FALLBACK text returned (len=", textOut.length, ")");
-      return withCORS(
-        new Response(textOut, {
-          status: 200,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        })
-      );
+    const userMessage = pickText(body) || 'Hola';
+
+    // 1) threadId del body; 2) si no viene, usar cache por sesión
+    let incomingThreadId: string | null = body?.threadId || null;
+    if (!incomingThreadId) {
+      incomingThreadId = SESSION_THREADS.get(sessionId) || null;
     }
 
-    // 5) Último recurso: OpenAI Chat Completions (no-stream)
-    try {
-      console.warn("CV:/api/chat HARD FALLBACK → chat.completions");
-      const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-      const cc = await client.chat.completions.create({
-        model: modelId,
-        messages: messages as any,
-        temperature: 0.8,
-      });
-      const finalText =
-        cc.choices?.[0]?.message?.content || "[sin contenido de OpenAI]";
-      return withCORS(
-        new Response(finalText, {
-          status: 200,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        })
-      );
-    } catch (e: any) {
-      console.error("CV:/api/chat HARD FALLBACK ERROR:", e?.message || e);
-      return withCORS(
-        new Response(JSON.stringify({ error: "openai_chat_fallback_failed" }), {
-          status: 502,
-          headers: { "content-type": "application/json" },
-        })
-      );
+    log('THREAD in=', incomingThreadId || null, 'text.len=', userMessage.length);
+
+    // Ejecuta Assistant con tools → Kommo vía Hub
+    const result = await runAssistantWithTools(userMessage, {
+      threadId: incomingThreadId,
+      hubBaseUrl: String(HUB_BASE_URL),
+      hubSecret: String(HUB_BRIDGE_SECRET),
+    });
+
+    // Forzamos tipos mínimos esperados
+    const reply: string = (result as any)?.reply || '';
+    const threadId: string | null = (result as any)?.threadId || null;
+
+    // toolEvents es opcional según tu implementación; úsalo solo si viene
+    const toolEvents = (result as any)?.toolEvents as any[] | undefined;
+    if (Array.isArray(toolEvents)) {
+      const brief = toolEvents.map((e) => ({
+        name: e?.name,
+        ok: e?.ok ?? true,
+        status: e?.status ?? 200,
+      }));
+      log('toolEvents=', brief);
     }
-  } catch (err: any) {
-    console.error("CV:/api/chat UNCAUGHT ERROR:", err?.stack || err?.message || err);
-    return withCORS(
-      new Response(JSON.stringify({ error: String(err?.message || err) }), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      })
+
+    // Persistir threadId por sesión (memoria sin DB)
+    if (threadId) SESSION_THREADS.set(sessionId, threadId);
+
+    log('THREAD out=', threadId || null);
+    log('END (200) reply.len=', reply?.length || 0);
+    return NextResponse.json({ threadId, reply }, { status: 200 });
+  } catch (e: any) {
+    err('UNCAUGHT', e?.stack || e);
+    return new NextResponse(
+      JSON.stringify({ error: 'Server error', detail: String(e?.message || e) }),
+      { status: 500, headers: { 'content-type': 'application/json', 'x-cv-reason': 'exception' } }
     );
-  } finally {
-    console.log("CV:/api/chat POST end in", Date.now() - t0, "ms");
   }
+}
+
+export async function GET() {
+  return NextResponse.json({ ok: true }, { status: 200 });
 }
