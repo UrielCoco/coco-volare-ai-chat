@@ -159,20 +159,44 @@ async function getAssistantModelId(): Promise<string> {
 }
 
 /* ---------- Handler ---------- */
+/* ---------- Handler ---------- */
 export async function POST(req: NextRequest) {
-  const { messages } = await req.json();
+  try {
+    const { messages } = await req.json();
 
-  const modelId = await getAssistantModelId();
+    const modelId = await getAssistantModelId(); // si no usas esto, deja tu selectedChatModel
 
-  return streamText({
-    model: myProvider.languageModel(modelId),
-    messages, // prompt vive en la consola del Assistant
-    tools: {
-      createItineraryDraft: createItineraryDraft as any,
-      priceQuote: priceQuote as any,
-      renderBrandDoc: renderBrandDoc as any,
-      sendProposal: sendProposal as any,
-    },
-    experimental_telemetry: { isEnabled: true },
-  });
+    const result = await streamText({
+      model: myProvider.languageModel(modelId),
+      messages,
+      tools: {
+        createItineraryDraft: createItineraryDraft as any,
+        priceQuote: priceQuote as any,
+        renderBrandDoc: renderBrandDoc as any,
+        sendProposal: sendProposal as any,
+      },
+      experimental_telemetry: { isEnabled: true },
+    });
+
+    // ⬇️ convierte a Response (NECESARIO en Next.js App Router)
+    if (typeof (result as any).toDataStreamResponse === "function") {
+      return (result as any).toDataStreamResponse();
+    }
+    if (typeof (result as any).toAIStreamResponse === "function") {
+      return (result as any).toAIStreamResponse();
+    }
+
+    // Fallback ultra defensivo (no debería usarse)
+    const text = await (result as any).text;
+    return new Response(text ?? "", {
+      status: 200,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({ error: String(err?.message || err) }),
+      { status: 500, headers: { "content-type": "application/json" } }
+    );
+  }
 }
+
