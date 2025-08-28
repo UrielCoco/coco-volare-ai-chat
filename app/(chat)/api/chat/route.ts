@@ -1,16 +1,13 @@
-/* /app/(chat)/api/chat/route.ts
- * Handler antifalla:
- *   1) streamText (AI SDK)
- *   2) fallback: ensamblar texto
- *   3) último recurso: OpenAI Chat Completions directo
- *   + logs detallados + CORS + timeouts
- */
+/* /app/(chat)/api/chat/route.ts – Handler antifalla + modo diagnóstico
+   - CHAT_DIAGNOSTIC_MODE=1 → responde inmediato (eco) para aislar problemas de red/front.
+   - Lee modelo del Assistant y usa streamText (con abort).
+   - Fallbacks garantizan Response siempre.
+*/
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import OpenAI from "openai";
 import { streamText } from "ai";
-
 import { myProvider } from "@/lib/ai/providers";
 import {
   hubBuildItinerary,
@@ -21,8 +18,21 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // Vercel Node limit
 
-/* ===================== Zod Schemas ===================== */
+/* ---------- CORS helpers ---------- */
+function withCORS(resp: Response) {
+  const r = new NextResponse(resp.body, resp);
+  r.headers.set("access-control-allow-origin", "*");
+  r.headers.set("access-control-allow-headers", "content-type");
+  r.headers.set("access-control-allow-methods", "POST,OPTIONS");
+  return r;
+}
+export async function OPTIONS() {
+  return withCORS(new Response(null, { status: 204 }));
+}
+
+/* ---------- Zod (igual que antes, comprimido) ---------- */
 const BrandMeta = z.object({
   templateId: z.enum(["CV-LUX-01", "CV-CORP-01", "CV-ADVENTURE-01"]),
   accent: z.enum(["gold", "black", "white"]).default("gold"),
@@ -68,7 +78,7 @@ const Quote = z.object({
   termsTemplateId: z.enum(["CV-TERMS-STD-01"]),
 });
 
-/* ===================== Tools “tool-like” ===================== */
+/* ---------- Tools “tool-like” ---------- */
 const createItineraryDraft = {
   description: "Crea un borrador de itinerario en formato Coco Volare",
   parameters: z.object({
@@ -90,7 +100,6 @@ const createItineraryDraft = {
     return { itinerary: parsed };
   },
 };
-
 const priceQuote = {
   description: "Genera cotización con motor del hub",
   parameters: z.object({
@@ -109,7 +118,6 @@ const priceQuote = {
     return { quote: parsed };
   },
 };
-
 const renderBrandDoc = {
   description: "Renderiza documento oficial (HTML/PDF) a partir de JSON",
   parameters: z.object({
@@ -129,7 +137,6 @@ const renderBrandDoc = {
     return res;
   },
 };
-
 const sendProposal = {
   description: "Envía la propuesta al cliente (email/WhatsApp)",
   parameters: z.object({
@@ -145,7 +152,7 @@ const sendProposal = {
   },
 };
 
-/* ===================== Modelo del Assistant ===================== */
+/* ---------- Modelo del Assistant ---------- */
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 let cachedAssistantModel: string | null = null;
@@ -164,26 +171,52 @@ async function getAssistantModelId(): Promise<string> {
   }
 }
 
-/* ===================== CORS ===================== */
-function withCORS(resp: Response) {
-  const r = new NextResponse(resp.body, resp);
-  r.headers.set("access-control-allow-origin", "*");
-  r.headers.set("access-control-allow-headers", "content-type");
-  r.headers.set("access-control-allow-methods", "POST,OPTIONS");
-  return r;
-}
-export async function OPTIONS() {
-  return withCORS(new Response(null, { status: 204 }));
+/* ---------- Body parser con timeout ---------- */
+async function parseBodyWithTimeout(req: NextRequest, ms = 5000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const json = await req.json();
+    return json ?? {};
+  } finally {
+    clearTimeout(t);
+  }
 }
 
-/* ===================== Handler ===================== */
+/* ---------- Handler ---------- */
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   console.log("CV:/api/chat POST start");
 
   try {
-    // ---- Parse body flexible
-    const body = await req.json().catch(() => ({}));
+    // 0) MODO DIAGNÓSTICO: respuesta inmediata
+    if (process.env.CHAT_DIAGNOSTIC_MODE === "1") {
+      const raw = await req.text().catch(() => "");
+      console.warn("CV:/api/chat DIAGNOSTIC_MODE=1 (bypass). rawLen=", raw.length);
+      return withCORS(
+        new Response(
+          JSON.stringify({ ok: true, mode: "diagnostic", echo: raw.slice(0, 2000) }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    }
+
+    // 1) Parse body (robusto)
+    let body: any = {};
+    try {
+      body = await parseBodyWithTimeout(req, 7000);
+    } catch (e: any) {
+      console.error("CV:/api/chat body parse TIMEOUT/ERROR:", e?.message || e);
+      // intentar leer texto por si el front mandó raw
+      const raw = await req.text().catch(() => "");
+      return withCORS(
+        new Response(JSON.stringify({ error: "bad_body", raw: raw.slice(0, 512) }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    }
+
     let messages = Array.isArray(body?.messages) ? body.messages : [];
     if (messages.length === 0) {
       const text =
@@ -194,7 +227,6 @@ export async function POST(req: NextRequest) {
     }
     console.log("CV:/api/chat messages.count =", messages.length);
     if (messages.length === 0) {
-      console.error("CV:/api/chat no messages in body");
       return withCORS(
         new Response(JSON.stringify({ error: "no_messages" }), {
           status: 400,
@@ -203,19 +235,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---- Lee modelo desde Assistant
+    // 2) Modelo
     const modelId = await getAssistantModelId().catch(() => "gpt-4o-mini");
     console.log("CV:/api/chat using model =", modelId);
 
-    // ---- Timeout por si el stream se cuelga
+    // 3) Stream con abort
     const controller = new AbortController();
     const timeout = setTimeout(() => {
-      console.error("CV:/api/chat TIMEOUT 25s – aborting stream");
+      console.error("CV:/api/chat TIMEOUT 20s – aborting stream");
       controller.abort();
-    }, 25_000);
+    }, 20_000);
 
-    // ---- 1) STREAM
-    let result: any;
+    let result: any = null;
     try {
       result = await streamText({
         model: myProvider.languageModel(modelId),
@@ -235,7 +266,7 @@ export async function POST(req: NextRequest) {
       clearTimeout(timeout);
     }
 
-    // ---- ¿Tenemos método para convertir a Response?
+    // 3a) Si hay método de stream → usarlo
     if (result) {
       const toResp =
         result?.toDataStreamResponse || result?.toAIStreamResponse;
@@ -251,7 +282,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ---- 2) Fallback: intenta obtener texto del resultado
+    // 4) Fallback: ensamblar texto
     let textOut = "";
     try {
       if (typeof result?.text === "string") {
@@ -272,18 +303,11 @@ export async function POST(req: NextRequest) {
         textOut = chunks.join("");
       }
     } catch (e: any) {
-      console.error(
-        "CV:/api/chat FALLBACK assemble ERROR:",
-        e?.message || e
-      );
+      console.error("CV:/api/chat FALLBACK assemble ERROR:", e?.message || e);
     }
 
     if (textOut && textOut.trim()) {
-      console.warn(
-        "CV:/api/chat FALLBACK text returned (len=",
-        textOut.length,
-        ")"
-      );
+      console.warn("CV:/api/chat FALLBACK text returned (len=", textOut.length, ")");
       return withCORS(
         new Response(textOut, {
           status: 200,
@@ -292,9 +316,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---- 3) Último recurso: llamada directa a OpenAI Chat Completions
+    // 5) Último recurso: OpenAI Chat Completions (no-stream)
     try {
-      console.warn("CV:/api/chat HARD FALLBACK → OpenAI chat.completions");
+      console.warn("CV:/api/chat HARD FALLBACK → chat.completions");
       const client = new OpenAI({ apiKey: OPENAI_API_KEY });
       const cc = await client.chat.completions.create({
         model: modelId,
@@ -310,15 +334,12 @@ export async function POST(req: NextRequest) {
         })
       );
     } catch (e: any) {
-      console.error(
-        "CV:/api/chat HARD FALLBACK ERROR:",
-        e?.message || e
-      );
+      console.error("CV:/api/chat HARD FALLBACK ERROR:", e?.message || e);
       return withCORS(
-        new Response(
-          JSON.stringify({ error: "openai_chat_fallback_failed" }),
-          { status: 502, headers: { "content-type": "application/json" } }
-        )
+        new Response(JSON.stringify({ error: "openai_chat_fallback_failed" }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        })
       );
     }
   } catch (err: any) {
