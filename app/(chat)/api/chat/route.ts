@@ -37,26 +37,10 @@ export async function OPTIONS(req: NextRequest) {
   return withCors(req, res);
 }
 
-/* ---------- Body parser robusto ---------- */
+/* ---------- Body parser ---------- */
 function pickText(body: any): string {
   if (body == null) return "";
   if (typeof body === "string") return body.trim();
-
-  const direct = ["message", "text", "prompt"];
-  for (const k of direct) {
-    const v = (body as any)[k];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    if (v && typeof v?.text === "string" && v.text.trim()) return v.text.trim();
-  }
-
-  const msg = (body as any).message;
-  if (msg?.parts && Array.isArray(msg.parts)) {
-    for (const p of msg.parts) {
-      if (typeof p === "string" && p.trim()) return p.trim();
-      if (p && typeof p.text === "string" && p.text.trim()) return p.text.trim();
-      if (p && typeof p.content === "string" && p.content.trim()) return p.content.trim();
-    }
-  }
 
   const messages = (body as any).messages;
   if (Array.isArray(messages) && messages.length) {
@@ -67,39 +51,34 @@ function pickText(body: any): string {
     if (lastUser) {
       if (typeof lastUser.content === "string" && lastUser.content.trim())
         return lastUser.content.trim();
-
       if (Array.isArray(lastUser.content)) {
         for (const c of lastUser.content) {
           if (typeof c === "string" && c.trim()) return c.trim();
           if (typeof c?.text === "string" && c.text.trim()) return c.text.trim();
-          if (typeof c?.content === "string" && c.content.trim())
-            return c.content.trim();
+          if (typeof c?.content === "string" && c.content.trim()) return c.content.trim();
           if (typeof c?.value === "string" && c.value.trim()) return c.value.trim();
         }
       }
     }
   }
 
-  if (Array.isArray((body as any).content)) {
-    for (const c of (body as any).content) {
-      if (typeof c === "string" && c.trim()) return c.trim();
-      if (typeof c?.text === "string" && c.text.trim()) return c.text.trim();
-      if (typeof c?.content === "string" && c.content.trim())
-        return c.content.trim();
-    }
+  const direct = ["message", "text", "prompt"];
+  for (const k of direct) {
+    const v = (body as any)[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (v && typeof v?.text === "string" && v.text.trim()) return v.text.trim();
   }
+  if (typeof (body as any).content === "string") return (body as any).content.trim();
   return "";
 }
 
-/* ---------- Helpers ---------- */
+/* ---------- Session helper ---------- */
 async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string; threadId: string }> {
-  // usa SIEMPRE el origen real de esta request
-  const origin = req.nextUrl.origin; // <— clave para no construir mal el host
+  const origin = req.nextUrl.origin; // correcto host
   const sid =
     req.headers.get("x-cv-session") ||
     req.cookies.get("cv_session")?.value ||
     "";
-
   const url = `${origin.replace(/\/$/, "")}/api/chat/session${sid ? `?sid=${encodeURIComponent(sid)}` : ""}`;
   const r = await fetch(url, {
     method: "GET",
@@ -109,23 +88,14 @@ async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string
 
   const ct = r.headers.get("content-type") || "";
   const raw = await r.text();
-
-  if (!r.ok) {
-    // Log detallado para diagnosticar errores de HTML
-    throw new Error(`session fetch failed: ${r.status} ${raw.slice(0, 200)}`);
-  }
-
+  if (!r.ok) throw new Error(`session fetch failed: ${r.status} ${raw.slice(0, 200)}`);
   let j: any = {};
   try {
     j = ct.includes("application/json") ? JSON.parse(raw) : {};
-  } catch (e) {
-    // Si vino HTML (<!doctype ...) u otro texto, corta con error legible
+  } catch {
     throw new Error(`session returned non-JSON: ${raw.slice(0, 200)}`);
   }
-
-  if (!j?.sessionId || !j?.threadId) {
-    throw new Error(`session response missing fields: ${raw.slice(0, 200)}`);
-  }
+  if (!j?.sessionId || !j?.threadId) throw new Error(`session response missing fields: ${raw.slice(0, 200)}`);
   return { sessionId: j.sessionId, threadId: j.threadId };
 }
 
@@ -133,11 +103,9 @@ async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string
 export async function POST(req: NextRequest) {
   const started = Date.now();
   try {
-    // parse body con fallback
     const ctIn = req.headers.get("content-type") || "";
     let body: any = {};
     if (ctIn.includes("application/json")) {
-      // si llega HTML por error (edge), este try/catch lo atrapa
       body = (await req.json().catch(async () => {
         const t = await req.text().catch(() => "");
         try { return JSON.parse(t); } catch { return {}; }
@@ -148,22 +116,13 @@ export async function POST(req: NextRequest) {
     }
 
     const text = pickText(body);
-    console.log(
-      "CV:/api/chat START method=POST origin=",
-      req.headers.get("origin"),
-      "len=",
-      text.length
-    );
-
+    console.log("CV:/api/chat START method=POST origin=", req.headers.get("origin"), "len=", text.length);
     if (!text) {
-      const res = NextResponse.json(
-        { error: "Message content must be non-empty." },
-        { status: 400 }
-      );
+      const res = NextResponse.json({ error: "Message content must be non-empty." }, { status: 400 });
       return withCors(req, res);
     }
 
-    // 1) Asegurar threadId para esta sesión (usa origin correcto)
+    // 1) Session → thread
     let sessionId = "";
     let threadId = "";
     try {
@@ -172,25 +131,18 @@ export async function POST(req: NextRequest) {
       threadId = s.threadId;
     } catch (e: any) {
       console.error("CV:/api/chat session fetch ERROR:", e?.message || e);
-      // Si falla la sesión, seguimos sin threadId (el runner creará uno nuevo).
-      // Esto preserva UX (pero pierdes continuidad). Lo ideal es arreglar session endpoint.
+      // si falla, se creará un thread nuevo en el runner (pierdes continuidad)
     }
 
     // 2) Hub config
-    const hubBaseUrl =
-      process.env.NEXT_PUBLIC_HUB_BASE_URL || process.env.HUB_BASE_URL;
-    const hubSecret =
-      process.env.HUB_BRIDGE_SECRET || process.env.WEBHOOK_SECRET;
-
+    const hubBaseUrl = process.env.NEXT_PUBLIC_HUB_BASE_URL || process.env.HUB_BASE_URL;
+    const hubSecret = process.env.HUB_BRIDGE_SECRET || process.env.WEBHOOK_SECRET;
     if (!hubBaseUrl || !hubSecret) {
-      const res = NextResponse.json(
-        { error: "Hub config missing (HUB_BASE_URL / HUB_BRIDGE_SECRET)" },
-        { status: 500 }
-      );
+      const res = NextResponse.json({ error: "Hub config missing (HUB_BASE_URL / HUB_BRIDGE_SECRET)" }, { status: 500 });
       return withCors(req, res);
     }
 
-    // 3) Ejecutar assistant (si threadId vacío, crea uno nuevo; tendrás continuidad solo si session ok)
+    // 3) Ejecutar Assistant (Kommo + Hub tools)
     const result = await runAssistantWithTools(text, {
       threadId: threadId || undefined,
       hubBaseUrl,
@@ -207,7 +159,6 @@ export async function POST(req: NextRequest) {
       },
       { status: 200 }
     );
-    // eco de sesión en cookie, para el cliente
     if (sessionId) {
       res.cookies.set("cv_session", sessionId, {
         httpOnly: false,
@@ -220,10 +171,7 @@ export async function POST(req: NextRequest) {
     return withCors(req, res);
   } catch (err: any) {
     console.error("CV:/api/chat ERROR:", err);
-    const res = NextResponse.json(
-      { error: String(err?.message || err) },
-      { status: 500 }
-    );
+    const res = NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
     return withCors(req, res);
   }
 }
