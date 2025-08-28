@@ -67,7 +67,6 @@
     "orderedmap": "^2.1.1",
     "papaparse": "^5.5.2",
     "pg": "^8.11.5",
-    "tsx": "^4.16.2",
     "postgres": "^3.4.4",
     "prosemirror-example-setup": "^1.2.3",
     "prosemirror-inputrules": "^1.4.0",
@@ -90,9 +89,10 @@
     "swr": "^2.2.5",
     "tailwind-merge": "^2.5.2",
     "tailwindcss-animate": "^1.0.7",
+    "tsx": "^4.16.2",
     "usehooks-ts": "^3.1.0",
     "uuid": "^11.1.0",
-    "zod": "^3.25.68"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
