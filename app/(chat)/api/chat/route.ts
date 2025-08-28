@@ -1,4 +1,3 @@
-// /app/(chat)/api/chat/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { runAssistantWithTools } from "@/lib/ai/providers/openai-assistant";
 
@@ -29,7 +28,7 @@ function corsHeaders(req: NextRequest) {
 }
 function withCors(req: NextRequest, res: NextResponse) {
   const h = corsHeaders(req);
-  Object.entries(h).forEach(([k, v]) => res.headers.set(k, v));
+  Object.entries(h).forEach(([k, v]) => res.headers.set(k, v as string));
   return res;
 }
 
@@ -94,25 +93,39 @@ function pickText(body: any): string {
 
 /* ---------- Helpers ---------- */
 async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string; threadId: string }> {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    process.env.VERCEL_URL?.startsWith("http")
-      ? (process.env.VERCEL_URL as string)
-      : `https://${process.env.VERCEL_URL}`;
-
+  // usa SIEMPRE el origen real de esta request
+  const origin = req.nextUrl.origin; // <— clave para no construir mal el host
   const sid =
     req.headers.get("x-cv-session") ||
     req.cookies.get("cv_session")?.value ||
     "";
 
-  const url = `${baseUrl?.replace(/\/$/, "")}/api/chat/session` + (sid ? `?sid=${encodeURIComponent(sid)}` : "");
+  const url = `${origin.replace(/\/$/, "")}/api/chat/session${sid ? `?sid=${encodeURIComponent(sid)}` : ""}`;
   const r = await fetch(url, {
     method: "GET",
     headers: { "x-cv-session": sid || "" },
     cache: "no-store",
   });
-  const j = await r.json();
-  if (!r.ok) throw new Error(`session fetch failed: ${r.status} ${JSON.stringify(j)}`);
+
+  const ct = r.headers.get("content-type") || "";
+  const raw = await r.text();
+
+  if (!r.ok) {
+    // Log detallado para diagnosticar errores de HTML
+    throw new Error(`session fetch failed: ${r.status} ${raw.slice(0, 200)}`);
+  }
+
+  let j: any = {};
+  try {
+    j = ct.includes("application/json") ? JSON.parse(raw) : {};
+  } catch (e) {
+    // Si vino HTML (<!doctype ...) u otro texto, corta con error legible
+    throw new Error(`session returned non-JSON: ${raw.slice(0, 200)}`);
+  }
+
+  if (!j?.sessionId || !j?.threadId) {
+    throw new Error(`session response missing fields: ${raw.slice(0, 200)}`);
+  }
   return { sessionId: j.sessionId, threadId: j.threadId };
 }
 
@@ -120,17 +133,18 @@ async function fetchSessionThread(req: NextRequest): Promise<{ sessionId: string
 export async function POST(req: NextRequest) {
   const started = Date.now();
   try {
-    const ct = req.headers.get("content-type") || "";
+    // parse body con fallback
+    const ctIn = req.headers.get("content-type") || "";
     let body: any = {};
-    if (ct.includes("application/json")) {
-      body = (await req.json().catch(() => ({}))) || {};
+    if (ctIn.includes("application/json")) {
+      // si llega HTML por error (edge), este try/catch lo atrapa
+      body = (await req.json().catch(async () => {
+        const t = await req.text().catch(() => "");
+        try { return JSON.parse(t); } catch { return {}; }
+      })) || {};
     } else {
       const txt = await req.text();
-      try {
-        body = JSON.parse(txt);
-      } catch {
-        body = txt;
-      }
+      try { body = JSON.parse(txt); } catch { body = txt; }
     }
 
     const text = pickText(body);
@@ -149,8 +163,18 @@ export async function POST(req: NextRequest) {
       return withCors(req, res);
     }
 
-    // 1) Asegurar threadId para esta sesión
-    const { sessionId, threadId } = await fetchSessionThread(req);
+    // 1) Asegurar threadId para esta sesión (usa origin correcto)
+    let sessionId = "";
+    let threadId = "";
+    try {
+      const s = await fetchSessionThread(req);
+      sessionId = s.sessionId;
+      threadId = s.threadId;
+    } catch (e: any) {
+      console.error("CV:/api/chat session fetch ERROR:", e?.message || e);
+      // Si falla la sesión, seguimos sin threadId (el runner creará uno nuevo).
+      // Esto preserva UX (pero pierdes continuidad). Lo ideal es arreglar session endpoint.
+    }
 
     // 2) Hub config
     const hubBaseUrl =
@@ -166,9 +190,9 @@ export async function POST(req: NextRequest) {
       return withCors(req, res);
     }
 
-    // 3) Ejecutar assistant con threadId persistente
+    // 3) Ejecutar assistant (si threadId vacío, crea uno nuevo; tendrás continuidad solo si session ok)
     const result = await runAssistantWithTools(text, {
-      threadId,
+      threadId: threadId || undefined,
       hubBaseUrl,
       hubSecret,
     });
@@ -178,19 +202,21 @@ export async function POST(req: NextRequest) {
         reply: result.reply,
         threadId: result.threadId,
         toolEvents: result.toolEvents,
-        sessionId,
+        sessionId: sessionId || undefined,
         ms: Date.now() - started,
       },
       { status: 200 }
     );
     // eco de sesión en cookie, para el cliente
-    res.cookies.set("cv_session", sessionId, {
-      httpOnly: false,
-      sameSite: "lax",
-      secure: true,
-      maxAge: 60 * 60 * 24 * 365,
-      path: "/",
-    });
+    if (sessionId) {
+      res.cookies.set("cv_session", sessionId, {
+        httpOnly: false,
+        sameSite: "lax",
+        secure: true,
+        maxAge: 60 * 60 * 24 * 365,
+        path: "/",
+      });
+    }
     return withCors(req, res);
   } catch (err: any) {
     console.error("CV:/api/chat ERROR:", err);
