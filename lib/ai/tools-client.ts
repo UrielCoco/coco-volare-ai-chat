@@ -1,33 +1,39 @@
-/**
- * lib/ai/tools-client.ts – cliente del Hub
- * Opción A: usa tus envs reales
- *   - URL:   NEXT_PUBLIC_HUB_BASE_URL
- *   - SECRET: HUB_BRAIN_SECRET o HUB_BRIDGE_SECRET (el que tengas)
- */
-
+// lib/ai/tools-client.ts – cliente del Hub con logs simples
 const HUB = process.env.NEXT_PUBLIC_HUB_BASE_URL!;
 const SECRET =
   process.env.HUB_BRAIN_SECRET || process.env.HUB_BRIDGE_SECRET || "";
 
-if (!HUB) {
-  console.warn("NEXT_PUBLIC_HUB_BASE_URL is not set");
-}
-
 async function callHub(action: string, payload: any) {
-  const res = await fetch(`${HUB}/api/hub`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-hub-secret": SECRET,
-    },
-    body: JSON.stringify({ action, payload }),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`hub ${action} failed: ${res.status} ${text}`);
+  const url = `${HUB.replace(/\/$/, "")}/api/hub`;
+  const body = { action, payload };
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-hub-secret": SECRET,
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    try {
+      const json = JSON.parse(text);
+      if (!res.ok) {
+        console.error("CV:/hub error", action, res.status, json);
+        throw new Error(`hub ${action} failed: ${res.status}`);
+      }
+      return json;
+    } catch {
+      console.error("CV:/hub non-json response", action, res.status, text);
+      throw new Error(`hub ${action} non-json`);
+    }
+  } catch (e: any) {
+    console.error("CV:/hub fetch ERROR", action, e?.message || e);
+    throw e;
   }
-  return await res.json();
 }
 
 export const hubBuildItinerary = (p: any) => callHub("itinerary.build", p);
