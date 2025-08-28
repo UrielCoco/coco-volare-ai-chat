@@ -1,47 +1,36 @@
 /**
- * Client wrappers that the tool handlers (in the chat route) will call.
- * These hit the agent-hub-brain endpoints so we don't duplicate logic.
+ * lib/ai/tools-client.ts – cliente del Hub
+ * Opción A: usa tus envs reales
+ *   - URL:   NEXT_PUBLIC_HUB_BASE_URL
+ *   - SECRET: HUB_BRAIN_SECRET o HUB_BRIDGE_SECRET (el que tengas)
  */
-export async function hubBuildItinerary(payload: any) {
-  const res = await fetch(`${process.env.HUB_BRAIN_URL}/api/itinerary/build`, {
+
+const HUB = process.env.NEXT_PUBLIC_HUB_BASE_URL!;
+const SECRET =
+  process.env.HUB_BRAIN_SECRET || process.env.HUB_BRIDGE_SECRET || "";
+
+if (!HUB) {
+  console.warn("NEXT_PUBLIC_HUB_BASE_URL is not set");
+}
+
+async function callHub(action: string, payload: any) {
+  const res = await fetch(`${HUB}/api/hub`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-hub-secret": process.env.HUB_BRAIN_SECRET || "" },
-    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+      "x-hub-secret": SECRET,
+    },
+    body: JSON.stringify({ action, payload }),
     cache: "no-store",
   });
-  if (!res.ok) throw new Error(`hubBuildItinerary failed: ${res.status}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`hub ${action} failed: ${res.status} ${text}`);
+  }
   return await res.json();
 }
 
-export async function hubQuote(payload: any) {
-  const res = await fetch(`${process.env.HUB_BRAIN_URL}/api/quote`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-hub-secret": process.env.HUB_BRAIN_SECRET || "" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`hubQuote failed: ${res.status}`);
-  return await res.json();
-}
-
-export async function hubRender(payload: any) {
-  const res = await fetch(`${process.env.HUB_BRAIN_URL}/api/render`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-hub-secret": process.env.HUB_BRAIN_SECRET || "" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`hubRender failed: ${res.status}`);
-  return await res.json();
-}
-
-export async function hubSend(payload: any) {
-  const res = await fetch(`${process.env.HUB_BRAIN_URL}/api/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-hub-secret": process.env.HUB_BRAIN_SECRET || "" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`hubSend failed: ${res.status}`);
-  return await res.json();
-}
+export const hubBuildItinerary = (p: any) => callHub("itinerary.build", p);
+export const hubQuote = (p: any) => callHub("quote", p);
+export const hubRender = (p: any) => callHub("render", p);
+export const hubSend = (p: any) => callHub("send", p);
