@@ -1,7 +1,9 @@
 /* /app/(chat)/api/chat/route.ts
- * - Usa el modelo configurado en tu Assistant (OpenAI Console)
- * - Devuelve SIEMPRE un Response (stream o fallback)
- * - Logs detallados para debug en Vercel
+ * Handler antifalla:
+ *   1) streamText (AI SDK)
+ *   2) fallback: ensamblar texto
+ *   3) último recurso: OpenAI Chat Completions directo
+ *   + logs detallados + CORS + timeouts
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -20,13 +22,12 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ===================== Zod Schemas (como tenías) ===================== */
+/* ===================== Zod Schemas ===================== */
 const BrandMeta = z.object({
   templateId: z.enum(["CV-LUX-01", "CV-CORP-01", "CV-ADVENTURE-01"]),
   accent: z.enum(["gold", "black", "white"]).default("gold"),
   watermark: z.boolean().default(true),
 });
-
 const Activity = z.object({
   timeRange: z.string().optional(),
   title: z.string(),
@@ -34,7 +35,6 @@ const Activity = z.object({
   logistics: z.string().optional(),
   icon: z.string().optional(),
 });
-
 const ItineraryDay = z.object({
   dayNumber: z.number(),
   title: z.string(),
@@ -43,7 +43,6 @@ const ItineraryDay = z.object({
   activities: z.array(Activity),
   notes: z.string().optional(),
 });
-
 const ItineraryDraft = z.object({
   brandMeta: BrandMeta,
   travelerProfile: z.enum(["corporate", "leisure", "honeymoon", "bleisure"]),
@@ -51,7 +50,6 @@ const ItineraryDraft = z.object({
   cityBases: z.array(z.string()),
   days: z.array(ItineraryDay),
 });
-
 const QuoteItem = z.object({
   sku: z.string(),
   label: z.string(),
@@ -59,9 +57,7 @@ const QuoteItem = z.object({
   unitPrice: z.number().nonnegative(),
   subtotal: z.number().nonnegative(),
 });
-
 const Line = z.object({ label: z.string(), amount: z.number().nonnegative() });
-
 const Quote = z.object({
   currency: z.enum(["USD", "COP", "MXN", "EUR"]),
   items: z.array(QuoteItem),
@@ -130,7 +126,7 @@ const renderBrandDoc = {
   execute: async (ctx: any) => {
     const { parameters } = ctx ?? {};
     const res = await hubRender(parameters);
-    return res; // { url, html? }
+    return res;
   },
 };
 
@@ -145,7 +141,7 @@ const sendProposal = {
   execute: async (ctx: any) => {
     const { parameters } = ctx ?? {};
     const res = await hubSend(parameters);
-    return res; // { ok: true }
+    return res;
   },
 };
 
@@ -158,8 +154,8 @@ async function getAssistantModelId(): Promise<string> {
   if (cachedAssistantModel) return cachedAssistantModel;
   try {
     const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-    const assistant = await client.beta.assistants.retrieve(ASSISTANT_ID);
-    cachedAssistantModel = assistant.model || "gpt-4o-mini";
+    const a = await client.beta.assistants.retrieve(ASSISTANT_ID);
+    cachedAssistantModel = a.model || "gpt-4o-mini";
     console.log("CV:/api/chat assistant.model =", cachedAssistantModel);
     return cachedAssistantModel;
   } catch (e: any) {
@@ -168,7 +164,7 @@ async function getAssistantModelId(): Promise<string> {
   }
 }
 
-/* ===================== Util: CORS/Preflight ===================== */
+/* ===================== CORS ===================== */
 function withCORS(resp: Response) {
   const r = new NextResponse(resp.body, resp);
   r.headers.set("access-control-allow-origin", "*");
@@ -176,21 +172,19 @@ function withCORS(resp: Response) {
   r.headers.set("access-control-allow-methods", "POST,OPTIONS");
   return r;
 }
-
 export async function OPTIONS() {
   return withCORS(new Response(null, { status: 204 }));
 }
 
-/* ===================== Handler con logs y fallbacks ===================== */
+/* ===================== Handler ===================== */
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   console.log("CV:/api/chat POST start");
 
   try {
-    // 1) Parse body (soporta varios shapes)
+    // ---- Parse body flexible
     const body = await req.json().catch(() => ({}));
     let messages = Array.isArray(body?.messages) ? body.messages : [];
-
     if (messages.length === 0) {
       const text =
         body?.text || body?.message || body?.prompt || body?.content || "";
@@ -198,9 +192,7 @@ export async function POST(req: NextRequest) {
         messages = [{ role: "user", content: String(text).trim() }];
       }
     }
-
     console.log("CV:/api/chat messages.count =", messages.length);
-
     if (messages.length === 0) {
       console.error("CV:/api/chat no messages in body");
       return withCORS(
@@ -211,18 +203,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2) Modelo desde Assistant
+    // ---- Lee modelo desde Assistant
     const modelId = await getAssistantModelId().catch(() => "gpt-4o-mini");
     console.log("CV:/api/chat using model =", modelId);
 
-    // 3) Timeout defensivo (por si el proveedor se cuelga)
+    // ---- Timeout por si el stream se cuelga
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       console.error("CV:/api/chat TIMEOUT 25s – aborting stream");
       controller.abort();
     }, 25_000);
 
-    // 4) streamText
+    // ---- 1) STREAM
     let result: any;
     try {
       result = await streamText({
@@ -239,66 +231,96 @@ export async function POST(req: NextRequest) {
       });
     } catch (e: any) {
       console.error("CV:/api/chat streamText ERROR:", e?.message || e);
+    } finally {
       clearTimeout(timeout);
+    }
+
+    // ---- ¿Tenemos método para convertir a Response?
+    if (result) {
+      const toResp =
+        result?.toDataStreamResponse || result?.toAIStreamResponse;
+      if (typeof toResp === "function") {
+        const resp: Response = toResp.call(result);
+        console.log(
+          "CV:/api/chat stream OK in",
+          Date.now() - t0,
+          "ms – headers:",
+          Object.fromEntries(resp.headers.entries())
+        );
+        return withCORS(resp);
+      }
+    }
+
+    // ---- 2) Fallback: intenta obtener texto del resultado
+    let textOut = "";
+    try {
+      if (typeof result?.text === "string") {
+        textOut = result.text;
+      } else if (result?.text && typeof result.text.then === "function") {
+        textOut = await result.text;
+      } else if (
+        result?.partialResults &&
+        typeof result.partialResults[Symbol.asyncIterator] === "function"
+      ) {
+        const chunks: string[] = [];
+        for await (const part of result.partialResults as any) {
+          if (typeof part?.text === "string") chunks.push(part.text);
+          else if (typeof part?.delta === "string") chunks.push(part.delta);
+          else if (typeof part?.textDelta === "string")
+            chunks.push(part.textDelta);
+        }
+        textOut = chunks.join("");
+      }
+    } catch (e: any) {
+      console.error(
+        "CV:/api/chat FALLBACK assemble ERROR:",
+        e?.message || e
+      );
+    }
+
+    if (textOut && textOut.trim()) {
+      console.warn(
+        "CV:/api/chat FALLBACK text returned (len=",
+        textOut.length,
+        ")"
+      );
       return withCORS(
-        new Response(JSON.stringify({ error: String(e?.message || e) }), {
-          status: 500,
-          headers: { "content-type": "application/json" },
+        new Response(textOut, {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
         })
       );
     }
 
-    clearTimeout(timeout);
-
-    // 5) Convertir SIEMPRE a Response válida
-    const toResp =
-      result?.toDataStreamResponse || result?.toAIStreamResponse;
-
-    if (typeof toResp === "function") {
-      const resp: Response = toResp.call(result);
-      console.log(
-        "CV:/api/chat stream OK in",
-        Date.now() - t0,
-        "ms – headers:",
-        Object.fromEntries(resp.headers.entries())
+    // ---- 3) Último recurso: llamada directa a OpenAI Chat Completions
+    try {
+      console.warn("CV:/api/chat HARD FALLBACK → OpenAI chat.completions");
+      const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+      const cc = await client.chat.completions.create({
+        model: modelId,
+        messages: messages as any,
+        temperature: 0.8,
+      });
+      const finalText =
+        cc.choices?.[0]?.message?.content || "[sin contenido de OpenAI]";
+      return withCORS(
+        new Response(finalText, {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        })
       );
-      return withCORS(resp);
+    } catch (e: any) {
+      console.error(
+        "CV:/api/chat HARD FALLBACK ERROR:",
+        e?.message || e
+      );
+      return withCORS(
+        new Response(
+          JSON.stringify({ error: "openai_chat_fallback_failed" }),
+          { status: 502, headers: { "content-type": "application/json" } }
+        )
+      );
     }
-
-    // 6) Fallback: intenta retornar texto plano
-    // 6) Fallback robusto: resuelve Promise o arma texto desde partialResults
-let textOut = "";
-try {
-  if (typeof result?.text === "string") {
-    textOut = result.text;
-  } else if (result?.text && typeof result.text.then === "function") {
-    // ai@v5: text puede ser una Promise
-    textOut = await result.text;
-  } else if (result?.partialResults && typeof result.partialResults[Symbol.asyncIterator] === "function") {
-    // Ensambla desde el async iterator de partialResults (por si no hay .toDataStreamResponse)
-    const chunks: string[] = [];
-    for await (const part of result.partialResults as any) {
-      if (typeof part?.text === "string") chunks.push(part.text);
-      else if (typeof part?.delta === "string") chunks.push(part.delta);
-      else if (typeof part?.textDelta === "string") chunks.push(part.textDelta);
-    }
-    textOut = chunks.join("") || "[partialResults vacío]";
-  } else {
-    textOut = "[sin stream/text disponibles en result]";
-  }
-} catch (e: any) {
-  console.error("CV:/api/chat FALLBACK build text ERROR:", e?.message || e);
-  textOut = "[error construyendo fallback]";
-}
-
-console.warn("CV:/api/chat FALLBACK text returned (len=", textOut.length, ")");
-return withCORS(
-  new Response(textOut, {
-    status: 200,
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  })
-);
-
   } catch (err: any) {
     console.error("CV:/api/chat UNCAUGHT ERROR:", err?.stack || err?.message || err);
     return withCORS(
