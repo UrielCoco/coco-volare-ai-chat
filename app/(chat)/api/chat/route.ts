@@ -1,16 +1,14 @@
-/* /app/(chat)/api/chat/route.ts – Versión sin `tool()` (compila en ai@5.0.0-beta.6)
- * - Prompt vive en consola del Assistant (no importamos nada).
- * - Tools como objetos simples; sin sobrecargas de tipos.
- * - Valida respuestas del hub con Zod.
+/* /app/(chat)/api/chat/route.ts – usa el modelo configurado en el Assistant
+ * - Lee assistant.model con el SDK oficial de OpenAI
+ * - Usa ese modelId en streamText (no dependemos de selectedChatModel)
+ * - Mantiene tus tools hacia el hub
  */
 
 import { NextRequest } from "next/server";
 import { z } from "zod";
+import OpenAI from "openai";
 
-// Ajusta esta ruta a TU provider real:
 import { myProvider } from "@/lib/ai/providers";
-
-// Clientes HTTP hacia tu Hub (Pages Router)
 import {
   hubBuildItinerary,
   hubQuote,
@@ -18,16 +16,14 @@ import {
   hubSend,
 } from "@/lib/ai/tools-client";
 
-// AI SDK (SOLO streamText)
 import { streamText } from "ai";
 
-/* ---------- Zod Schemas ---------- */
+/* ---------- Zod Schemas (igual) ---------- */
 const BrandMeta = z.object({
   templateId: z.enum(["CV-LUX-01", "CV-CORP-01", "CV-ADVENTURE-01"]),
   accent: z.enum(["gold", "black", "white"]).default("gold"),
   watermark: z.boolean().default(true),
 });
-
 const Activity = z.object({
   timeRange: z.string().optional(),
   title: z.string(),
@@ -35,7 +31,6 @@ const Activity = z.object({
   logistics: z.string().optional(),
   icon: z.string().optional(),
 });
-
 const ItineraryDay = z.object({
   dayNumber: z.number(),
   title: z.string(),
@@ -44,7 +39,6 @@ const ItineraryDay = z.object({
   activities: z.array(Activity),
   notes: z.string().optional(),
 });
-
 const ItineraryDraft = z.object({
   brandMeta: BrandMeta,
   travelerProfile: z.enum(["corporate", "leisure", "honeymoon", "bleisure"]),
@@ -52,7 +46,6 @@ const ItineraryDraft = z.object({
   cityBases: z.array(z.string()),
   days: z.array(ItineraryDay),
 });
-
 const QuoteItem = z.object({
   sku: z.string(),
   label: z.string(),
@@ -60,9 +53,7 @@ const QuoteItem = z.object({
   unitPrice: z.number().nonnegative(),
   subtotal: z.number().nonnegative(),
 });
-
 const Line = z.object({ label: z.string(), amount: z.number().nonnegative() });
-
 const Quote = z.object({
   currency: z.enum(["USD", "COP", "MXN", "EUR"]),
   items: z.array(QuoteItem),
@@ -73,11 +64,7 @@ const Quote = z.object({
   termsTemplateId: z.enum(["CV-TERMS-STD-01"]),
 });
 
-/* ---------- Tools “tool-like” (sin factory) ---------- */
-/* Definimos objetos planos con { description, parameters, execute }.
-   Tipamos execute con `any` para evitar el bug de d.ts que te arrojaba (parameters: never).
-*/
-
+/* ---------- Tools “tool-like” ---------- */
 const createItineraryDraft = {
   description: "Crea un borrador de itinerario en formato Coco Volare",
   parameters: z.object({
@@ -92,7 +79,6 @@ const createItineraryDraft = {
     }),
     preferences: z.record(z.any()).optional(),
   }),
-  // 👇 ctx: any para esquivar el problema de “never/undefined”
   execute: async (ctx: any) => {
     const { parameters } = ctx ?? {};
     const res = await hubBuildItinerary(parameters);
@@ -136,7 +122,7 @@ const renderBrandDoc = {
   execute: async (ctx: any) => {
     const { parameters } = ctx ?? {};
     const res = await hubRender(parameters);
-    return res; // { url, html? }
+    return res;
   },
 };
 
@@ -151,19 +137,36 @@ const sendProposal = {
   execute: async (ctx: any) => {
     const { parameters } = ctx ?? {};
     const res = await hubSend(parameters);
-    return res; // { ok: true }
+    return res;
   },
 };
 
+/* ---------- Leer el modelo del Assistant ---------- */
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+let cachedAssistantModel: string | null = null;
+
+async function getAssistantModelId(): Promise<string> {
+  if (cachedAssistantModel) return cachedAssistantModel;
+  try {
+    const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+    const assistant = await client.beta.assistants.retrieve(ASSISTANT_ID);
+    cachedAssistantModel = assistant.model || "gpt-4o-mini";
+    return cachedAssistantModel;
+  } catch {
+    return "gpt-4o-mini";
+  }
+}
+
 /* ---------- Handler ---------- */
 export async function POST(req: NextRequest) {
-  const { messages, selectedChatModel } = await req.json();
+  const { messages } = await req.json();
+
+  const modelId = await getAssistantModelId();
 
   return streamText({
-    model: myProvider.languageModel(selectedChatModel),
-    // El system prompt vive en la consola del Assistant
-    messages,
-    // Tip-off: si TS insiste, castea a any en el “tools”
+    model: myProvider.languageModel(modelId),
+    messages, // prompt vive en la consola del Assistant
     tools: {
       createItineraryDraft: createItineraryDraft as any,
       priceQuote: priceQuote as any,
