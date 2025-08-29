@@ -1,7 +1,7 @@
 'use client';
 
 import type { ChatMessage } from '@/lib/types';
-import ItineraryCard from './itinerary-card';
+import ItineraryCard from './itinerary-card'; // ✅ tu ruta real
 
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
@@ -46,15 +46,17 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
               );
             }
 
+            // ✅ pinta la tarjeta cuando venga el bloque cv:itinerary parseado en el front
             if (part?.type === 'itinerary' && part?.itinerary) {
               return (
                 <div key={idx} className="my-2 mb-8">
-                  {/* ✅ tu ItineraryCard recibe prop "data" */}
+                  {/* ItineraryCard espera prop "data" */}
                   <ItineraryCard data={part.itinerary} />
                 </div>
               );
             }
 
+            // (opcional) otros tipos como 'quote' si los usas
             if (part?.type === 'quote' && part?.quote) {
               return (
                 <pre
