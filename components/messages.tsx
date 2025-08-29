@@ -11,7 +11,7 @@ type RegenerateFn = () => Promise<void> | void;
 interface Props {
   messages: ChatMessage[];
   isLoading: boolean;
-  votes?: any[]; // opcional — si lo usas, ajústalo a tu tipo real de Vote
+  votes?: any[];
   setMessages: SetMessagesFn;
   regenerate: RegenerateFn;
   isReadonly: boolean;
@@ -30,7 +30,6 @@ export default function Messages({
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
 
-  // espacio que reserva el composer fijo
   const SPACER = 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 20px)';
 
   const toBottom = () => {
@@ -40,13 +39,11 @@ export default function Messages({
     if (el) el.scrollTop = el.scrollHeight;
   };
 
-  // autoscroll al agregar mensajes o cambiar loading
   useLayoutEffect(() => {
     const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
     return () => cancelAnimationFrame(id);
   }, [messages.length, isLoading]);
 
-  // autoscroll durante renders de markdown/typewriter
   useEffect(() => {
     const root = scrollRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
@@ -69,6 +66,16 @@ export default function Messages({
         className="relative flex flex-col px-4 pt-4 w-full h-full overflow-y-auto gap-3 md:gap-4"
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
       >
+        {messages.length === 0 && (
+          <div className="flex-1 flex items-center justify-center">
+            <img
+              src="/images/Intelligence.gif"
+              alt="Coco Volare"
+              className="opacity-70"
+            />
+          </div>
+        )}
+
         <AnimatePresence mode="popLayout">
           {messages.map((message) => (
             <motion.div
@@ -80,13 +87,12 @@ export default function Messages({
               transition={{ duration: 0.25 }}
               style={{ scrollMarginBottom: SPACER }}
             >
-              {/* ✅ Solo pasamos la prop que PreviewMessage realmente espera */}
               <PreviewMessage message={message} />
             </motion.div>
           ))}
         </AnimatePresence>
 
-        {/* Indicador “pensando…” (opcional) */}
+        {/* typing bubble SOLO si esperamos más */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
@@ -96,7 +102,6 @@ export default function Messages({
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.2 }}
               className="w-full mx-auto max-w-3xl px-4 mb-3"
-              style={{ marginBottom: `max(12px, env(safe-area-inset-bottom))`, scrollMarginBottom: SPACER }}
             >
               <div className="flex gap-4 w-full">
                 <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">

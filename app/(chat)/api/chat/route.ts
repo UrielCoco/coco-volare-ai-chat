@@ -1,128 +1,72 @@
-// /app/(chat)/api/chat/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { runAssistantOnce } from '@/lib/ai/providers/openai-assistant';
-import { kommoAddNote, kommoCreateLead } from '@/lib/kommo-sync';
-
-// Detecta bloque oculto enviado por el assistant para efectos CRM
-const RE_KOMMO = /```cv:kommo\s*([\s\S]*?)```/i;
+import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
-// Evita que Next intente cachear nada de esta API
-export const dynamic = 'force-dynamic';
 
-/** Normaliza respuestas de tu wrapper de Kommo a un leadId:number */
-function pickLeadId(x: any): number | null {
-  if (typeof x === 'number') return x;
-  if (!x || typeof x !== 'object') return null;
-  if (typeof x.lead_id === 'number') return x.lead_id;
-  if (typeof x.id === 'number') return x.id;
-  if (typeof x?.data?.lead_id === 'number') return x.data.lead_id;
-  if (Array.isArray(x?.data?.leads) && typeof x.data.leads[0]?.id === 'number') return x.data.leads[0].id;
-  return null;
-}
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-/** ✅ Sanity-check: útil para ver si la ruta está viva (evita 405 por confusión) */
-export async function GET() {
-  return NextResponse.json({ ok: true, route: '/api/chat' });
-}
+type UiPart = { type: 'text'; text: string };
 
-/** ✅ CORS/preflight para integraciones embebidas */
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    },
-  });
-}
-
-/** ✅ Handler principal: ¡esto es lo que evita el 405! */
 export async function POST(req: NextRequest) {
-  const traceId = `cv_${Math.random().toString(36).slice(2)}`;
-
   try {
-    // ——— lee body flexible (como lo manda tu front) ———
-    const body = await req.json().catch(() => ({} as any));
-    const rawText =
-      body?.message?.parts?.[0]?.text ??
-      body?.message?.text ??
-      body?.message ??
-      body?.text ??
-      '';
+    const body = await req.json();
+    const incoming = body?.message as { role: 'user' | 'assistant'; parts: UiPart[] } | undefined;
+    let threadId: string | undefined = body?.threadId;
 
-    const userInput: string = String(rawText || '').trim();
-    const threadId: string | undefined = body?.threadId || body?.thread_id || undefined;
-
-    // ——— corre el assistant (ya maneja requires_action internamente) ———
-    const { reply, threadId: ensuredThread } = await runAssistantOnce({
-      input: userInput,
-      threadId,
-      metadata: { source: 'webchat' },
-    });
-
-    // ——— ejecuta cv:kommo en paralelo; NO bloquea la respuesta ———
-    const m = reply.match(RE_KOMMO);
-    if (m?.[1]) {
-      try {
-        const ops = JSON.parse(m[1]);
-
-        (async () => {
-          try {
-            const list = Array.isArray(ops?.ops) ? ops.ops : [];
-            let leadId: number | null = null;
-
-            if (list.some((o: any) => o?.action === 'create_lead')) {
-              // tu wrapper espera un string (no objeto)
-              const created = await kommoCreateLead('Lead desde webchat');
-              leadId = pickLeadId(created);
-              console.log('[CV][kommo] leadId', leadId);
-            }
-
-            for (const op of list) {
-              if (op?.action === 'add_note' && leadId != null) {
-                const text =
-                  typeof op?.text === 'string'
-                    ? op.text
-                    : `🧑‍💻 Usuario: ${userInput.slice(0, 500)}`;
-                await kommoAddNote(leadId, text); // (leadId:number, text:string)
-              }
-            }
-          } catch (err) {
-            console.warn('[CV][kommo] failed:', err);
-          }
-        })();
-      } catch (err) {
-        console.warn('[CV][kommo] invalid json:', err);
-      }
+    if (!incoming || !Array.isArray(incoming.parts) || !incoming.parts[0]?.text) {
+      return NextResponse.json({ error: 'Invalid message payload' }, { status: 400 });
     }
 
-    // ——— respuesta al front: tal cual (para que el front parsee cv:itinerary) ———
-    const res = NextResponse.json({
-      reply,
-      threadId: ensuredThread || threadId || null,
+    // 1) Thread (reusar o crear)
+    if (!threadId) {
+      const created = await client.beta.threads.create();
+      threadId = created.id;
+    }
+
+    // 2) Append user message
+    await client.beta.threads.messages.create(threadId, {
+      role: incoming.role,
+      content: [{ type: 'text', text: incoming.parts[0].text }],
     });
 
-    // CORS headers (si lo usas embebido en otras origins)
-    res.headers.set('Access-Control-Allow-Origin', '*');
-    res.headers.set('Access-Control-Allow-Methods', 'POST,GET,OPTIONS');
-    res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    // 3) Run assistant
+    const run = await client.beta.threads.runs.create(threadId, {
+      assistant_id: process.env.OPENAI_ASSISTANT_ID!,
+    });
 
-    return res;
-  } catch (e: any) {
-    console.error(
-      JSON.stringify({
-        level: 'error',
-        tag: '[CV][server]',
-        msg: 'exception',
-        meta: { traceId, error: String(e?.message || e) },
-      }),
-    );
+    // 4) Poll hasta completar (o error)
+    let status: string = 'queued';
+    const started = Date.now();
+    const MAX_MS = 45_000;
 
+    while (status === 'queued' || status === 'in_progress') {
+      // ✅ Firma correcta: (runId, { thread_id })
+      const poll = await client.beta.threads.runs.retrieve(run.id, { thread_id: threadId });
+      status = poll.status;
+
+      if (status === 'completed' || status === 'failed' || status === 'expired' || status === 'cancelled') break;
+      if (Date.now() - started > MAX_MS) break; // timeout suave
+
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    // 5) Traer último mensaje del assistant (texto únicamente)
+    //    Firma de list con threadId + params (tu SDK lo tipa así)
+    const msgs = await client.beta.threads.messages.list(threadId, {
+      order: 'desc',
+      limit: 10,
+    });
+
+    const firstAssistant = msgs.data.find((m) => m.role === 'assistant');
     const reply =
-      'Ocurrió un error, lamentamos los inconvenientes. / An error occurred, we apologize for the inconvenience.';
+      firstAssistant?.content
+        ?.filter((c: any) => c?.type === 'text' && c?.text?.value)
+        .map((c: any) => c.text.value as string)
+        .join('\n') ?? '';
 
-    return NextResponse.json({ reply }, { status: 500 });
+    return NextResponse.json({ threadId, reply });
+  } catch (err: any) {
+    console.error('[CV][server] exception', err);
+    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
   }
 }

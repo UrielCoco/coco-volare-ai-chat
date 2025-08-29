@@ -30,7 +30,25 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
       <div className={rowInner}>
         <div className={`${bubbleBase} ${bubbleSkin}`}>
           {message.parts.map((part: any, idx: number) => {
+            // texto normal
             if (part?.type === 'text') {
+              // detectar itinerario inline
+              if (part.text.includes('```cv:itinerary')) {
+                try {
+                  const jsonStr = part.text.split('```cv:itinerary')[1].split('```')[0].trim();
+                  const itinerary = JSON.parse(jsonStr);
+                  return (
+                    <div key={idx} className="my-2 mb-8">
+                      <ItineraryCard data={itinerary} />
+                    </div>
+                  );
+                } catch (err) {
+                  console.error('Itinerary parse failed', err);
+                  return (
+                    <div key={idx} className="text-yellow-500">⚠️ Itinerary JSON inválido.</div>
+                  );
+                }
+              }
               return (
                 <div
                   key={idx}
@@ -51,15 +69,6 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
                 <div key={idx} className="my-2 mb-8">
                   <ItineraryCard data={part.itinerary} />
                 </div>
-              );
-            }
-
-            // Muestra JSON "quote" solo si lo usas
-            if (part?.type === 'quote' && part?.quote) {
-              return (
-                <pre key={idx} className={(isUser ? 'text-black' : 'text-white') + ' text-xs whitespace-pre-wrap break-words'}>
-                  {JSON.stringify(part.quote, null, 2)}
-                </pre>
               );
             }
 
