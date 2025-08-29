@@ -71,7 +71,7 @@ export default function Messages({
             <img
               src="/images/Intelligence.gif"
               alt="Coco Volare"
-              className="opacity-70"
+              className="opacity-70 max-h-[40dvh]"
             />
           </div>
         )}
@@ -96,20 +96,17 @@ export default function Messages({
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
-              key="typing"
-              initial={{ opacity: 0, y: 6 }}
+              initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
+              exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.2 }}
-              className="w-full mx-auto max-w-3xl px-4 mb-3"
+              className="w-full mx-auto max-w-4xl px-4"
             >
-              <div className="flex gap-4 w-full">
-                <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
-                  <img src="/images/Intelligence.gif" alt="..." className="w-full h-full object-cover" />
-                </div>
-                <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
-                  <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
+              <div className="inline-block rounded-2xl bg-[#131313] text-white px-4 py-3 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
+                <div className="flex items-center gap-2">
+                  <span className="opacity-70">Pensando</span>
                   <span className="animate-bounce">•</span>
+                  <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>•</span>
                   <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
                 </div>
               </div>

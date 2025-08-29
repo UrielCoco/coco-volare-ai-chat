@@ -2,10 +2,35 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
+const POLL_MS = 900;
+const MAX_MS = 90_000; // 90s timeout suave
 
 type UiPart = { type: 'text'; text: string };
+
+function now() { return Date.now(); }
+async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+// Espera a que NO haya runs activos para un thread (evita "Can't add messages…")
+async function waitForNoActiveRun(threadId: string) {
+  let waited = 0;
+  while (waited <= MAX_MS) {
+    const runs = await client.beta.threads.runs.list(threadId, { limit: 1, order: 'desc' });
+    const last = runs.data[0];
+    const active = last && (
+      last.status === 'queued' ||
+      last.status === 'in_progress' ||
+      last.status === 'requires_action' ||
+      last.status === 'cancelling'
+    );
+    if (!active) return;
+    await sleep(POLL_MS);
+    waited += POLL_MS;
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,50 +38,59 @@ export async function POST(req: NextRequest) {
     const incoming = body?.message as { role: 'user' | 'assistant'; parts: UiPart[] } | undefined;
     let threadId: string | undefined = body?.threadId;
 
-    if (!incoming || !Array.isArray(incoming.parts) || !incoming.parts[0]?.text) {
-      return NextResponse.json({ error: 'Invalid message payload' }, { status: 400 });
+    const text = incoming?.parts?.[0]?.text?.trim();
+    if (!text) {
+      return NextResponse.json({ error: 'empty message' }, { status: 400 });
     }
 
-    // 1) Thread (reusar o crear)
+    // 1) thread
     if (!threadId) {
-      const created = await client.beta.threads.create();
-      threadId = created.id;
+      const t = await client.beta.threads.create({ metadata: { channel: 'webchat-embed' } });
+      threadId = t.id;
     }
 
-    // 2) Append user message
+    // 2) asegúrate de no tener runs activos antes de crear un nuevo mensaje
+    await waitForNoActiveRun(threadId);
+
+    // 3) mensaje del usuario
     await client.beta.threads.messages.create(threadId, {
-      role: incoming.role,
-      content: [{ type: 'text', text: incoming.parts[0].text }],
+      role: 'user',
+      content: text,
     });
 
-    // 3) Run assistant
+    // 4) lanzar run
     const run = await client.beta.threads.runs.create(threadId, {
-      assistant_id: process.env.OPENAI_ASSISTANT_ID!,
+      assistant_id: ASSISTANT_ID,
+      // Puedes inyectar una instrucción breve para suprimir "un momento..."
+      instructions:
+        'No digas “un momento” ni “te aviso”; responde de inmediato. ' +
+        'Si hay información suficiente para un itinerario, responde usando un bloque ```cv:itinerary {json}```.',
     });
 
-    // 4) Poll hasta completar (o error)
-    let status: string = 'queued';
-    const started = Date.now();
-    const MAX_MS = 45_000;
-
-    while (status === 'queued' || status === 'in_progress') {
-      // ✅ Firma correcta: (runId, { thread_id })
+    // 5) poll status
+    let status = run.status;
+    const started = now();
+    while (true) {
       const poll = await client.beta.threads.runs.retrieve(run.id, { thread_id: threadId });
       status = poll.status;
 
-      if (status === 'completed' || status === 'failed' || status === 'expired' || status === 'cancelled') break;
-      if (Date.now() - started > MAX_MS) break; // timeout suave
+      if (
+        status === 'completed' ||
+        status === 'failed' ||
+        status === 'expired' ||
+        status === 'cancelled'
+      ) break;
 
-      await new Promise((r) => setTimeout(r, 1000));
+      if (now() - started > MAX_MS) {
+        // timeout suave -> cancela y sal
+        try { await client.beta.threads.runs.cancel(run.id, { thread_id: threadId }); } catch {}
+        break;
+      }
+      await sleep(POLL_MS);
     }
 
-    // 5) Traer último mensaje del assistant (texto únicamente)
-    //    Firma de list con threadId + params (tu SDK lo tipa así)
-    const msgs = await client.beta.threads.messages.list(threadId, {
-      order: 'desc',
-      limit: 10,
-    });
-
+    // 6) obtener último mensaje del assistant (texto)
+    const msgs = await client.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
     const firstAssistant = msgs.data.find((m) => m.role === 'assistant');
     const reply =
       firstAssistant?.content
