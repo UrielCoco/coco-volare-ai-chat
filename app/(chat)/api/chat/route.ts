@@ -1,94 +1,102 @@
-import { NextRequest } from "next/server";
-import {
-  runAssistantWithStream,
-  type AssistantEvent,
-} from "@/lib/ai/providers/openai-assistant";
+// app/(chat)/api/chat/route.ts
+import { NextRequest } from 'next/server';
+import OpenAI from 'openai';
 
-export const runtime = "nodejs";
+export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
-  const rawMsg = body?.message;
-  const userId = body?.userId as string | undefined;
-  const assistantId =
-    (body?.assistantId as string | undefined) ?? process.env.OPENAI_ASSISTANT_ID;
-  const attachments = body?.attachments as
-    | Array<{ file_id: string; tools?: Array<{ type: "file_search" | "code_interpreter" }> }>
-    | undefined;
-  const metadata = body?.metadata as Record<string, string> | undefined;
+  try {
+    const body = await req.json().catch(() => ({}));
+    const raw = body?.message;
 
-  if (!process.env.OPENAI_API_KEY) return jsonErr(500, "Missing OPENAI_API_KEY");
-  if (!assistantId) return jsonErr(500, "Missing OPENAI_ASSISTANT_ID");
+    const text =
+      typeof raw?.parts?.[0]?.text === 'string'
+        ? raw.parts[0].text
+        : typeof raw?.text === 'string'
+        ? raw.text
+        : typeof raw === 'string'
+        ? raw
+        : '';
 
-  let text = "";
-  if (typeof rawMsg === "string") text = rawMsg.trim();
-  else if (rawMsg && typeof rawMsg.text === "string") text = rawMsg.text.trim();
+    const assistantId = process.env.OPENAI_ASSISTANT_ID;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey || !assistantId) {
+      return json(500, { error: 'Faltan OPENAI_API_KEY / OPENAI_ASSISTANT_ID' });
+    }
 
-  if ((!text || text.length === 0) && (!attachments || attachments.length === 0)) {
-    return jsonErr(400, "Message content must be non-empty.");
-  }
-  if ((!text || text.length === 0) && attachments && attachments.length > 0) {
-    text = "Adjuntos enviados";
-  }
+    const openai = new OpenAI({ apiKey });
 
-  const encoder = new TextEncoder();
+    // 1) Crear thread con el mensaje del usuario
+    const thread = await openai.beta.threads.create({
+      messages: [{ role: 'user', content: text || 'Mensaje' }],
+    });
 
-  const stream = new ReadableStream({
-    start: async (controller) => {
-      const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-      };
+    // 2) Lanzar run
+    const run = await openai.beta.threads.runs.create(thread.id, {
+      assistant_id: assistantId,
+    });
 
-      const handleEvent = (e: AssistantEvent) => {
-        switch (e.type) {
-          case "message.delta":
-            send({ type: "delta", text: e.text });
-            break;
-          case "message.completed":
-            send({ type: "done", text: e.text });
-            break;
-          case "run.requires_action":
-            send({ type: "requires_action" });
-            break;
-          case "run.failed":
-            send({ type: "error", error: e.error });
-            break;
-          case "run.completed":
-            break;
-        }
-      };
+    // 3) Polling hasta completar (máx. ~45s) con firmas compatibles
+    const start = Date.now();
+    let status = run.status;
 
+    while (
+      status !== 'completed' &&
+      status !== 'failed' &&
+      status !== 'cancelled' &&
+      Date.now() - start < 45_000
+    ) {
+      await wait(800);
+
+      // --- Compatibilidad de firmas:
+      // v4.x recientes: retrieve(runId, { thread_id })
+      // v4.x antiguas: retrieve(threadId, runId)
+      let rnow: any;
       try {
-        await runAssistantWithStream({
-          assistantId,
-          input: text,
-          userId,
-          attachments,
-          metadata,
-          onEvent: handleEvent,
+        rnow = await (openai as any).beta.threads.runs.retrieve(run.id, {
+          thread_id: thread.id,
         });
-      } catch (err: any) {
-        send({ type: "error", error: String(err?.message || err) });
-      } finally {
-        controller.close();
+      } catch {
+        rnow = await (openai as any).beta.threads.runs.retrieve(thread.id, run.id);
       }
-    },
-  });
 
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    },
+      status = rnow.status;
+      if (status === 'requires_action') {
+        // Si usas herramientas, aquí manejarías tool_outputs
+        break;
+      }
+    }
+
+    // 4) Leer mensajes (tomamos el último del asistente)
+    const list = await openai.beta.threads.messages.list(thread.id, {
+      order: 'desc',
+      limit: 10,
+    });
+
+    const firstAssistant = list.data.find((m) => m.role === 'assistant');
+
+    let reply = '';
+    if (firstAssistant) {
+      const chunks: string[] = [];
+      for (const c of firstAssistant.content) {
+        if (c.type === 'text') chunks.push(c.text.value || '');
+      }
+      reply = chunks.join('\n\n').trim();
+    }
+
+    return json(200, { reply, threadId: thread.id });
+  } catch (err: any) {
+    return json(500, { error: String(err?.message || err) });
+  }
+}
+
+function json(status: number, data: any) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
   });
 }
 
-function jsonErr(status: number, error: string) {
-  return new Response(JSON.stringify({ error }), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+function wait(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }

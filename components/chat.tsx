@@ -9,20 +9,22 @@ import { PaperPlaneIcon } from '@radix-ui/react-icons';
 function extractItineraryFromText(text: string): Itinerary | null {
   if (!text) return null;
 
-  const reFence = /```(?:itinerary|json)\s*([\s\S]*?)```/i;
+  // Soporta fences: ```cv:itinerary```, ```itinerary```, ```json```
+  const reFence = /```(?:cv:itinerary|itinerary|json)\s*([\s\S]*?)```/i;
   const m1 = text.match(reFence);
   const candidate1 = m1?.[1];
 
+  // Prefijo tipo: ITINERARY_JSON: { ... }
   const rePrefix = /ITINERARY_JSON\s*[:=]\s*({[\s\S]*})/i;
   const m2 = text.match(rePrefix);
   const candidate2 = m2?.[1];
 
+  // JSON “pelado”
   const maybeWhole = text.trim().startsWith('{') && text.trim().endsWith('}')
     ? text.trim()
     : undefined;
 
   const candidates = [candidate1, candidate2, maybeWhole].filter(Boolean) as string[];
-
   for (const c of candidates) {
     try {
       const parsed = JSON.parse(c);
@@ -38,7 +40,29 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const [composerH, setComposerH] = useState<number>(96);
+
+  // medir/comunicar altura del composer -> --composer-h
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    const update = () => setComposerH(el.offsetHeight || 96);
+    update();
+    let ro: ResizeObserver | null = null;
+    try {
+      ro = new ResizeObserver(update);
+      ro.observe(el);
+    } catch {}
+    const onResize = () => update();
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      try { ro?.disconnect(); } catch {}
+    };
+  }, []);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -58,17 +82,19 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      // Tu endpoint debe devolver { reply?: string, parts?: UIMessagePart[], threadId?: string }
+      // Espera JSON: { reply?: string, parts?: UIMessagePart[], threadId?: string }
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: { role: 'user', parts: [{ text }] } }),
       });
-
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(`HTTP ${res.status}: ${t}`);
+      }
       const data = await res.json();
 
-      let assistant: ChatMessage | null = null;
-
+      let assistant: ChatMessage;
       if (Array.isArray(data?.parts)) {
         assistant = { id: uuidv4(), role: 'assistant', parts: data.parts };
       } else {
@@ -79,12 +105,20 @@ export default function Chat() {
           : { id: uuidv4(), role: 'assistant', parts: [{ type: 'text', text: reply || '…' }] };
       }
 
-      setMessages((prev) => [...prev, assistant!]);
+      setMessages((prev) => [...prev, assistant]);
     } catch (err) {
       console.error(err);
       setMessages((prev) => [
         ...prev,
-        { id: uuidv4(), role: 'assistant', parts: [{ type: 'text', text: 'Error procesando tu mensaje.' }] },
+        {
+          id: uuidv4(),
+          role: 'assistant',
+          parts: [{
+            type: 'text',
+            text:
+              'Hubo un problema al procesar tu mensaje. Intenta de nuevo o dime tu destino, fechas y número de personas.',
+          }],
+        },
       ]);
     } finally {
       setLoading(false);
@@ -92,7 +126,11 @@ export default function Chat() {
   };
 
   return (
-    <div className="w-full h-full flex flex-col">
+    <div
+      className="relative flex flex-col w-full min-h-[100dvh] bg-transparent"
+      style={{ ['--composer-h' as any]: `${composerH}px` }}
+    >
+      {/* Área scrollable con backdrop controlado por <Messages /> */}
       <div className="flex-1 min-h-0">
         <Messages
           messages={messages}
@@ -105,7 +143,12 @@ export default function Chat() {
         />
       </div>
 
-      <div className="border-t border-gray-800/40 backdrop-blur bg-black/30">
+      {/* Composer fijo */}
+      <div
+        ref={composerRef}
+        className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/85 backdrop-blur"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
         <div className="mx-auto max-w-3xl p-3 flex gap-2">
           <form onSubmit={handleSubmit} className="flex w-full gap-2">
             <input
@@ -113,13 +156,14 @@ export default function Chat() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Escribe tu mensaje…"
-              className="flex-1 rounded-2xl px-4 py-3 bg-black/60 text-white border border-gray-800/40
-                         focus:outline-none focus:ring-2 focus:ring-yellow-500/40"
+              className="flex-1 rounded-full px-4 py-3 bg-[#2a2a2a] text-white border border-[#b69965]/30
+                         focus:outline-none focus:ring-2 focus:ring-[#b69965]/50"
             />
             <button
               type="submit"
               disabled={loading || !input.trim()}
               className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
+              title="Enviar"
             >
               {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
             </button>
