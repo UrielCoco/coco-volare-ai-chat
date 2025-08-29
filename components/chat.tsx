@@ -1,274 +1,263 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import Messages from './messages';
-import { v4 as uuidv4 } from 'uuid';
-import { PaperPlaneIcon } from '@radix-ui/react-icons';
-
-import type { ChatMessage, UIMessagePart } from '@/lib/types';
-
-type Props = {
-  id?: string;
-  initialMessages?: ChatMessage[];
-  initialChatModel?: string;
-  initialVisibilityType?: string;
-  isReadonly?: boolean;
-  session?: any;
-  autoResume?: boolean;
-};
+import TypingBubble from './typing';
+import PreviewMessage from './message';
+import type { ChatMessage } from '@/lib/types';
 
 const THREAD_KEY = 'cv_thread_id';
 
-// ——— helpers de parseo ———
-const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
-
-function normalizeJSON(s: string) {
-  return s
-    .replace(ZERO_WIDTH, '')
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/,\s*([}\]])/g, '$1'); // quita comas colgantes comunes
+function stripKommoBlock(text: string) {
+  return text.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
+function parseItineraryBlocks(text: string) {
+  const blocks: any[] = [];
+  const rx = /```cv:itinerary\s*([\s\S]*?)```/gi;
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
 
-function findBlock(reply: string, label: 'cv:itinerary' | 'cv:quote' | 'cv:kommo'): string | null {
-  const re = new RegExp('```\\s*' + label + '\\s*([\\s\\S]*?)```', 'i');
-  const m = reply.match(re);
-  return m?.[1]?.trim() ?? null;
-}
+  while ((m = rx.exec(text))) {
+    const before = text.substring(lastIndex, m.index);
+    if (before.trim()) blocks.push({ type: 'text', text: before.trim() });
 
-function stripBlock(reply: string, label: 'cv:kommo'): string {
-  return reply.replace(new RegExp('```\\s*' + label + '\\s*[\\s\\S]*?```', 'gi'), '').trim();
-}
-
-function parseItinerary(reply: string): any | null {
-  const candidates: string[] = [];
-  const tagged = findBlock(reply, 'cv:itinerary');
-  if (tagged) candidates.push(tagged);
-
-  const mJson = reply.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (mJson?.[1]) candidates.push(mJson[1].trim());
-
-  const t = reply.trim();
-  if (t.startsWith('{') && t.endsWith('}')) candidates.push(t);
-
-  for (const raw of candidates) {
     try {
-      const obj = JSON.parse(normalizeJSON(raw));
-      if (obj && Array.isArray(obj.days) && obj.days.length > 0) return obj;
-    } catch {}
+      const json = JSON.parse(m[1]);
+      blocks.push({ type: 'itinerary', itinerary: json });
+    } catch {
+      blocks.push({ type: 'text', text: '⚠️ Itinerary JSON inválido.' });
+    }
+    lastIndex = rx.lastIndex;
   }
-  return null;
+  const tail = text.substring(lastIndex).trim();
+  if (tail) blocks.push({ type: 'text', text: tail });
+  if (blocks.length === 0) blocks.push({ type: 'text', text });
+  return blocks;
 }
 
-function parseQuote(reply: string): any | null {
-  const block = findBlock(reply, 'cv:quote');
-  if (!block) return null;
-  try {
-    return JSON.parse(normalizeJSON(block));
-  } catch {
-    return null;
-  }
-}
-// ——— fin helpers ———
-
-export default function Chat({
-  initialMessages = [],
-}: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+export default function Chat() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const composerRef = useRef<HTMLDivElement | null>(null);
-  const [composerH, setComposerH] = useState<number>(96);
+  // —— follow-up watcher ——
+  const followUpActive = useRef(false);
+  const followUpTimer = useRef<NodeJS.Timeout | null>(null);
+  const followUpUntil = useRef<number>(0);
+  const lastAssistantFingerprint = useRef<string>('');
 
-  // medir altura composer y exponer --composer-h
+  // pending placeholder
+  const pendingTimer = useRef<NodeJS.Timeout | null>(null);
+  const pendingMsgId = useRef<string | null>(null);
+
+  const threadIdRef = useRef<string | null>(null);
   useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-    const update = () => setComposerH(el.offsetHeight || 96);
-    update();
-    let ro: ResizeObserver | null = null;
-    try { ro = new ResizeObserver(update); ro.observe(el); } catch {}
-    const onResize = () => update();
-    window.addEventListener('resize', onResize);
-    return () => {
-      window.removeEventListener('resize', onResize);
-      try { ro?.disconnect(); } catch {}
-    };
+    threadIdRef.current = window.sessionStorage.getItem(THREAD_KEY) || null;
   }, []);
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  const addMessage = (msg: ChatMessage) => setMessages(prev => [...prev, msg]);
 
-  // threadId por sesión de pestaña (memoria mientras la ventana está abierta)
-  const getThreadId = () => {
-    try {
-      return sessionStorage.getItem(THREAD_KEY) || localStorage.getItem(THREAD_KEY) || null;
-    } catch { return null; }
-  };
-  const setThreadId = (id: string) => {
-    try {
-      sessionStorage.setItem(THREAD_KEY, id);
-      localStorage.setItem(THREAD_KEY, id);
-      (window as any).cvThreadId = id;
-    } catch {}
+  const replacePendingWith = (real: ChatMessage) => {
+    setMessages(prev => {
+      if (!pendingMsgId.current) return [...prev, real];
+      const id = pendingMsgId.current;
+      return prev.map(m => (m.id === id ? real : m));
+    });
+    pendingMsgId.current = null;
   };
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
+  const addPendingAssistant = (text = 'Estoy armando tu itinerario… un momento por favor.') => {
+    const id = `pending_${Date.now()}`;
+    pendingMsgId.current = id;
+    const fake: ChatMessage = {
+      id,
+      role: 'assistant',
+      parts: [{ type: 'text', text }],
+      createdAt: new Date().toISOString(),
+    } as any;
+    setMessages(prev => [...prev, fake]);
+  };
+
+  // —— inicia watcher de follow-ups durante ~20s con polls de 2s ——
+  const startFollowUpWatcher = () => {
+    if (!threadIdRef.current || followUpActive.current) return;
+
+    followUpActive.current = true;
+    followUpUntil.current = Date.now() + 20000; // 20s
+
+    const tick = async () => {
+      if (!followUpActive.current) return;
+      if (Date.now() > followUpUntil.current) {
+        followUpActive.current = false;
+        setIsThinking(false);
+        return;
+      }
+
+      try {
+        // mostramos typing mientras “escuchamos”
+        setIsThinking(true);
+
+        const res = await fetch('/api/chat/pull', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            threadId: threadIdRef.current,
+            knownFingerprint: lastAssistantFingerprint.current,
+          }),
+        });
+
+        const data = await res.json();
+        if (data?.hasUpdate && typeof data.reply === 'string') {
+          const clean = stripKommoBlock(data.reply);
+          const parts = parseItineraryBlocks(clean);
+
+          // fingerprint nuevo (para próximas rondas)
+          lastAssistantFingerprint.current = String(data?.fingerprint || clean.slice(0, 512));
+
+          // pintamos como NUEVO mensaje del assistant
+          addMessage({
+            id: `a2_${Date.now()}`,
+            role: 'assistant',
+            parts,
+            createdAt: new Date().toISOString(),
+          } as any);
+
+          // y como ya llegó algo, seguimos un poco más por si hubiera otro,
+          // pero quitamos typing para que no se vea infinito
+          setIsThinking(false);
+        }
+      } catch {
+        // ignoramos errores de poll
+      } finally {
+        if (!followUpActive.current) return;
+        followUpTimer.current = setTimeout(tick, 2000); // cada 2s
+      }
+    };
+
+    // arranca
+    tick();
+  };
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text) return;
 
     // mensaje del usuario
-    const userMsg: ChatMessage = {
-      id: uuidv4(),
+    addMessage({
+      id: `u_${Date.now()}`,
       role: 'user',
-      parts: [{ type: 'text', text } as UIMessagePart],
+      parts: [{ type: 'text', text }],
       createdAt: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+    } as any);
+
     setInput('');
-    setLoading(true);
+    setIsThinking(true);
+
+    // si en 4s no llega nada, pintamos placeholder
+    if (pendingTimer.current) clearTimeout(pendingTimer.current);
+    pendingTimer.current = setTimeout(() => {
+      if (isThinking) addPendingAssistant();
+    }, 4000);
 
     try {
-      const threadId = (window as any).cvThreadId || getThreadId();
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: { role: 'user', parts: [{ text }] }, threadId }),
+        body: JSON.stringify({
+          message: { role: 'user', parts: [{ text }] },
+          threadId: threadIdRef.current,
+        }),
       });
 
-      const ct = res.headers.get('content-type') || '';
-      if (!res.ok) {
-        const t = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
-        throw new Error(`HTTP ${res.status}: ${t.slice(0, 300)}`);
+      const data = await res.json();
+      const raw = String(data?.reply || '');
+
+      // guarda threadId
+      if (data?.threadId) {
+        threadIdRef.current = data.threadId;
+        window.sessionStorage.setItem(THREAD_KEY, data.threadId);
       }
-      if (!ct.includes('application/json')) throw new Error('Respuesta no-JSON');
 
-      const data = await res.json() as { reply: string; threadId: string };
-      if (data?.threadId) setThreadId(data.threadId);
+      // limpia placeholder/typing
+      if (pendingTimer.current) { clearTimeout(pendingTimer.current); pendingTimer.current = null; }
+      setIsThinking(false);
 
-      const replyOrig = (data?.reply ?? '').toString();
+      // primera respuesta
+      const replyClean = stripKommoBlock(raw);
+      const parts = parseItineraryBlocks(replyClean);
 
-      // 1) oculta cv:kommo
-      const reply = stripBlock(replyOrig, 'cv:kommo');
+      // huella para pull posterior
+      lastAssistantFingerprint.current = replyClean.slice(0, 512);
 
-      // 2) detectar itinerary / quote y texto visible
-      const itin = parseItinerary(reply);
-      const quote = parseQuote(reply);
-
-      const visibleText = reply
-        .replace(/```cv:itinerary[\s\S]*?```/gi, '')
-        .replace(/```cv:quote[\s\S]*?```/gi, '')
-        .trim();
-
-      const parts: UIMessagePart[] = [];
-      if (visibleText) parts.push({ type: 'text', text: visibleText } as UIMessagePart);
-      if (itin)       parts.push({ type: 'itinerary', itinerary: itin } as unknown as UIMessagePart);
-      else if (quote) parts.push({ type: 'quote', quote } as unknown as UIMessagePart);
-      if (parts.length === 0) parts.push({ type: 'text', text: reply } as UIMessagePart);
-
-      // diagnóstico
-      console.log('[CV][client] reply.parts', parts.map(p => p.type));
-
-      const assistantMsg: ChatMessage = {
-        id: uuidv4(),
+      const realAssistantMsg: ChatMessage = {
+        id: `a_${Date.now()}`,
         role: 'assistant',
         parts,
         createdAt: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      } as any;
+
+      if (pendingMsgId.current) {
+        replacePendingWith(realAssistantMsg);
+      } else {
+        addMessage(realAssistantMsg);
+      }
+
+      // 🔁 activa watcher (por si el assistant manda otro mensaje más)
+      startFollowUpWatcher();
+
     } catch (err) {
+      if (pendingTimer.current) { clearTimeout(pendingTimer.current); pendingTimer.current = null; }
+      setIsThinking(false);
+
+      const fallback: ChatMessage = {
+        id: `a_${Date.now()}`,
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Ocurrió un error, lamentamos los inconvenientes.' }],
+        createdAt: new Date().toISOString(),
+      } as any;
+
+      if (pendingMsgId.current) {
+        replacePendingWith(fallback);
+      } else {
+        addMessage(fallback);
+      }
       console.error('[CV][client] /api/chat error', err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uuidv4(),
-          role: 'assistant',
-          parts: [{ type: 'text', text: 'Ocurrió un error, lamentamos los inconvenientes.' } as UIMessagePart],
-        } as ChatMessage,
-      ]);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`;
-
-  const hasVisibleChat = messages.some(
-    (m: any) => m?.role === 'user' || m?.role === 'assistant'
-  );
-  const showBackdrop = !hasVisibleChat;
+  // limpia timers al desmontar
+  useEffect(() => {
+    return () => {
+      if (followUpTimer.current) clearTimeout(followUpTimer.current);
+      if (pendingTimer.current) clearTimeout(pendingTimer.current);
+    };
+  }, []);
 
   return (
-    <div
-      className="relative flex flex-col w-full min-h-[100dvh] bg-white"
-      style={{ ['--composer-h' as any]: `${composerH}px` }}
-    >
-      {/* Pre-chat */}
-      {showBackdrop && (
-        <div className="absolute inset-0 z-0 grid place-items-center bg-white">
-          <img
-            src="/images/Texts.gif"
-            alt="Coco Volare"
-            className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[65vh]"
-            onError={(e) => {
-              const img = e.currentTarget as HTMLImageElement;
-              if (!img.dataset.triedfallback) {
-                img.dataset.triedfallback = '1';
-                img.src = '/images/texts.gif';
-              }
-            }}
+    <div className="w-full">
+      <div className="space-y-4 pt-4">
+        {messages.map(m => (
+          <PreviewMessage key={m.id} message={m} />
+        ))}
+        {isThinking && <TypingBubble />}
+      </div>
+
+      <form onSubmit={handleSubmit} className="sticky bottom-0 w-full bg-transparent">
+        <div className="mx-auto max-w-4xl px-4 py-4 flex items-center gap-2">
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            placeholder="Escribe tu mensaje…"
+            className="flex-1 rounded-full bg-[#0d0d0d] text-white px-5 py-3 outline-none"
           />
+        <button
+            type="submit"
+            className="rounded-full bg-[#bba36d] text-black px-4 py-3 font-medium hover:opacity-90 transition"
+          >
+            ➤
+          </button>
         </div>
-      )}
-
-      {/* Conversación */}
-      <div
-        className="relative z-10 flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{
-          paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`,
-          scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`,
-        }}
-      >
-        <Messages
-          messages={messages}
-          isLoading={loading}
-          votes={[]}
-          setMessages={({ messages: m }: any) => setMessages(m)}
-          regenerate={async () => {}}
-          isReadonly={false}
-          chatId="cv"
-        />
-      </div>
-
-      {/* Composer */}
-      <div
-        ref={composerRef}
-        className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/90 backdrop-blur"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-      >
-        <div className="mx-auto max-w-3xl p-3 flex gap-2">
-          <form onSubmit={handleSubmit} className="flex w-full gap-2">
-            <input
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Escribe tu mensaje…"
-              className="flex-1 rounded-full px-4 py-3 bg-black text-white placeholder-white/50
-                         border border-[#b69965]/40 focus:outline-none focus:ring-2 focus:ring-[#b69965]/60"
-            />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
-              title="Enviar" aria-label="Enviar"
-            >
-              {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
-            </button>
-          </form>
-        </div>
-      </div>
+      </form>
     </div>
   );
 }
