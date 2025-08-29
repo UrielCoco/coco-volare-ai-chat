@@ -6,16 +6,16 @@ import ItineraryCard from './itinerary-card';
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
-  // cap del ancho de cada burbuja y estilos de marca
-  const bubble =
-    'max-w-[min(92vw,820px)] rounded-2xl border shadow-sm px-4 py-3 ' +
-    (isUser
-      // Cliente = dorado con texto negro
-      ? 'bg-[#d8c69a] border-[#b69965]/40 text-black'
-      // Asistente = negro con texto blanco
-      : 'bg-black text-white border-white/10');
+  // ⬅️ Ancho: en mobile ocupa el ancho del contenedor (que ya tiene px-4 de margen lateral)
+  // y desde md limita a 820px. Así NO se pega al borde en móvil.
+  const bubbleWidth = 'w-full md:max-w-[820px]';
 
-  // contenedor para alinear izq/der
+  const bubbleSkin = isUser
+    ? 'bg-[#d8c69a] border-[#b69965]/40 text-black' // cliente dorado
+    : 'bg-black text-white border-white/10';        // asistente negro
+
+  const bubble = `${bubbleWidth} rounded-2xl border shadow-sm px-4 py-3 ${bubbleSkin}`;
+
   const row = 'w-full mx-auto max-w-3xl px-4';
   const rowInner = isUser ? 'w-full flex justify-end' : 'w-full flex justify-start';
 
@@ -24,13 +24,10 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
       <div className={rowInner}>
         <div className={bubble}>
           {message.parts.map((part: any, idx: number) => {
-            // Texto normal
             if (part?.type === 'text') {
               return (
                 <div
                   key={idx}
-                  // ❌ sin "prose-invert" para el cliente
-                  // ✅ tipografía consistente y legible
                   className={
                     (isUser
                       ? 'text-[15px] leading-relaxed text-black'
@@ -43,7 +40,6 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
               );
             }
 
-            // Itinerario con UI especial
             if (part?.type === 'itinerary' && part?.itinerary) {
               return (
                 <div key={idx} className="my-2">
@@ -52,7 +48,6 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
               );
             }
 
-            // (Opcional) Cotización en JSON si todavía no tienes renderer
             if (part?.type === 'quote' && part?.quote) {
               return (
                 <pre

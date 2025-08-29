@@ -182,7 +182,7 @@ const showBackdrop = !hasVisibleChat ; // ← muestra GIF aunque existan 'system
       <img
         src="/images/Texts.gif"
         alt="Coco Volare"
-        className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[50vh]"
+        className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[65vh]"
         onError={(e) => {
           // Fallback por si el nombre cambió a minúsculas
           const img = e.currentTarget as HTMLImageElement;
