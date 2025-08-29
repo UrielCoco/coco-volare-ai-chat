@@ -33,7 +33,7 @@ async function upsertKommo(payload: any) {
   }
 }
 
-// ---------- Hints de lead ----------
+// ---------- Lead hints ----------
 function extractLeadHints(text: string) {
   const t = (text || '').trim();
   const paxMatch =
@@ -60,6 +60,7 @@ function parsePartsFromText(text: string): any[] {
   while ((m = fence.exec(text))) {
     const [full, , subtype, body] = m;
     const start = m.index;
+
     const before = text.slice(last, start).trim();
     if (before) parts.push({ type: 'text', text: before });
 
@@ -97,39 +98,29 @@ async function runAssistant(threadId: string) {
 }
 
 /**
- * Compat sin “desacoplar” métodos (para no perder this/_client):
- * 1) Intento firma vieja: retrieve(threadId, runId)
- * 2) Si falla, intento firma nueva: retrieve({ thread_id, run_id })
+ * Compat sin desacoplar el método (para no perder `this/_client`):
+ * Detectamos la ARIDAD real del método y llamamos la firma correcta.
  */
 async function retrieveRunSafe(threadId: string, runId: string): Promise<any> {
-  try {
-    return await (openai as any).beta.threads.runs.retrieve(threadId, runId);
-  } catch (e1) {
-    try {
-      return await (openai as any).beta.threads.runs.retrieve({
-        thread_id: threadId,
-        run_id: runId,
-      });
-    } catch (e2) {
-      throw e2;
-    }
+  const runsApi = (openai as any).beta.threads.runs;
+  const arity = typeof runsApi.retrieve === 'function' ? runsApi.retrieve.length : 1;
+  // viejo: retrieve(threadId, runId) -> suele reportar length >= 2
+  if (arity >= 2) {
+    return await runsApi.retrieve(threadId, runId);
   }
+  // nuevo: retrieve({ thread_id, run_id })
+  return await runsApi.retrieve({ thread_id: threadId, run_id: runId });
 }
 
-/** list messages: firma vieja y nueva, sin desacoplar */
 async function listMessagesSafe(threadId: string, limit = 20): Promise<any> {
-  try {
-    return await (openai as any).beta.threads.messages.list(threadId, { limit });
-  } catch (e1) {
-    try {
-      return await (openai as any).beta.threads.messages.list({
-        thread_id: threadId,
-        limit,
-      });
-    } catch (e2) {
-      throw e2;
-    }
+  const msgApi = (openai as any).beta.threads.messages;
+  const arity = typeof msgApi.list === 'function' ? msgApi.list.length : 1;
+  // viejo: list(threadId, { limit })
+  if (arity >= 2) {
+    return await msgApi.list(threadId, { limit });
   }
+  // nuevo: list({ thread_id, limit })
+  return await msgApi.list({ thread_id: threadId, limit });
 }
 
 async function pollRun(threadId: string, runId: string, timeoutMs = 60_000) {
