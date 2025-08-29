@@ -2,160 +2,107 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Messages from './messages';
-import type { ChatMessage } from '@/lib/types';
+import type { ChatMessage, Itinerary } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-const CV_SESSION_KEY = 'cv_session';
+function extractItineraryFromText(text: string): Itinerary | null {
+  if (!text) return null;
 
-function getOrCreateSessionId() {
-  try {
-    const s = localStorage.getItem(CV_SESSION_KEY);
-    if (s) return s;
-    const nu = uuidv4();
-    localStorage.setItem(CV_SESSION_KEY, nu);
-    return nu;
-  } catch {
-    return uuidv4();
+  const reFence = /```(?:itinerary|json)\s*([\s\S]*?)```/i;
+  const m1 = text.match(reFence);
+  const candidate1 = m1?.[1];
+
+  const rePrefix = /ITINERARY_JSON\s*[:=]\s*({[\s\S]*})/i;
+  const m2 = text.match(rePrefix);
+  const candidate2 = m2?.[1];
+
+  const maybeWhole = text.trim().startsWith('{') && text.trim().endsWith('}')
+    ? text.trim()
+    : undefined;
+
+  const candidates = [candidate1, candidate2, maybeWhole].filter(Boolean) as string[];
+
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
+        return parsed as Itinerary;
+      }
+    } catch {}
   }
+  return null;
 }
 
-export default function Chat({
-  id,
-  initialMessages = [],
-  initialChatModel,
-  initialVisibilityType,
-  isReadonly,
-  session,
-  autoResume = false,
-}: {
-  id: string;
-  initialMessages?: ChatMessage[];
-  initialChatModel?: string;
-  initialVisibilityType?: 'public' | 'private';
-  isReadonly?: boolean;
-  session?: any;
-  autoResume?: boolean;
-}) {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+export default function Chat() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const inputRef = useRef<HTMLInputElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages.length, loading]);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    // crea/recupera sesión
-    getOrCreateSessionId();
-  }, []);
-
-  const handleSubmit = async (e?: React.FormEvent) => {
-    e?.preventDefault();
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
 
     const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      content: [{ type: 'text', text: { value: text } }],
+      parts: [{ type: 'text', text }],
       createdAt: new Date().toISOString(),
     };
-
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const userId = getOrCreateSessionId();
-    let full = '';
-
     try {
-      // ⚠️ Ruta correcta del Route Handler (segmento de grupo (chat) no participa en la URL)
+      // Tu endpoint debe devolver { reply?: string, parts?: UIMessagePart[], threadId?: string }
       const res = await fetch('/api/chat', {
         method: 'POST',
-        body: JSON.stringify({
-          message: text,
-          userId,
-          metadata: { chatId: id },
-        }),
         headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
+        body: JSON.stringify({ message: { role: 'user', parts: [{ text }] } }),
       });
 
-      if (!res.ok || !res.body) {
-        const errText = await res.text();
-        throw new Error(errText || 'No stream');
+      const data = await res.json();
+
+      let assistant: ChatMessage | null = null;
+
+      if (Array.isArray(data?.parts)) {
+        assistant = { id: uuidv4(), role: 'assistant', parts: data.parts };
+      } else {
+        const reply = (data?.reply ?? '').toString();
+        const itin = extractItineraryFromText(reply);
+        assistant = itin
+          ? { id: uuidv4(), role: 'assistant', parts: [{ type: 'itinerary', itinerary: itin }] }
+          : { id: uuidv4(), role: 'assistant', parts: [{ type: 'text', text: reply || '…' }] };
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const parts = chunk.split('\n\n').filter(Boolean);
-        for (const p of parts) {
-          if (!p.startsWith('data:')) continue;
-          const payloadRaw = p.slice(5).trim();
-          if (!payloadRaw) continue;
-          let payload: any;
-          try { payload = JSON.parse(payloadRaw); } catch { continue; }
-
-          if (payload.type === 'delta' && typeof payload.text === 'string') {
-            full += payload.text;
-          } else if (payload.type === 'done') {
-            full = payload.text ?? full;
-          } else if (payload.type === 'error') {
-            throw new Error(payload.error || 'Assistant error');
-          }
-        }
-      }
-
-      if (full && full.trim().length > 0) {
-        const assistantMsg: ChatMessage = {
-          id: uuidv4(),
-          role: 'assistant',
-          content: [{ type: 'text', text: { value: full } }],
-          createdAt: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-      }
+      setMessages((prev) => [...prev, assistant!]);
     } catch (err) {
-      console.error('CV Chat error:', err);
-      const errMsg: ChatMessage = {
-        id: uuidv4(),
-        role: 'assistant',
-        content: [{ type: 'text', text: { value: 'Lo siento, hubo un problema procesando tu mensaje.' } }],
-        createdAt: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
+      console.error(err);
+      setMessages((prev) => [
+        ...prev,
+        { id: uuidv4(), role: 'assistant', parts: [{ type: 'text', text: 'Error procesando tu mensaje.' }] },
+      ]);
     } finally {
       setLoading(false);
-      abortRef.current = null;
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  };
-
-  const handleStop = () => {
-    try { abortRef.current?.abort(); } catch {}
-    setLoading(false);
   };
 
   return (
     <div className="w-full h-full flex flex-col">
-      <div id="cv-chat-scroll" className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-        {/* ✅ Solo pasamos props que existen */}
-        <Messages messages={messages} isLoading={loading} />
-        <div ref={bottomRef} />
+      <div className="flex-1 min-h-0">
+        <Messages
+          messages={messages}
+          isLoading={loading}
+          votes={[]}
+          setMessages={({ messages: m }: any) => setMessages(m)}
+          regenerate={async () => {}}
+          isReadonly={false}
+          chatId="cv"
+        />
       </div>
 
       <div className="border-t border-gray-800/40 backdrop-blur bg-black/30">
@@ -167,28 +114,15 @@ export default function Chat({
               onChange={(e) => setInput(e.target.value)}
               placeholder="Escribe tu mensaje…"
               className="flex-1 rounded-2xl px-4 py-3 bg-black/60 text-white border border-gray-800/40
-                         text-[16px] md:text-base focus:outline-none focus:ring-2 focus:ring-yellow-500/40"
+                         focus:outline-none focus:ring-2 focus:ring-yellow-500/40"
             />
             <button
               type="submit"
               disabled={loading || !input.trim()}
-              className="flex-shrink-0 grid place-items-center rounded-full
-                         h-12 w-12 bg-yellow-500 text-black font-semibold hover:opacity-90 transition disabled:opacity-50"
-              aria-label="Enviar"
-              title="Enviar"
+              className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
             >
               {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
             </button>
-            {loading && (
-              <button
-                type="button"
-                onClick={handleStop}
-                className="px-4 rounded-xl border border-yellow-500/40 text-yellow-500"
-                title="Detener"
-              >
-                Detener
-              </button>
-            )}
           </form>
         </div>
       </div>
