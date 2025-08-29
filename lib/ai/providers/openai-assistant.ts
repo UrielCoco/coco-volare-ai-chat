@@ -1,134 +1,149 @@
 // lib/ai/providers/openai-assistant.ts
+// Provider robusto y compatible con múltiples versiones del SDK de OpenAI.
+// Evita el error "No se puede asignar un argumento de tipo 'string' al parámetro de tipo 'RunRetrieveParams'"
+// usando llamadas duales (objeto o posicional) con 'as any'.
+
 import OpenAI from "openai";
 
-export type AssistantEvent =
-  | { type: "message.delta"; text: string }
-  | { type: "message.completed"; text: string }
-  | { type: "run.requires_action" }
-  | { type: "run.completed" }
-  | { type: "run.failed"; error: string };
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_ASSISTANT_ID =
+  process.env.OPENAI_ASSISTANT_ID || process.env.NEXT_PUBLIC_OPENAI_ASSISTANT_ID || "";
 
-export interface RunAssistantParams {
-  assistantId: string;
-  input: string;
-  userId?: string;
-  attachments?: Array<{
-    file_id: string;
-    tools?: Array<{ type: "file_search" | "code_interpreter" }>;
-  }>;
-  metadata?: Record<string, string>;
-  onEvent?: (e: AssistantEvent) => void;
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY no está definido");
+}
+if (!OPENAI_ASSISTANT_ID) {
+  console.warn("⚠️ OPENAI_ASSISTANT_ID no está definido");
 }
 
-export async function runAssistantWithStream({
-  assistantId,
-  input,
-  userId,
-  attachments,
-  metadata,
-  onEvent,
-}: RunAssistantParams) {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-  const thread = await client.beta.threads.create({
-    messages: [
-      {
-        role: "user",
-        content: input || "Mensaje",
-        ...(attachments ? { attachments } : {}),
-        ...(userId || metadata
-          ? { metadata: { ...(metadata || {}), ...(userId ? { userId } : {}) } }
-          : {}),
-      },
-    ],
-    ...(metadata ? { metadata } : {}),
-  });
+// ---- Helpers para compatibilidad de firmas ----
+async function createThread(meta?: Record<string, any>): Promise<string> {
+  const traceId = `thr_${Math.random().toString(36).slice(2)}`;
+  // Firma estable (body-only)
+  const created = await client.beta.threads.create({
+    metadata: { source: "webchat", ...(meta || {}) },
+  } as any);
+  const threadId = (created as any).id as string;
+  console.log(JSON.stringify({ level: "info", traceId, msg: "assistant.thread.create", meta: { threadId } }));
+  return threadId;
+}
 
-  // ⚠️ Algunas versiones del SDK cambian los tipos de callbacks.
-  // Para máxima compatibilidad, tipamos el stream como `any`.
-  const stream: any = await (client as any).beta.threads.runs.stream(thread.id, {
-    assistant_id: assistantId,
-  });
+async function addUserMessage(threadId: string, content: string) {
+  // v4 admite: messages.create(threadId, { role, content })
+  // En algunas builds: messages.create({ thread_id, role, content })
+  const api: any = (client as any).beta.threads.messages;
+  try {
+    return await api.create(threadId, { role: "user", content });
+  } catch {
+    return await api.create({ thread_id: threadId, role: "user", content });
+  }
+}
 
-  let buffer = "";
+async function createRun(threadId: string, assistantId: string) {
+  const api: any = (client as any).beta.threads.runs;
+  try {
+    // firma posicional
+    return await api.create(threadId, { assistant_id: assistantId });
+  } catch {
+    // firma por objeto
+    return await api.create({ thread_id: threadId, assistant_id: assistantId });
+  }
+}
 
-  await new Promise<void>((resolve, reject) => {
-    const emitDelta = (text: string) => text && onEvent?.({ type: "message.delta", text });
+async function retrieveRun(threadId: string, runId: string) {
+  const api: any = (client as any).beta.threads.runs;
+  try {
+    // firma por objeto (tu caso actual)
+    return await api.retrieve({ thread_id: threadId, run_id: runId });
+  } catch {
+    // firma posicional (otras versiones)
+    return await api.retrieve(threadId, runId);
+  }
+}
 
-    // Firmas "textDelta" / "textCompleted" (presentes en 4.50+)
-    if (typeof stream.on === "function") {
-      try {
-        stream.on("textDelta", (delta: any /* string | TextDelta */, _snap: any) => {
-          const piece = typeof delta === "string" ? delta : String(delta?.value ?? "");
-          buffer += piece;
-          emitDelta(piece);
-        });
+async function listMessages(threadId: string, limit = 10) {
+  const api: any = (client as any).beta.threads.messages;
+  try {
+    // firma por objeto
+    return await api.list({ thread_id: threadId, limit });
+  } catch {
+    // firma posicional
+    return await api.list(threadId, { limit });
+  }
+}
 
-        stream.on("textCompleted", (full: any) => {
-          const text = typeof full === "string" ? full : String(full?.value ?? buffer);
-          onEvent?.({ type: "message.completed", text });
-        });
+// ---- API pública ----
+export async function runAssistantOnce(opts: {
+  input: string;
+  threadId?: string;
+  metadata?: Record<string, any>;
+}): Promise<{ reply: string; threadId: string }> {
+  const traceId = `ast_${Math.random().toString(36).slice(2)}`;
+  try {
+    // 1) Asegurar thread
+    const threadId = opts.threadId || (await createThread(opts.metadata));
 
-        stream.on("event", (e: any) => {
-          if (e?.event === "thread.run.requires_action") onEvent?.({ type: "run.requires_action" });
-          if (e?.event === "thread.run.completed") onEvent?.({ type: "run.completed" });
-        });
+    // 2) Añadir mensaje de usuario
+    await addUserMessage(threadId, opts.input);
 
-        stream.on("end", () => resolve());
-        stream.on("error", (err: any) => {
-          onEvent?.({ type: "run.failed", error: String(err?.message || err) });
-          reject(err);
-        });
-        return; // listeners armados
-      } catch (e) {
-        // cae al fallback
+    // 3) Correr el assistant
+    const run: any = await createRun(threadId, OPENAI_ASSISTANT_ID);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        traceId,
+        msg: "assistant.run.created",
+        meta: { runId: run.id, threadId },
+      })
+    );
+
+    // 4) Polling hasta completar
+    let status: string = run.status;
+    let guard = 0;
+    while (status === "queued" || status === "in_progress" || status === "requires_action") {
+      await new Promise((r) => setTimeout(r, 800));
+      const r = (await retrieveRun(threadId, run.id)) as any;
+      status = r.status;
+      guard++;
+      if (guard > 120) {
+        console.warn("⚠️ assistant.run timeout");
+        break; // ~96s
       }
     }
 
-    // 🔙 Fallback por si no hay .on(): iteramos eventos crudos
-    (async () => {
-      try {
-        for await (const ev of stream) {
-          const t = ev?.event ?? ev?.type;
-
-          // Variantes comunes de nombres según versión
-          if (t === "response.output_text.delta" || t === "text.delta" || t === "textDelta") {
-            const piece = ev?.data?.delta ?? ev?.delta ?? "";
-            buffer += String(piece);
-            emitDelta(String(piece));
-          } else if (t === "response.output_text.done" || t === "text.completed" || t === "textCompleted") {
-            const text = ev?.data?.text ?? ev?.text ?? buffer;
-            onEvent?.({ type: "message.completed", text: String(text ?? buffer) });
-          } else if (t === "thread.run.requires_action") {
-            onEvent?.({ type: "run.requires_action" });
-          } else if (t === "thread.run.completed" || t === "response.completed") {
-            onEvent?.({ type: "run.completed" });
-          }
-        }
-        resolve();
-      } catch (err: any) {
-        onEvent?.({ type: "run.failed", error: String(err?.message || err) });
-        reject(err);
+    // 5) Leer el último mensaje del asistente
+    const msgs: any = await listMessages(threadId, 10);
+    // En algunas versiones, msgs.data ya viene listo; en otras, es msgs.body.data
+    const data: any[] = Array.isArray(msgs?.data) ? msgs.data : Array.isArray(msgs?.body?.data) ? msgs.body.data : [];
+    const firstAssistant = data.find((m) => m.role === "assistant");
+    let reply = "";
+    if (firstAssistant?.content?.length) {
+      for (const c of firstAssistant.content) {
+        if (c.type === "text") reply += c.text?.value ?? "";
       }
-    })();
-  });
-}
+    }
+    reply = reply || "(sin respuesta)";
 
-export async function submitToolOutputs(params: {
-  threadId: string;
-  runId: string;
-  outputs: Array<{ toolCallId: string; output: string }>;
-}) {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const tool_outputs = params.outputs.map((o) => ({
-    tool_call_id: o.toolCallId,
-    output: o.output,
-  }));
+    console.log(
+      JSON.stringify({
+        level: "info",
+        traceId,
+        msg: "assistant.reply",
+        meta: { replyPreview: reply.slice(0, 140) },
+      })
+    );
 
-  const runsApi: any = (client as any).beta.threads.runs;
-  try {
-    await runsApi.submitToolOutputs(params.runId, { thread_id: params.threadId, tool_outputs });
-  } catch {
-    await runsApi.submitToolOutputs(params.threadId, params.runId, { tool_outputs });
+    return { reply, threadId };
+  } catch (e: any) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        msg: "assistant.error",
+        meta: { traceId, error: String(e?.message || e) },
+      })
+    );
+    throw e;
   }
 }
