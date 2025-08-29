@@ -63,13 +63,12 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // 🔹 Refs del composer (para calcular espacio)
+  // Refs/UI
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
-  // Actualiza altura del composer (para padding inferior del scroll)
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -100,7 +99,6 @@ export default function Chat() {
     };
   }, []);
 
-  // Asegura sesión y enfoca input al montar
   useEffect(() => {
     inputRef.current?.focus();
     ensureWebSession().catch((e) => {
@@ -108,30 +106,22 @@ export default function Chat() {
     });
   }, []);
 
-  // ✅ Envío del mensaje (SSE)
+  // ✅ Envío con SSE (sin placeholder de asistente)
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const raw = input.trim();
-    if (!raw) return; // evita vacío
+    if (!raw) return;
 
-    // Estructura local para UI
+    // 1) Agrega el mensaje del usuario
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      // @ts-ignore — usamos parts como { type:'text', text:string }
+      // @ts-ignore
       parts: [{ type: 'text', text: raw }],
     };
+    setMessages((prev) => [...prev, userMessage]);
 
-    // Placeholder del asistente que iremos rellenando con el stream
-    const assistantId = uuidv4();
-    const assistantMessage: ChatMessage = {
-      id: assistantId,
-      role: 'assistant',
-      // @ts-ignore
-      parts: [{ type: 'text', text: '' }],
-    };
-
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    // Limpia input y muestra indicador de escribiendo…
     setInput('');
     setLoading(true);
 
@@ -153,23 +143,23 @@ export default function Chat() {
         throw new Error(`HTTP ${response.status}: ${txt.slice(0, 200)}`);
       }
 
-      // Lectura de SSE
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let createdAssistant = false;
+      let assistantId = ''; // lo creamos hasta el primer delta
       let finished = false;
+      let accumulated = '';
 
       while (!finished) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Cada evento viene como "data: {...}\n\n"
-        const parts = buffer.split('\n\n');
-        // Deja el último fragmento incompleto en buffer
-        buffer = parts.pop() || '';
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() || '';
 
-        for (const chunk of parts) {
+        for (const chunk of chunks) {
           const line = chunk.trim();
           if (!line.startsWith('data:')) continue;
 
@@ -180,30 +170,46 @@ export default function Chat() {
           try {
             payload = JSON.parse(payloadStr);
           } catch {
-            // ignora líneas no json
             continue;
           }
 
           if (payload.type === 'delta') {
             const delta = String(payload.text || '');
-            if (delta) {
-              // agrega texto al placeholder del asistente
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        // @ts-ignore
-                        parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
-                      }
-                    : m,
-                ),
-              );
+            if (!delta) continue;
+
+            accumulated += delta;
+
+            // Crea el mensaje del asistente en el PRIMER delta
+            if (!createdAssistant) {
+              assistantId = uuidv4();
+              const assistantMessage: ChatMessage = {
+                id: assistantId,
+                role: 'assistant',
+                // @ts-ignore
+                parts: [{ type: 'text', text: delta }],
+              };
+              setMessages((prev) => [...prev, assistantMessage]);
+              // Apaga el indicador de “escribiendo” (evita doble burbuja)
+              setLoading(false);
+              createdAssistant = true;
+              continue;
             }
+
+            // Para siguientes deltas, solo concatena
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      // @ts-ignore
+                      parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
+                    }
+                  : m,
+              ),
+            );
           } else if (payload.type === 'done') {
-            // opcional: asegura texto final
-            const finalText = String(payload.text || '');
-            if (finalText) {
+            const finalText = String(payload.text || accumulated);
+            if (createdAssistant) {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
@@ -211,9 +217,14 @@ export default function Chat() {
                     : m,
                 ),
               );
+            } else if (finalText) {
+              // (poco común) si no hubo deltas y llegó final directo
+              assistantId = uuidv4();
+              setMessages((prev) => [
+                ...prev,
+                { id: assistantId, role: 'assistant', parts: [{ type: 'text', text: finalText }] as any },
+              ]);
             }
-          } else if (payload.type === 'requires_action') {
-            // Aquí podrías manejar tool-calls si los procesas en cliente
           } else if (payload.type === 'error') {
             throw new Error(payload.error || 'Stream error');
           } else if (payload.type === 'eof') {
@@ -225,9 +236,8 @@ export default function Chat() {
     } catch (error) {
       console.error('Error sending message:', error);
       alert('No se pudo enviar el mensaje. Intenta de nuevo.');
-      // en caso de error, quita el placeholder vacío del asistente
-      setMessages((prev) => prev.filter((m) => m.role !== 'assistant' || (m as any).parts?.[0]?.text));
     } finally {
+      // Asegura que el “escribiendo…” se apague
       setLoading(false);
     }
   };
@@ -246,7 +256,7 @@ export default function Chat() {
       >
         <Messages
           messages={messages}
-          isLoading={loading}
+          isLoading={loading}   // ← solo un globito “…” mientras llega el primer delta
           votes={[]}
           setMessages={setMessages as any}
           regenerate={async () => {}}
