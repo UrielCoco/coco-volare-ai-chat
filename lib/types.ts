@@ -1,56 +1,13 @@
-import { z } from 'zod';
-import type { getWeather } from './ai/tools/get-weather';
-import type { createDocument } from './ai/tools/create-document';
-import type { updateDocument } from './ai/tools/update-document';
-import type { requestSuggestions } from './ai/tools/request-suggestions';
-import type { InferUIData, InferUITool, UIMessage, UIMessagePart } from 'ai';
+export type UIMessageText = { value: string };
 
-import type { ArtifactKind } from '@/components/artifact';
-import type { Suggestion } from './db/schema';
+export type UIMessagePart =
+  | { type: 'text'; text: UIMessageText }
+  | { type: 'tool-call'; name: string; args?: any }
+  | { type: 'attachment'; url?: string; mimeType?: string };
 
-export const messageMetadataSchema = z.object({
-  createdAt: z.string(),
-});
-
-export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
-
-// Herramientas AI personalizadas
-type weatherTool = InferUITool<typeof getWeather>;
-type createDocumentTool = InferUITool<ReturnType<typeof createDocument>>;
-type updateDocumentTool = InferUITool<ReturnType<typeof updateDocument>>;
-type requestSuggestionsTool = InferUITool<
-  ReturnType<typeof requestSuggestions>
->;
-
-// Todas las herramientas disponibles en el chat
-export type ChatTools = {
-  getWeather: weatherTool;
-  createDocument: createDocumentTool;
-  updateDocument: updateDocumentTool;
-  requestSuggestions: requestSuggestionsTool;
-};
-
-// Tipos de datos usados en el renderizado de mensajes (UI)
-export type CustomUIDataTypes = {
-  textDelta: string;
-  imageDelta: string;
-  sheetDelta: string;
-  codeDelta: string;
-  suggestion: Suggestion;
-  appendMessage: string;
+export type ChatMessage = {
   id: string;
-  title: string;
-  kind: ArtifactKind;
-  clear: null;
-  finish: null;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: UIMessagePart[];
+  createdAt?: string;
 };
-
-// 📌 TIPO FINAL DE MENSAJE PARA USAR EN COMPONENTES
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  parts: {
-    type: 'text';
-    text: string;
-  }[];
-}

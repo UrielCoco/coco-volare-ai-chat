@@ -1,7 +1,6 @@
 // lib/ai/providers/openai-assistant.ts
 import OpenAI from "openai";
 
-/** Eventos que regresamos al route (SSE) */
 export type AssistantEvent =
   | { type: "message.delta"; text: string }
   | { type: "message.completed"; text: string }
@@ -21,40 +20,6 @@ export interface RunAssistantParams {
   onEvent?: (e: AssistantEvent) => void;
 }
 
-/** Extrae texto desde el shape de delta (message delta de Assistants) */
-function extractDeltaText(ev: any): string {
-  try {
-    const content = ev?.delta?.content ?? [];
-    let acc = "";
-    for (const c of content) {
-      if (typeof c?.text?.value === "string") acc += c.text.value;
-      else if (typeof c?.value === "string") acc += c.value;
-    }
-    return acc;
-  } catch {
-    return "";
-  }
-}
-
-/** Aplana un mensaje completado a texto plano */
-function extractCompletedText(ev: any): string {
-  try {
-    const content = ev?.message?.content ?? [];
-    let acc = "";
-    for (const c of content) {
-      if (typeof c?.text?.value === "string") acc += c.text.value;
-      else if (typeof c?.value === "string") acc += c.value;
-    }
-    return acc;
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Ejecuta Assistant con streaming.
- * Sin prompts locales: TODO vive en el Assistant.
- */
 export async function runAssistantWithStream({
   assistantId,
   input,
@@ -65,13 +30,12 @@ export async function runAssistantWithStream({
 }: RunAssistantParams) {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  // 1) Thread con el mensaje del usuario (content nunca vacío)
   const thread = await client.beta.threads.create({
     messages: [
       {
         role: "user",
         content: input || "Mensaje",
-        ...(attachments ? { attachments: attachments as any } : {}),
+        ...(attachments ? { attachments } : {}),
         ...(userId || metadata
           ? { metadata: { ...(metadata || {}), ...(userId ? { userId } : {}) } }
           : {}),
@@ -80,65 +44,76 @@ export async function runAssistantWithStream({
     ...(metadata ? { metadata } : {}),
   });
 
-  // 2) Run con stream
-  const stream: any = await client.beta.threads.runs.stream(thread.id, {
+  // ⚠️ Algunas versiones del SDK cambian los tipos de callbacks.
+  // Para máxima compatibilidad, tipamos el stream como `any`.
+  const stream: any = await (client as any).beta.threads.runs.stream(thread.id, {
     assistant_id: assistantId,
   });
 
-  let full = "";
+  let buffer = "";
 
-  // Algunas versiones emiten textDelta (string simple)
-  stream.on("textDelta", (delta: any) => {
-    const chunk = delta?.value ?? "";
-    if (chunk) {
-      full += chunk;
-      onEvent?.({ type: "message.delta", text: chunk });
-    }
-  });
+  await new Promise<void>((resolve, reject) => {
+    const emitDelta = (text: string) => text && onEvent?.({ type: "message.delta", text });
 
-  // Manejo universal por evento tipado como string
-  stream.on("event", (ev: any) => {
-    const t = ev?.type;
+    // Firmas "textDelta" / "textCompleted" (presentes en 4.50+)
+    if (typeof stream.on === "function") {
+      try {
+        stream.on("textDelta", (delta: any /* string | TextDelta */, _snap: any) => {
+          const piece = typeof delta === "string" ? delta : String(delta?.value ?? "");
+          buffer += piece;
+          emitDelta(piece);
+        });
 
-    // Deltas del mensaje
-    if (t === "thread.message.delta") {
-      const piece = extractDeltaText(ev);
-      if (piece) {
-        full += piece;
-        onEvent?.({ type: "message.delta", text: piece });
+        stream.on("textCompleted", (full: any) => {
+          const text = typeof full === "string" ? full : String(full?.value ?? buffer);
+          onEvent?.({ type: "message.completed", text });
+        });
+
+        stream.on("event", (e: any) => {
+          if (e?.event === "thread.run.requires_action") onEvent?.({ type: "run.requires_action" });
+          if (e?.event === "thread.run.completed") onEvent?.({ type: "run.completed" });
+        });
+
+        stream.on("end", () => resolve());
+        stream.on("error", (err: any) => {
+          onEvent?.({ type: "run.failed", error: String(err?.message || err) });
+          reject(err);
+        });
+        return; // listeners armados
+      } catch (e) {
+        // cae al fallback
       }
-      return;
     }
 
-    // Mensaje completado
-    if (t === "thread.message.completed") {
-      const finalText = extractCompletedText(ev) || full;
-      onEvent?.({ type: "message.completed", text: finalText });
-      return;
-    }
+    // 🔙 Fallback por si no hay .on(): iteramos eventos crudos
+    (async () => {
+      try {
+        for await (const ev of stream) {
+          const t = ev?.event ?? ev?.type;
 
-    // Run requiere acción (tool-calls)
-    if (t === "thread.run.requires_action") {
-      onEvent?.({ type: "run.requires_action" });
-      return;
-    }
-  });
-
-  // Fin / error
-  return new Promise<void>((resolve, reject) => {
-    stream.on("end", () => {
-      if (full) onEvent?.({ type: "message.completed", text: full });
-      onEvent?.({ type: "run.completed" });
-      resolve();
-    });
-    stream.on("error", (err: any) => {
-      onEvent?.({ type: "run.failed", error: String(err) });
-      reject(err);
-    });
+          // Variantes comunes de nombres según versión
+          if (t === "response.output_text.delta" || t === "text.delta" || t === "textDelta") {
+            const piece = ev?.data?.delta ?? ev?.delta ?? "";
+            buffer += String(piece);
+            emitDelta(String(piece));
+          } else if (t === "response.output_text.done" || t === "text.completed" || t === "textCompleted") {
+            const text = ev?.data?.text ?? ev?.text ?? buffer;
+            onEvent?.({ type: "message.completed", text: String(text ?? buffer) });
+          } else if (t === "thread.run.requires_action") {
+            onEvent?.({ type: "run.requires_action" });
+          } else if (t === "thread.run.completed" || t === "response.completed") {
+            onEvent?.({ type: "run.completed" });
+          }
+        }
+        resolve();
+      } catch (err: any) {
+        onEvent?.({ type: "run.failed", error: String(err?.message || err) });
+        reject(err);
+      }
+    })();
   });
 }
 
-/** submitToolOutputs compatible con distintas firmas del SDK */
 export async function submitToolOutputs(params: {
   threadId: string;
   runId: string;
@@ -152,15 +127,8 @@ export async function submitToolOutputs(params: {
 
   const runsApi: any = (client as any).beta.threads.runs;
   try {
-    // Firma 1: (runId, { thread_id, tool_outputs })
-    await runsApi.submitToolOutputs(params.runId, {
-      thread_id: params.threadId,
-      tool_outputs,
-    });
+    await runsApi.submitToolOutputs(params.runId, { thread_id: params.threadId, tool_outputs });
   } catch {
-    // Firma 2: (threadId, runId, { tool_outputs })
-    await runsApi.submitToolOutputs(params.threadId, params.runId, {
-      tool_outputs,
-    });
+    await runsApi.submitToolOutputs(params.threadId, params.runId, { tool_outputs });
   }
 }

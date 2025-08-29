@@ -6,320 +6,189 @@ import type { ChatMessage } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-/* ========= Helpers de sesión (frontend) ========= */
 const CV_SESSION_KEY = 'cv_session';
 
-async function fetchJson(input: RequestInfo, init?: RequestInit) {
-  const res = await fetch(input, init);
-  const text = await res.text();
+function getOrCreateSessionId() {
   try {
-    const json = JSON.parse(text);
-    if (!res.ok) throw Object.assign(new Error(json?.error || res.statusText), { status: res.status, json });
-    return json;
+    const s = localStorage.getItem(CV_SESSION_KEY);
+    if (s) return s;
+    const nu = uuidv4();
+    localStorage.setItem(CV_SESSION_KEY, nu);
+    return nu;
   } catch {
-    if (!res.ok) throw Object.assign(new Error(text || res.statusText), { status: res.status, text });
-    return text as any;
+    return uuidv4();
   }
 }
 
-async function ensureWebSession(): Promise<{ sessionId: string; threadId: string }> {
-  let sid = '';
-  try {
-    sid = localStorage.getItem(CV_SESSION_KEY) || '';
-  } catch {}
-
-  const url = sid ? `/api/chat/session?sid=${encodeURIComponent(sid)}` : `/api/chat/session`;
-  const data = await fetchJson(url, {
-    method: 'GET',
-    headers: sid ? { 'x-cv-session': sid } : undefined,
-    cache: 'no-store',
-  });
-
-  const sessionId = String(data?.sessionId || '');
-  const threadId = String(data?.threadId || '');
-
-  if (sessionId) {
-    try {
-      localStorage.setItem(CV_SESSION_KEY, sessionId);
-    } catch {}
-    (window as any).cvSessionId = sessionId;
-  }
-  if (threadId) (window as any).cvThreadId = threadId;
-
-  return { sessionId, threadId };
-}
-
-function peekSessionId(): string {
-  try {
-    return localStorage.getItem(CV_SESSION_KEY) || '';
-  } catch {
-    return '';
-  }
-}
-
-/* ========= Componente ========= */
-export default function Chat() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export default function Chat({
+  id,
+  initialMessages = [],
+  initialChatModel,
+  initialVisibilityType,
+  isReadonly,
+  session,
+  autoResume = false,
+}: {
+  id: string;
+  initialMessages?: ChatMessage[];
+  initialChatModel?: string;
+  initialVisibilityType?: 'public' | 'private';
+  isReadonly?: boolean;
+  session?: any;
+  autoResume?: boolean;
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const formRef = useRef<HTMLFormElement | null>(null);
-  const composerRef = useRef<HTMLDivElement | null>(null);
-  const [composerH, setComposerH] = useState<number>(96);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const el = composerRef.current;
-    if (!el) return;
-
-    const update = () => setComposerH(el.offsetHeight || 96);
-    update();
-
-    let ro: ResizeObserver | null = null;
-    try {
-      if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
-        ro = new ResizeObserver(() => {
-          try { update(); } catch {}
-        });
-        ro.observe(el);
-      }
-    } catch {}
-
-    const onResize = () => update();
-    window.addEventListener('resize', onResize);
-
-    return () => {
-      try { ro && ro.disconnect(); } catch {}
-      window.removeEventListener('resize', onResize);
-    };
-  }, []);
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, loading]);
 
   useEffect(() => {
     inputRef.current?.focus();
-    ensureWebSession().catch((e) => console.warn('CV: ensureWebSession fallback:', e));
+    // crea/recupera sesión
+    getOrCreateSessionId();
   }, []);
 
-  // ✅ Envío con SSE (sin placeholder de asistente)
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const raw = input.trim();
-    if (!raw) return;
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const text = input.trim();
+    if (!text || loading) return;
 
-    // 1) Agrega el mensaje del usuario
-    const userMessage: ChatMessage = {
+    const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      // formato amplio para que Messages siempre lo pinte
-      // @ts-ignore
-      parts: [{ type: 'text', text: raw }],
-      // @ts-ignore
-      content: raw,
+      content: [{ type: 'text', text: { value: text } }],
+      createdAt: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, userMessage]);
 
+    setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
-    try {
-      await ensureWebSession();
-      const sid = peekSessionId();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-      const response = await fetch('/api/chat', {
+    const userId = getOrCreateSessionId();
+    let full = '';
+
+    try {
+      // ⚠️ Ruta correcta del Route Handler (segmento de grupo (chat) no participa en la URL)
+      const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(sid ? { 'x-cv-session': sid } : {}),
-        },
-        body: JSON.stringify({ message: raw }),
+        body: JSON.stringify({
+          message: text,
+          userId,
+          metadata: { chatId: id },
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
       });
 
-      if (!response.ok || !response.body) {
-        const txt = await response.text().catch(() => '');
-        throw new Error(`HTTP ${response.status}: ${txt.slice(0, 200)}`);
+      if (!res.ok || !res.body) {
+        const errText = await res.text();
+        throw new Error(errText || 'No stream');
       }
 
-      const reader = response.body.getReader();
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
 
-      let buffer = '';
-      let createdAssistant = false;
-      let assistantId = '';
-      let finished = false;
-      let accumulated = '';
-
-      const createAssistantMsg = (firstText: string) => {
-        createdAssistant = true;
-        assistantId = uuidv4();
-        const assistantMessage: ChatMessage = {
-          id: assistantId,
-          role: 'assistant',
-          // @ts-ignore
-          parts: [{ type: 'text', text: firstText }],
-          // @ts-ignore
-          content: firstText,
-        };
-        setMessages((prev) => [...prev, assistantMessage]);
-        // apaga typing para que no aparezca segundo globito
-        setLoading(false);
-      };
-
-      const appendAssistant = (delta: string) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  // @ts-ignore
-                  parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
-                  // @ts-ignore
-                  content: String(((m as any).content ?? '') + delta),
-                }
-              : m
-          )
-        );
-      };
-
-      // lector SSE
-      while (!finished) {
+      while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        const parts = chunk.split('\n\n').filter(Boolean);
+        for (const p of parts) {
+          if (!p.startsWith('data:')) continue;
+          const payloadRaw = p.slice(5).trim();
+          if (!payloadRaw) continue;
+          let payload: any;
+          try { payload = JSON.parse(payloadRaw); } catch { continue; }
 
-        // divide por doble salto (soporta \r\n\r\n y \n\n)
-        const chunks = buffer.split(/\r?\n\r?\n/);
-        buffer = chunks.pop() || '';
-
-        for (const chunk of chunks) {
-          const line = chunk.trim();
-          if (!line.startsWith('data:')) continue;
-
-          const payloadStr = line.slice(5).trim();
-          if (!payloadStr) continue;
-
-          let payload: any = null;
-          try {
-            payload = JSON.parse(payloadStr);
-          } catch {
-            continue;
+          if (payload.type === 'delta' && typeof payload.text === 'string') {
+            full += payload.text;
+          } else if (payload.type === 'done') {
+            full = payload.text ?? full;
+          } else if (payload.type === 'error') {
+            throw new Error(payload.error || 'Assistant error');
           }
-
-          // Soportamos AMBOS esquemas: {type:'delta'|'done'|...} y {type:'message.delta'|'message.completed'|...}
-          const t = payload.type;
-
-          // 1) Deltas
-          if (t === 'delta' || t === 'message.delta') {
-            const delta = String(payload.text || '');
-            if (!delta) continue;
-
-            accumulated += delta;
-
-            if (!createdAssistant) {
-              createAssistantMsg(delta);
-              continue;
-            }
-            appendAssistant(delta);
-            continue;
-          }
-
-          // 2) Final
-          if (t === 'done' || t === 'message.completed') {
-            const finalText = String(payload.text || accumulated);
-            if (!createdAssistant) {
-              createAssistantMsg(finalText);
-            } else if (finalText) {
-              // asegura que el texto final quede sincronizado
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        // @ts-ignore
-                        parts: [{ type: 'text', text: finalText }],
-                        // @ts-ignore
-                        content: finalText,
-                      }
-                    : m
-                )
-              );
-            }
-            continue;
-          }
-
-          // 3) Error
-          if (t === 'error') {
-            throw new Error(payload.error || 'Stream error');
-          }
-
-          // 4) Cierre
-          if (t === 'eof') {
-            finished = true;
-            break;
-          }
-
-          // 5) Otros (requires_action, etc.)
-          // Por ahora no hacemos nada en cliente
         }
       }
-    } catch (error) {
-      console.error('CV Chat stream error:', error);
-      alert('No se pudo enviar el mensaje. Intenta de nuevo.');
+
+      if (full && full.trim().length > 0) {
+        const assistantMsg: ChatMessage = {
+          id: uuidv4(),
+          role: 'assistant',
+          content: [{ type: 'text', text: { value: full } }],
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+      }
+    } catch (err) {
+      console.error('CV Chat error:', err);
+      const errMsg: ChatMessage = {
+        id: uuidv4(),
+        role: 'assistant',
+        content: [{ type: 'text', text: { value: 'Lo siento, hubo un problema procesando tu mensaje.' } }],
+        createdAt: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, errMsg]);
     } finally {
-      // asegúrate de apagar typing
       setLoading(false);
+      abortRef.current = null;
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   };
 
-  const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`;
+  const handleStop = () => {
+    try { abortRef.current?.abort(); } catch {}
+    setLoading(false);
+  };
 
   return (
-    <div
-      className="relative flex flex-col w-full min-h-[100dvh] mx-auto bg-transparent dark:bg-transparent"
-      style={{ ['--composer-h' as any]: `${composerH}px` }}
-    >
-      {/* Área de conversación */}
-      <div
-        className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-        style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
-      >
-        <Messages
-          messages={messages}
-          isLoading={loading}
-          votes={[]}
-          setMessages={setMessages as any}
-          regenerate={async () => {}}
-          isReadonly={false}
-          chatId="local-chat"
-        />
+    <div className="w-full h-full flex flex-col">
+      <div id="cv-chat-scroll" className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        {/* ✅ Solo pasamos props que existen */}
+        <Messages messages={messages} isLoading={loading} />
+        <div ref={bottomRef} />
       </div>
 
-      {/* Composer */}
-      <div
-        className="fixed inset-x-0 bottom-0 z-50 bg-black"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-      >
-        <div ref={composerRef} className="mx-auto max-w-3xl px-2 sm:px-4 py-2 sm:py-4">
-          <form ref={formRef} onSubmit={handleSubmit} className="w-full flex items-center gap-2 sm:gap-3">
+      <div className="border-t border-gray-800/40 backdrop-blur bg-black/30">
+        <div className="mx-auto max-w-3xl p-3 flex gap-2">
+          <form onSubmit={handleSubmit} className="flex w-full gap-2">
             <input
               ref={inputRef}
-              type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="..."
-              className="min-w-0 flex-1 px-3 sm:px-5 py-3 rounded-full border border-gray-700
-                         bg-white/70 dark:bg-white/20 text-black dark:text-white placeholder-gray-500
-                         focus:outline-none focus:ring-2 focus:ring-volare-blue transition-all duration-300
-                         text-[16px] md:text-base"
+              placeholder="Escribe tu mensaje…"
+              className="flex-1 rounded-2xl px-4 py-3 bg-black/60 text-white border border-gray-800/40
+                         text-[16px] md:text-base focus:outline-none focus:ring-2 focus:ring-yellow-500/40"
             />
             <button
               type="submit"
               disabled={loading || !input.trim()}
               className="flex-shrink-0 grid place-items-center rounded-full
-                         h-10 w-10 sm:h-11 sm:w-11 md:h-12 md:w-12
-                         bg-white text-black hover:bg-gray-100 transition-colors duration-300 disabled:opacity-50"
+                         h-12 w-12 bg-yellow-500 text-black font-semibold hover:opacity-90 transition disabled:opacity-50"
               aria-label="Enviar"
+              title="Enviar"
             >
-              {loading ? '...' : <PaperPlaneIcon className="w-4 h-4 sm:w-5 sm:h-5" />}
+              {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
             </button>
+            {loading && (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="px-4 rounded-xl border border-yellow-500/40 text-yellow-500"
+                title="Detener"
+              >
+                Detener
+              </button>
+            )}
           </form>
         </div>
       </div>
