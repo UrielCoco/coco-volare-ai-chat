@@ -98,28 +98,51 @@ async function runAssistant(threadId: string) {
 }
 
 /**
- * Compat sin desacoplar el método (para no perder `this/_client`):
- * Detectamos la ARIDAD real del método y llamamos la firma correcta.
+ * Compat sin perder `this/_client`:
+ * - Si la aridad (length) es 2 → firma vieja, pero algunos SDKs la esperan invertida.
+ *   Usamos prefijos de los IDs y probamos el orden correcto (y si falla, intentamos el otro).
+ * - Si la aridad es 1 → firma nueva con objeto.
  */
 async function retrieveRunSafe(threadId: string, runId: string): Promise<any> {
   const runsApi = (openai as any).beta.threads.runs;
   const arity = typeof runsApi.retrieve === 'function' ? runsApi.retrieve.length : 1;
-  // viejo: retrieve(threadId, runId) -> suele reportar length >= 2
+
+  // Prefijos típicos
+  const isThread = (s: string) => typeof s === 'string' && s.startsWith('thread_');
+  const isRun = (s: string) => typeof s === 'string' && s.startsWith('run_');
+
   if (arity >= 2) {
-    return await runsApi.retrieve(threadId, runId);
+    // Firma vieja con 2 args, intentamos el orden más lógico según prefijos
+    try {
+      if (isThread(threadId) && isRun(runId)) {
+        return await runsApi.retrieve(threadId, runId); // (thread, run)
+      }
+      if (isRun(threadId) && isThread(runId)) {
+        return await runsApi.retrieve(runId, threadId); // (thread, run) pero args invertidos al pasar
+      }
+      // Si no están claros los prefijos, probamos ambos
+      try {
+        return await runsApi.retrieve(threadId, runId);
+      } catch {
+        return await runsApi.retrieve(runId, threadId);
+      }
+    } catch (e) {
+      // Como último recurso, probamos con objeto
+      return await runsApi.retrieve({ thread_id: threadId, run_id: runId });
+    }
   }
-  // nuevo: retrieve({ thread_id, run_id })
+
+  // Firma nueva 1 arg (objeto)
   return await runsApi.retrieve({ thread_id: threadId, run_id: runId });
 }
 
+/** list messages: firma vieja y nueva, sin desacoplar */
 async function listMessagesSafe(threadId: string, limit = 20): Promise<any> {
   const msgApi = (openai as any).beta.threads.messages;
   const arity = typeof msgApi.list === 'function' ? msgApi.list.length : 1;
-  // viejo: list(threadId, { limit })
   if (arity >= 2) {
     return await msgApi.list(threadId, { limit });
   }
-  // nuevo: list({ thread_id, limit })
   return await msgApi.list({ thread_id: threadId, limit });
 }
 
