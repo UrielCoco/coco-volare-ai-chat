@@ -108,21 +108,30 @@ export default function Chat() {
     });
   }, []);
 
-  // ✅ Envío del mensaje (siempre con x-cv-session)
+  // ✅ Envío del mensaje (SSE)
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const raw = input.trim();
-    if (!raw) return;
+    if (!raw) return; // evita vacío
 
-    // SOLO parts (tu tipo ChatMessage no tiene 'content')
+    // Estructura local para UI
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      // @ts-ignore — tu tipo probablemente define parts como {type:'text', text:string}[]
+      // @ts-ignore — usamos parts como { type:'text', text:string }
       parts: [{ type: 'text', text: raw }],
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    // Placeholder del asistente que iremos rellenando con el stream
+    const assistantId = uuidv4();
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      // @ts-ignore
+      parts: [{ type: 'text', text: '' }],
+    };
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput('');
     setLoading(true);
 
@@ -130,52 +139,94 @@ export default function Chat() {
       await ensureWebSession();
       const sid = peekSessionId();
 
-      // El backend espera messages en formato string (OpenAI)
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(sid ? { 'x-cv-session': sid } : {}),
         },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: raw }],
-        }),
+        body: JSON.stringify({ message: raw }),
       });
 
-      if (response.redirected) {
-        const txt = await response.text();
-        throw new Error(`Redirigido a: ${response.url} :: ${txt.slice(0, 120)}…`);
+      if (!response.ok || !response.body) {
+        const txt = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status}: ${txt.slice(0, 200)}`);
       }
 
-      const ct = response.headers.get('content-type') || '';
-      if (!response.ok) {
-        const errText = ct.includes('application/json')
-          ? JSON.stringify(await response.json())
-          : await response.text();
-        throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+      // Lectura de SSE
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finished = false;
+
+      while (!finished) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Cada evento viene como "data: {...}\n\n"
+        const parts = buffer.split('\n\n');
+        // Deja el último fragmento incompleto en buffer
+        buffer = parts.pop() || '';
+
+        for (const chunk of parts) {
+          const line = chunk.trim();
+          if (!line.startsWith('data:')) continue;
+
+          const payloadStr = line.slice(5).trim();
+          if (!payloadStr) continue;
+
+          let payload: any = null;
+          try {
+            payload = JSON.parse(payloadStr);
+          } catch {
+            // ignora líneas no json
+            continue;
+          }
+
+          if (payload.type === 'delta') {
+            const delta = String(payload.text || '');
+            if (delta) {
+              // agrega texto al placeholder del asistente
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        // @ts-ignore
+                        parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
+                      }
+                    : m,
+                ),
+              );
+            }
+          } else if (payload.type === 'done') {
+            // opcional: asegura texto final
+            const finalText = String(payload.text || '');
+            if (finalText) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, parts: [{ type: 'text', text: finalText }] as any }
+                    : m,
+                ),
+              );
+            }
+          } else if (payload.type === 'requires_action') {
+            // Aquí podrías manejar tool-calls si los procesas en cliente
+          } else if (payload.type === 'error') {
+            throw new Error(payload.error || 'Stream error');
+          } else if (payload.type === 'eof') {
+            finished = true;
+            break;
+          }
+        }
       }
-      if (!ct.includes('application/json')) {
-        const text = await response.text();
-        throw new Error(`Respuesta no-JSON: ${text.slice(0, 200)}`);
-      }
-
-      const data = await response.json(); // { reply, threadId, toolEvents, ... }
-      if (data?.threadId) (window as any).cvThreadId = data.threadId;
-      if (Array.isArray(data?.toolEvents)) console.log('CV toolEvents:', data.toolEvents);
-
-      const assistantText = (data?.reply || 'Sin respuesta').toString();
-
-      const assistantMessage: ChatMessage = {
-        id: uuidv4(),
-        role: 'assistant',
-        // @ts-ignore — usamos parts para cumplir tu tipo
-        parts: [{ type: 'text', text: assistantText }],
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
       console.error('Error sending message:', error);
       alert('No se pudo enviar el mensaje. Intenta de nuevo.');
+      // en caso de error, quita el placeholder vacío del asistente
+      setMessages((prev) => prev.filter((m) => m.role !== 'assistant' || (m as any).parts?.[0]?.text));
     } finally {
       setLoading(false);
     }

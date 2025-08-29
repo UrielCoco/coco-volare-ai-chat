@@ -8,16 +8,35 @@ import {
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
-  const { message, userId, assistantId, attachments, metadata } =
-    await req.json();
+  const body = await req.json().catch(() => ({}));
+  const rawMsg = body?.message;
+  const userId = body?.userId as string | undefined;
+  const assistantId = (body?.assistantId as string | undefined) ?? process.env.OPENAI_ASSISTANT_ID;
+  const attachments = body?.attachments as
+    | Array<{ file_id: string; tools?: Array<{ type: "file_search" | "code_interpreter" }> }>
+    | undefined;
+  const metadata = body?.metadata as Record<string, string> | undefined;
 
   if (!process.env.OPENAI_API_KEY) {
-    return new Response("Missing OPENAI_API_KEY", { status: 500 });
+    return jsonErr(500, "Missing OPENAI_API_KEY");
   }
-  const finalAssistantId =
-    assistantId ?? process.env.OPENAI_ASSISTANT_ID ?? "";
-  if (!finalAssistantId) {
-    return new Response("Missing OPENAI_ASSISTANT_ID", { status: 500 });
+  if (!assistantId) {
+    return jsonErr(500, "Missing OPENAI_ASSISTANT_ID");
+  }
+
+  // Normaliza/valida el mensaje
+  let text = "";
+  if (typeof rawMsg === "string") text = rawMsg.trim();
+  else if (rawMsg && typeof rawMsg.text === "string") text = rawMsg.text.trim();
+
+  // Si NO hay texto y tampoco adjuntos -> 400
+  if ((!text || text.length === 0) && (!attachments || attachments.length === 0)) {
+    return jsonErr(400, "Message content must be non-empty.");
+  }
+
+  // Si vienen SOLO adjuntos, OpenAI exige content no vacío: ponemos placeholder corto
+  if ((!text || text.length === 0) && attachments && attachments.length > 0) {
+    text = "Adjuntos enviados";
   }
 
   const encoder = new TextEncoder();
@@ -25,9 +44,7 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     start: async (controller) => {
       const send = (data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
-        );
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
 
       const handleEvent = (e: AssistantEvent) => {
@@ -52,17 +69,18 @@ export async function POST(req: NextRequest) {
 
       try {
         await runAssistantWithStream({
-          assistantId: finalAssistantId,
-          input: String(message ?? ""),
+          assistantId,
+          input: text,
           userId,
           attachments,
           metadata,
-          onEvent: handleEvent, // <- ya tipado, sin 'any' implícito
+          onEvent: handleEvent,
         });
       } catch (err: any) {
         send({ type: "error", error: String(err) });
       } finally {
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        // Cierra SIEMPRE con JSON (no "[DONE]")
+        send({ type: "eof" });
         controller.close();
       }
     },
@@ -75,5 +93,12 @@ export async function POST(req: NextRequest) {
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     },
+  });
+}
+
+function jsonErr(status: number, error: string) {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "Content-Type": "application/json" },
   });
 }
