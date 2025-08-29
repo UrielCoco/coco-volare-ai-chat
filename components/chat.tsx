@@ -2,39 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Messages from './messages';
-import type { ChatMessage, Itinerary } from '@/lib/types';
+import type { ChatMessage } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-function extractItineraryFromText(text: string): Itinerary | null {
-  if (!text) return null;
-
-  // Soporta fences: ```cv:itinerary```, ```itinerary```, ```json```
-  const reFence = /```(?:cv:itinerary|itinerary|json)\s*([\s\S]*?)```/i;
-  const m1 = text.match(reFence);
-  const candidate1 = m1?.[1];
-
-  // Prefijo tipo: ITINERARY_JSON: { ... }
-  const rePrefix = /ITINERARY_JSON\s*[:=]\s*({[\s\S]*})/i;
-  const m2 = text.match(rePrefix);
-  const candidate2 = m2?.[1];
-
-  // JSON “pelado”
-  const maybeWhole = text.trim().startsWith('{') && text.trim().endsWith('}')
-    ? text.trim()
-    : undefined;
-
-  const candidates = [candidate1, candidate2, maybeWhole].filter(Boolean) as string[];
-  for (const c of candidates) {
-    try {
-      const parsed = JSON.parse(c);
-      if (parsed && Array.isArray(parsed.days) && parsed.days.length > 0) {
-        return parsed as Itinerary;
-      }
-    } catch {}
-  }
-  return null;
-}
+type SetMessagesFn = (updater: { messages: ChatMessage[] }) => void;
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -45,17 +17,14 @@ export default function Chat() {
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
-  // medir/comunicar altura del composer -> --composer-h
+  // Mide altura del composer y la expone como --composer-h (para que <Messages /> reserve espacio)
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
     const update = () => setComposerH(el.offsetHeight || 96);
     update();
     let ro: ResizeObserver | null = null;
-    try {
-      ro = new ResizeObserver(update);
-      ro.observe(el);
-    } catch {}
+    try { ro = new ResizeObserver(update); ro.observe(el); } catch {}
     const onResize = () => update();
     window.addEventListener('resize', onResize);
     return () => {
@@ -66,45 +35,57 @@ export default function Chat() {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // Envío
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
 
-    const userMsg: ChatMessage = {
+    const user: ChatMessage = {
       id: uuidv4(),
       role: 'user',
       parts: [{ type: 'text', text }],
       createdAt: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => [...prev, user]);
     setInput('');
     setLoading(true);
 
     try {
-      // Espera JSON: { reply?: string, parts?: UIMessagePart[], threadId?: string }
+      const threadId =
+        (typeof window !== 'undefined' && (window as any).cvThreadId) ||
+        (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
+        null;
+
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: { role: 'user', parts: [{ text }] } }),
+        body: JSON.stringify({
+          message: { role: 'user', parts: [{ text }] },
+          selectedChatModel: 'gpt-4o',
+          threadId,
+        }),
       });
+
+      const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
-        const t = await res.text();
-        throw new Error(`HTTP ${res.status}: ${t}`);
+        const t = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
+        throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
       }
-      const data = await res.json();
+      if (!ct.includes('application/json')) throw new Error(`Respuesta no-JSON`);
 
-      let assistant: ChatMessage;
-      if (Array.isArray(data?.parts)) {
-        assistant = { id: uuidv4(), role: 'assistant', parts: data.parts };
-      } else {
-        const reply = (data?.reply ?? '').toString();
-        const itin = extractItineraryFromText(reply);
-        assistant = itin
-          ? { id: uuidv4(), role: 'assistant', parts: [{ type: 'itinerary', itinerary: itin }] }
-          : { id: uuidv4(), role: 'assistant', parts: [{ type: 'text', text: reply || '…' }] };
+      const data = await res.json(); // { reply, threadId }
+
+      if (data?.threadId) {
+        try { localStorage.setItem('cv_thread_id', data.threadId); } catch {}
+        (window as any).cvThreadId = data.threadId;
       }
 
+      const assistant: ChatMessage = {
+        id: uuidv4(),
+        role: 'assistant',
+        parts: [{ type: 'text', text: (data?.reply ?? '').toString() || '…' }],
+      };
       setMessages((prev) => [...prev, assistant]);
     } catch (err) {
       console.error(err);
@@ -115,8 +96,7 @@ export default function Chat() {
           role: 'assistant',
           parts: [{
             type: 'text',
-            text:
-              'Hubo un problema al procesar tu mensaje. Intenta de nuevo o dime tu destino, fechas y número de personas.',
+            text: 'Hubo un problema. Dime destino, fechas y número de personas y lo intentamos de nuevo.',
           }],
         },
       ]);
@@ -130,7 +110,7 @@ export default function Chat() {
       className="relative flex flex-col w-full min-h-[100dvh] bg-transparent"
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
-      {/* Área scrollable con backdrop controlado por <Messages /> */}
+      {/* Área de conversación */}
       <div className="flex-1 min-h-0">
         <Messages
           messages={messages}
@@ -143,7 +123,7 @@ export default function Chat() {
         />
       </div>
 
-      {/* Composer fijo */}
+      {/* Composer fijo negro/dorado */}
       <div
         ref={composerRef}
         className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/85 backdrop-blur"
@@ -163,6 +143,7 @@ export default function Chat() {
               type="submit"
               disabled={loading || !input.trim()}
               className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
+              aria-label="Enviar"
               title="Enviar"
             >
               {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}

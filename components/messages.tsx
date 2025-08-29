@@ -4,16 +4,18 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { PreviewMessage } from './message';
 import type { ChatMessage } from '@/lib/types';
-// ❌ quitamos tipos estrictos de @ai-sdk/react
-// import type { UseChatHelpers } from '@ai-sdk/react';
+import type { Vote } from '@/lib/db/schema';
+
+// Tipos de helpers relajados para no arrastrar genéricos estrictos
+type SetMessagesFn = (updater: { messages: ChatMessage[] }) => void;
+type RegenerateFn = () => Promise<void> | void;
 
 interface Props {
   messages: ChatMessage[];
   isLoading: boolean;
-  votes?: any[];
-  // relajamos tipos para no heredar restricción UIMessage<...>
-  setMessages: (updater: { messages: ChatMessage[] }) => void;
-  regenerate: () => Promise<void> | void;
+  votes: Vote[];
+  setMessages: SetMessagesFn;
+  regenerate: RegenerateFn;
   isReadonly: boolean;
   chatId: string;
 }
@@ -21,7 +23,7 @@ interface Props {
 export default function Messages({
   messages,
   isLoading,
-  votes = [],
+  votes,
   setMessages,
   regenerate,
   isReadonly,
@@ -30,6 +32,7 @@ export default function Messages({
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
 
+  // Usa la variable expuesta por <Chat /> para separar del composer fijo
   const SPACER = 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 20px)';
 
   const toBottom = () => {
@@ -39,11 +42,13 @@ export default function Messages({
     if (el) el.scrollTop = el.scrollHeight;
   };
 
+  // Autoscroll en nuevos mensajes o cambio de loading
   useLayoutEffect(() => {
     const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
     return () => cancelAnimationFrame(id);
   }, [messages.length, isLoading]);
 
+  // Autoscroll durante typewriter/markdown
   useEffect(() => {
     const root = scrollRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
@@ -63,21 +68,29 @@ export default function Messages({
 
   return (
     <div className="relative flex-1 min-h-0">
-      {/* 🎬 Backdrop con GIF antes de iniciar */}
+      {/* 🎬 Backdrop de GIF a pantalla completa SOLO cuando no hay conversación */}
       <AnimatePresence>
         {showBackdrop && (
           <motion.div
             key="cv-backdrop"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            // Fondo absoluto detrás del contenido (evita “cortes”/sombras)
             className="pointer-events-none absolute inset-0 -z-10"
           >
-            <img src="../images/Texts.gif" alt="Bienvenido a Coco Volare AI" className="w-full h-full object-cover opacity-80" />
-            <div className="absolute inset-0 bg-[linear-gradient(to_top,rgba(0,0,0,0.6),transparent_30%)]" />
+            <img
+              src="../images/Texts.gif"
+              alt="Bienvenido a Coco Volare AI"
+              className="w-full h-full object-cover"
+            />
+            {/* Sutil degradado SOLO en el borde inferior para que el input resalte */}
+            <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/70 to-transparent" />
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Contenedor de mensajes */}
+      {/* Contenedor scrollable de los mensajes */}
       <div
         ref={scrollRef}
         className="relative flex flex-col px-4 pt-4 w-full h-full overflow-y-auto gap-3 md:gap-4"
@@ -85,12 +98,14 @@ export default function Messages({
       >
         <AnimatePresence mode="popLayout">
           {messages.map((message) => {
-            const vote = votes.find?.((v) => v?.messageId === message.id);
+            const vote = votes.find((v) => v.messageId === message.id);
             return (
               <motion.div
                 key={message.id}
                 className="chat-message"
-                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
                 transition={{ duration: 0.25 }}
                 style={{ scrollMarginBottom: SPACER }}
               >
@@ -110,12 +125,14 @@ export default function Messages({
           })}
         </AnimatePresence>
 
-        {/* Indicador "pensando…" */}
+        {/* Indicador “pensando…” */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
               key="typing-indicator"
-              initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.2 }}
               className="w-full mx-auto max-w-3xl px-4 group/message mb-3"
               style={{ marginBottom: `max(12px, env(safe-area-inset-bottom))`, scrollMarginBottom: SPACER }}
@@ -134,6 +151,7 @@ export default function Messages({
           )}
         </AnimatePresence>
 
+        {/* Holgura real + ancla */}
         <div style={{ height: SPACER }} />
         <div ref={anchorRef} style={{ height: 1 }} />
       </div>
