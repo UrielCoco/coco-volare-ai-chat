@@ -3,9 +3,7 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 // ---------- Utils ----------
 const logI = (...args: any[]) => console.info('[CV][server]', ...args);
@@ -30,12 +28,7 @@ async function upsertKommo(payload: any) {
     });
 
     let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      // puede no devolver JSON
-    }
-
+    try { data = await res.json(); } catch { /* puede no devolver JSON */ }
     logI('[kommo] upsert ok', { status: res.status, data });
   } catch (err) {
     logE('[kommo] upsert error', err);
@@ -45,22 +38,17 @@ async function upsertKommo(payload: any) {
 // ---------- Heurística simple de lead ----------
 function extractLeadHints(text: string) {
   const t = (text || '').trim();
-
   const paxMatch =
     /(for|para)\s+(\d{1,2})\s*(people|personas)/i.exec(t) ||
     /(\d{1,2})\s*(people|personas)/i.exec(t);
   const pax = paxMatch ? Number(paxMatch[2] || paxMatch[1]) : undefined;
-
   const dateIso = /(\d{4}-\d{2}-\d{2})/.exec(t)?.[1];
   const dateLatam = /(\d{1,2}\/\d{1,2}\/\d{4})/.exec(t)?.[1];
-
   const destMatch =
     /(to|a)\s+([A-Za-zÀ-ÿ\s,]+?)(?:\s+for|\s+on|\s+the|$|,|\.)/i.exec(t);
   const destino = destMatch ? destMatch[2].trim() : undefined;
-
   const email = /[\w.+-]+@[\w-]+\.[\w.-]+/i.exec(t)?.[0];
   const whatsapp = /\+?\d{8,15}/.exec(t)?.[0];
-
   return { destino, fechas: dateIso || dateLatam, pax, email, whatsapp };
 }
 
@@ -68,7 +56,6 @@ function extractLeadHints(text: string) {
 function parsePartsFromText(text: string): any[] {
   const parts: any[] = [];
   if (!text) return parts;
-
   const fenceRegex = /```(cv:(itinerary|quote))\s*([\s\S]*?)```/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -76,34 +63,21 @@ function parsePartsFromText(text: string): any[] {
   while ((m = fenceRegex.exec(text))) {
     const [full, , subType, body] = m;
     const start = m.index;
-
     const before = text.slice(lastIndex, start).trim();
     if (before) parts.push({ type: 'text', text: before });
 
     if (subType === 'itinerary') {
-      try {
-        const json = JSON.parse(body.trim());
-        parts.push({ type: 'itinerary', itinerary: json });
-      } catch {
-        parts.push({ type: 'text', text: body.trim() });
-      }
+      try { parts.push({ type: 'itinerary', itinerary: JSON.parse(body.trim()) }); }
+      catch { parts.push({ type: 'text', text: body.trim() }); }
     } else if (subType === 'quote') {
-      try {
-        const json = JSON.parse(body.trim());
-        parts.push({ type: 'quote', quote: json });
-      } catch {
-        parts.push({ type: 'text', text: body.trim() });
-      }
+      try { parts.push({ type: 'quote', quote: JSON.parse(body.trim()) }); }
+      catch { parts.push({ type: 'text', text: body.trim() }); }
     }
-
     lastIndex = m.index + full.length;
   }
-
   const tail = text.slice(lastIndex).trim();
   if (tail) parts.push({ type: 'text', text: tail });
-
   if (parts.length === 0) parts.push({ type: 'text', text });
-
   return parts;
 }
 
@@ -115,6 +89,7 @@ async function ensureThread(threadId?: string) {
 }
 
 async function appendUserMessage(threadId: string, text: string) {
+  // OpenAI 400 si content vacío: por eso validamos antes
   await openai.beta.threads.messages.create(threadId, {
     role: 'user',
     content: text,
@@ -129,25 +104,34 @@ async function runAssistant(threadId: string) {
   return run.id;
 }
 
-/**
- * Compatibilidad con ambas firmas de SDK:
- * - Antiguo: runs.retrieve(threadId, runId)
- * - Nuevo:   runs.retrieve({ thread_id, run_id })
+/** Compat firma vieja/nueva:
+ *  - Antiguo: runs.retrieve(threadId, runId)
+ *  - Nuevo:   runs.retrieve({ thread_id, run_id })
  */
 async function retrieveRunSafe(threadId: string, runId: string): Promise<any> {
   const fn: any = (openai as any).beta.threads.runs.retrieve;
-
-  // Si la función declara 2 parámetros, asumimos firma antigua
   if (typeof fn === 'function' && fn.length >= 2) {
     return await fn(threadId, runId);
   }
-
-  // Si no, probamos la firma nueva
   try {
     return await fn({ thread_id: threadId, run_id: runId });
   } catch {
-    // Fallback por si los tipos no coinciden pero en runtime sí
     return await (openai as any).beta.threads.runs.retrieve(threadId, runId);
+  }
+}
+
+/** Compat firma vieja/nueva de messages.list */
+async function listMessagesSafe(threadId: string, limit = 20): Promise<any> {
+  const fn: any = (openai as any).beta.threads.messages.list;
+  if (typeof fn === 'function' && fn.length >= 2) {
+    // firma vieja: list(threadId, { limit })
+    return await fn(threadId, { limit });
+  }
+  try {
+    // firma nueva: list({ thread_id, limit })
+    return await fn({ thread_id: threadId, limit });
+  } catch {
+    return await (openai as any).beta.threads.messages.list(threadId, { limit });
   }
 }
 
@@ -155,7 +139,6 @@ async function pollRun(threadId: string, runId: string, timeoutMs = 60_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const run = await retrieveRunSafe(threadId, runId);
-
     if (run.status === 'completed') {
       logI('[CV][server] run completed', { threadId, runId });
       return run;
@@ -164,7 +147,6 @@ async function pollRun(threadId: string, runId: string, timeoutMs = 60_000) {
       logI('[CV][server] run final', { status: run.status });
       return run;
     }
-
     logI('[CV][server] polling', { status: run.status });
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -172,7 +154,7 @@ async function pollRun(threadId: string, runId: string, timeoutMs = 60_000) {
 }
 
 async function getLastAssistantMessage(threadId: string): Promise<string> {
-  const list = await openai.beta.threads.messages.list(threadId, { limit: 20 });
+  const list = await listMessagesSafe(threadId, 20);
   for (const m of list.data) {
     if (m.role === 'assistant') {
       let buf = '';
@@ -189,28 +171,34 @@ async function getLastAssistantMessage(threadId: string): Promise<string> {
 export async function POST(req: NextRequest) {
   try {
     const { text, threadId: threadIn, meta } = await req.json();
-    const textPreview = (text || '').slice(0, 140);
-    logI('incoming', { threadId: threadIn, textPreview });
+    const userText = (text ?? '').trim();
+    logI('incoming', { threadId: threadIn, textPreview: userText.slice(0, 140) });
 
     const threadId = await ensureThread(threadIn);
 
-    await appendUserMessage(threadId, text);
-    logI('appended message to thread', threadId);
+    // ⛔️ FIX: si text vacío, NO llamamos messages.create (evita 400 de OpenAI)
+    if (userText.length > 0) {
+      await appendUserMessage(threadId, userText);
+      logI('appended message to thread', threadId);
 
-    const hints = extractLeadHints(text || '');
-    upsertKommo({
-      lead: {
-        title: `Coco Volare · ${hints.destino || 'Viaje'}`,
-        notes: { ...hints, fuente: 'webchat', threadId },
-      },
-      contact: {
-        name: meta?.name || 'Web Chat',
-        whatsapp: hints.whatsapp || meta?.whatsapp || '',
-        email: hints.email || meta?.email || '',
-        instagram: meta?.instagram || '',
-      },
-      transcriptAppend: text || '',
-    }).catch(() => {});
+      // Sólo subimos a Kommo si hay mensaje real del usuario
+      const hints = extractLeadHints(userText);
+      upsertKommo({
+        lead: {
+          title: `Coco Volare · ${hints.destino || 'Viaje'}`,
+          notes: { ...hints, fuente: 'webchat', threadId },
+        },
+        contact: {
+          name: meta?.name || 'Web Chat',
+          whatsapp: hints.whatsapp || meta?.whatsapp || '',
+          email: hints.email || meta?.email || '',
+          instagram: meta?.instagram || '',
+        },
+        transcriptAppend: userText,
+      }).catch(() => {});
+    } else {
+      logI('skip append: empty text (bootstrap/ping)');
+    }
 
     const runId = await runAssistant(threadId);
     logI('run created', { runId });
@@ -226,7 +214,7 @@ export async function POST(req: NextRequest) {
 
     const parts = parsePartsFromText(assistantText);
 
-    // Si hubo itinerario, agregamos call-to-action en el mismo idioma
+    // CTA tras itinerario (en el idioma del JSON si viene)
     const hasItinerary = parts.some((p) => p.type === 'itinerary');
     if (hasItinerary) {
       try {
