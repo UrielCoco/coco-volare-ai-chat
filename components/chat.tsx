@@ -6,8 +6,6 @@ import type { ChatMessage } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-type SetMessagesFn = (updater: { messages: ChatMessage[] }) => void;
-
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -17,7 +15,7 @@ export default function Chat() {
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
-  // Mide el alto del composer y lo expone como --composer-h para reservar espacio en la lista
+  // Medir altura del composer para reservar espacio en el scroll
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -35,12 +33,12 @@ export default function Chat() {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  // Envío
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
 
+    // Mensaje del usuario
     const user: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -52,33 +50,44 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      const threadId =
+      // Reuso de threadId guardado
+      const stored =
         (typeof window !== 'undefined' && (window as any).cvThreadId) ||
         (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
         null;
+
+      console.log('[CV][client] sending ->', {
+        textPreview: text.slice(0, 80),
+        threadId: stored,
+      });
 
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: { role: 'user', parts: [{ text }] },
-          selectedChatModel: 'gpt-4o',
-          threadId, // 👈 reuso de thread para memoria
+          threadId: stored,
         }),
       });
 
       const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
         const t = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
-        throw new Error(`HTTP ${res.status}: ${t.slice(0, 180)}`);
+        console.error('[CV][client] /api/chat error', res.status, t);
+        throw new Error(`HTTP ${res.status}: ${t.slice(0, 300)}`);
       }
       if (!ct.includes('application/json')) throw new Error('Respuesta no-JSON');
 
-      const data = await res.json(); // { reply, threadId }
+      const data = await res.json(); // { reply, threadId, debug? }
+
       if (data?.threadId) {
         try { localStorage.setItem('cv_thread_id', data.threadId); } catch {}
         (window as any).cvThreadId = data.threadId;
       }
+      console.log('[CV][client] received <-', {
+        replyPreview: (data?.reply ?? '').slice(0, 80),
+        threadId: data?.threadId,
+      });
 
       const assistant: ChatMessage = {
         id: uuidv4(),
@@ -87,13 +96,13 @@ export default function Chat() {
       };
       setMessages((prev) => [...prev, assistant]);
     } catch (err) {
-      console.error(err);
+      console.error('[CV][client] exception', err);
       setMessages((prev) => [
         ...prev,
         {
           id: uuidv4(),
           role: 'assistant',
-          parts: [{ type: 'text', text: 'Ocurrió un problema. Dime destino, fechas y nº de personas para continuar.' }],
+          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y número de personas?' }],
         },
       ]);
     } finally {
@@ -109,16 +118,14 @@ export default function Chat() {
       className="relative flex flex-col w-full min-h-[100dvh]"
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
-      {/* 🎬 Fondo GIF SOLO pre-chat (cubre toda la vista, sin sombras en medio) */}
+      {/* 🎬 Pre-chat: GIF centrado (no full screen), sin gradiente */}
       {showBackdrop && (
-        <div className="pointer-events-none fixed inset-0 -z-10">
+        <div className="pointer-events-none fixed inset-0 -z-10 grid place-items-center bg-black">
           <img
             src="../images/Texts.gif"
             alt="Coco Volare"
-            className="w-full h-full object-cover"
+            className="max-w-[min(92vw,900px)] max-h-[70vh] w-auto h-auto object-contain rounded-2xl"
           />
-          {/* Degradado sutil pegado al input */}
-          <div className="absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-black/85 to-transparent" />
         </div>
       )}
 

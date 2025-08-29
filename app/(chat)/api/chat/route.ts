@@ -3,7 +3,11 @@ import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
 
+// Cambia CV_DEBUG=0 para silenciar logs
+const DEBUG = process.env.CV_DEBUG !== '0';
+
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
   try {
     const body = await req.json().catch(() => ({}));
     const raw = body?.message;
@@ -23,28 +27,32 @@ export async function POST(req: NextRequest) {
 
     const openai = new OpenAI({ apiKey });
 
-    // 👇 Reuso de thread si viene de la UI
+    // ▶ Reusar threadId si viene de cliente
     let threadId: string | null = body?.threadId ?? null;
+    if (DEBUG) console.log('[CV][server] incoming', { threadId, textPreview: text.slice(0, 120) });
 
     if (threadId) {
       await openai.beta.threads.messages.create(threadId, { role: 'user', content: text || 'Mensaje' });
+      if (DEBUG) console.log('[CV][server] appended message to thread', threadId);
     } else {
       const thread = await openai.beta.threads.create({
         messages: [{ role: 'user', content: text || 'Mensaje' }],
       });
       threadId = thread.id;
+      if (DEBUG) console.log('[CV][server] created thread', threadId);
     }
 
     const run = await openai.beta.threads.runs.create(threadId!, { assistant_id: assistantId });
+    if (DEBUG) console.log('[CV][server] run created', { runId: run.id, status: run.status });
 
-    // Polling compatible con SDKs (firmas nuevas y antiguas)
-    const start = Date.now();
+    // Polling (compatible con SDKs)
+    const t0 = Date.now();
     let status = run.status;
     while (
       status !== 'completed' &&
       status !== 'failed' &&
       status !== 'cancelled' &&
-      Date.now() - start < 45_000
+      Date.now() - t0 < 45_000
     ) {
       await wait(800);
       let rnow: any;
@@ -54,9 +62,11 @@ export async function POST(req: NextRequest) {
         rnow = await (openai as any).beta.threads.runs.retrieve(threadId!, run.id);
       }
       status = rnow.status;
+      if (DEBUG) console.log('[CV][server] polling', { status });
       if (status === 'requires_action') break;
     }
 
+    // Leer mensajes (último del asistente)
     const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 });
     const firstAssistant = list.data.find((m) => m.role === 'assistant');
 
@@ -69,8 +79,17 @@ export async function POST(req: NextRequest) {
         .trim();
     }
 
+    if (DEBUG) {
+      console.log('[CV][server] reply ready', {
+        ms: Date.now() - startedAt,
+        replyPreview: reply.slice(0, 120),
+        threadId,
+      });
+    }
+
     return json(200, { reply, threadId });
   } catch (err: any) {
+    console.error('[CV][server] error', { ms: Date.now() - startedAt, message: String(err?.message || err) });
     return json(500, { error: String(err?.message || err) });
   }
 }
