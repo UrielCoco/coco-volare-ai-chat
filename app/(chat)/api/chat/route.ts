@@ -1,132 +1,128 @@
-// lib/ai/providers/openai-assistant.ts
-import OpenAI from "openai";
+// /app/(chat)/api/chat/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { runAssistantOnce } from '@/lib/ai/providers/openai-assistant';
+import { kommoAddNote, kommoCreateLead } from '@/lib/kommo-sync';
 
-type RunOnceParams = {
-  input: string;
-  threadId?: string | null;
-  metadata?: Record<string, string>;
-};
+// Detecta bloque oculto enviado por el assistant para efectos CRM
+const RE_KOMMO = /```cv:kommo\s*([\s\S]*?)```/i;
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
+export const runtime = 'nodejs';
+// Evita que Next intente cachear nada de esta API
+export const dynamic = 'force-dynamic';
 
-function log(level: "info" | "error", msg: string, meta: any = {}) {
-  try { console.log(JSON.stringify({ level, tag: "[CV][ast]", msg, meta })); } catch {}
+/** Normaliza respuestas de tu wrapper de Kommo a un leadId:number */
+function pickLeadId(x: any): number | null {
+  if (typeof x === 'number') return x;
+  if (!x || typeof x !== 'object') return null;
+  if (typeof x.lead_id === 'number') return x.lead_id;
+  if (typeof x.id === 'number') return x.id;
+  if (typeof x?.data?.lead_id === 'number') return x.data.lead_id;
+  if (Array.isArray(x?.data?.leads) && typeof x.data.leads[0]?.id === 'number') return x.data.leads[0].id;
+  return null;
 }
 
-/* ------------ helpers compatibles (SDK nuevo/antiguo) ------------- */
-async function createThread(metadata?: Record<string, any>) {
-  try { return await (client.beta.threads as any).create({ metadata }); }
-  catch { return await (client.beta.threads as any).create(); }
+/** ✅ Sanity-check: útil para ver si la ruta está viva (evita 405 por confusión) */
+export async function GET() {
+  return NextResponse.json({ ok: true, route: '/api/chat' });
 }
-async function messagesCreate(threadId: string, body: any) {
-  try { return await (client.beta.threads.messages as any).create({ thread_id: threadId, ...body }); }
-  catch { return await (client.beta.threads.messages as any).create(threadId, body); }
-}
-async function runsCreate(threadId: string, body: any) {
-  try { return await (client.beta.threads.runs as any).create({ thread_id: threadId, ...body }); }
-  catch { return await (client.beta.threads.runs as any).create(threadId, body); }
-}
-async function runsRetrieve(threadId: string, runId: string) {
-  try { return await (client.beta.threads.runs as any).retrieve(runId, { thread_id: threadId }); }
-  catch { return await (client.beta.threads.runs as any).retrieve(threadId, runId); }
-}
-async function runsSubmitToolOutputs(threadId: string, runId: string, tool_outputs: any[]) {
-  // nuevo
-  try { return await (client.beta.threads.runs as any).submitToolOutputs(runId, { thread_id: threadId, tool_outputs }); }
-  // viejo
-  catch { return await (client.beta.threads.runs as any).submitToolOutputs(threadId, runId, { tool_outputs }); }
-}
-async function messagesList(threadId: string, params: any) {
-  try { return await (client.beta.threads.messages as any).list({ thread_id: threadId, ...params }); }
-  catch { return await (client.beta.threads.messages as any).list(threadId, params); }
-}
-/* ------------------------------------------------------------------ */
 
-export async function runAssistantOnce({
-  input,
-  threadId,
-  metadata = {},
-}: RunOnceParams): Promise<{ reply: string; threadId: string }> {
-  if (!ASSISTANT_ID) throw new Error("OPENAI_ASSISTANT_ID is not set");
-
-  // Garantiza threadId
-  let ensuredThreadId: string;
-  if (threadId && typeof threadId === "string" && threadId.trim()) {
-    ensuredThreadId = threadId;
-  } else {
-    const t = await createThread(metadata);
-    ensuredThreadId = String(t.id);
-  }
-  log("info", "thread.ready", { threadId: ensuredThreadId });
-
-  // Mensaje de usuario
-  await messagesCreate(ensuredThreadId, { role: "user", content: input });
-  log("info", "message.user.appended", { preview: input.slice(0, 140) });
-
-  // Run
-  let run = await runsCreate(ensuredThreadId, { assistant_id: ASSISTANT_ID });
-  log("info", "run.created", { runId: run.id, status: run.status });
-
-  const start = Date.now();
-  const DEADLINE = 90_000;
-
-  while (true) {
-    if (Date.now() - start > DEADLINE) {
-      log("error", "run.timeout", { runId: run.id });
-      throw new Error("Run timeout");
-    }
-
-    const cur = await runsRetrieve(ensuredThreadId, run.id);
-
-    // 🔧 Si el Assistant aún trae herramientas → responder tool_calls con NO-OP
-    if (cur.status === "requires_action" && (cur as any)?.required_action?.submit_tool_outputs?.tool_calls) {
-      const calls: any[] = (cur as any).required_action.submit_tool_outputs.tool_calls;
-      log("info", "run.requires_action", { runId: run.id, toolCalls: calls.map(c => c.function?.name) });
-
-      const tool_outputs = calls.map((c: any) => ({
-        tool_call_id: c.id,
-        // devolvemos un output universal para “saltar” la herramienta
-        output: JSON.stringify({
-          ok: true,
-          skipped: true,
-          note: "Tool disabled in this deployment. Continue the conversation and render itinerary with cv:itinerary."
-        }),
-      }));
-
-      await runsSubmitToolOutputs(ensuredThreadId, run.id, tool_outputs);
-      // seguimos el loop hasta “completed”
-      await new Promise(r => setTimeout(r, 600));
-      continue;
-    }
-
-    if (cur.status === "completed") break;
-
-    if (["failed","expired","cancelled","incomplete"].includes(cur.status as string)) {
-      log("error", "run.failed", { status: cur.status, last_error: (cur as any)?.last_error });
-      throw new Error(`Run status: ${cur.status}`);
-    }
-
-    log("info", "run.poll", { status: cur.status });
-    await new Promise(r => setTimeout(r, 900));
-  }
-
-  // Mensaje del assistant
-  const msgs = await messagesList(ensuredThreadId, { order: "desc", limit: 10 });
-  let reply = "";
-  for (const m of msgs.data) {
-    if (m.role !== "assistant") continue;
-    for (const c of m.content) if (c.type === "text") reply += (c.text?.value || "") + "\n";
-    if (reply.trim()) break;
-  }
-  reply = reply.trim() ||
-    "Ocurrió un error, lamentamos los inconvenientes. / An error occurred, we apologize for the inconvenience.";
-
-  log("info", "reply.ready", {
-    ms: Date.now() - start,
-    replyPreview: reply.slice(0, 160),
-    threadId: ensuredThreadId,
+/** ✅ CORS/preflight para integraciones embebidas */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
   });
+}
 
-  return { reply, threadId: ensuredThreadId };
+/** ✅ Handler principal: ¡esto es lo que evita el 405! */
+export async function POST(req: NextRequest) {
+  const traceId = `cv_${Math.random().toString(36).slice(2)}`;
+
+  try {
+    // ——— lee body flexible (como lo manda tu front) ———
+    const body = await req.json().catch(() => ({} as any));
+    const rawText =
+      body?.message?.parts?.[0]?.text ??
+      body?.message?.text ??
+      body?.message ??
+      body?.text ??
+      '';
+
+    const userInput: string = String(rawText || '').trim();
+    const threadId: string | undefined = body?.threadId || body?.thread_id || undefined;
+
+    // ——— corre el assistant (ya maneja requires_action internamente) ———
+    const { reply, threadId: ensuredThread } = await runAssistantOnce({
+      input: userInput,
+      threadId,
+      metadata: { source: 'webchat' },
+    });
+
+    // ——— ejecuta cv:kommo en paralelo; NO bloquea la respuesta ———
+    const m = reply.match(RE_KOMMO);
+    if (m?.[1]) {
+      try {
+        const ops = JSON.parse(m[1]);
+
+        (async () => {
+          try {
+            const list = Array.isArray(ops?.ops) ? ops.ops : [];
+            let leadId: number | null = null;
+
+            if (list.some((o: any) => o?.action === 'create_lead')) {
+              // tu wrapper espera un string (no objeto)
+              const created = await kommoCreateLead('Lead desde webchat');
+              leadId = pickLeadId(created);
+              console.log('[CV][kommo] leadId', leadId);
+            }
+
+            for (const op of list) {
+              if (op?.action === 'add_note' && leadId != null) {
+                const text =
+                  typeof op?.text === 'string'
+                    ? op.text
+                    : `🧑‍💻 Usuario: ${userInput.slice(0, 500)}`;
+                await kommoAddNote(leadId, text); // (leadId:number, text:string)
+              }
+            }
+          } catch (err) {
+            console.warn('[CV][kommo] failed:', err);
+          }
+        })();
+      } catch (err) {
+        console.warn('[CV][kommo] invalid json:', err);
+      }
+    }
+
+    // ——— respuesta al front: tal cual (para que el front parsee cv:itinerary) ———
+    const res = NextResponse.json({
+      reply,
+      threadId: ensuredThread || threadId || null,
+    });
+
+    // CORS headers (si lo usas embebido en otras origins)
+    res.headers.set('Access-Control-Allow-Origin', '*');
+    res.headers.set('Access-Control-Allow-Methods', 'POST,GET,OPTIONS');
+    res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    return res;
+  } catch (e: any) {
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        tag: '[CV][server]',
+        msg: 'exception',
+        meta: { traceId, error: String(e?.message || e) },
+      }),
+    );
+
+    const reply =
+      'Ocurrió un error, lamentamos los inconvenientes. / An error occurred, we apologize for the inconvenience.';
+
+    return NextResponse.json({ reply }, { status: 500 });
+  }
 }
