@@ -6,17 +6,18 @@ import ItineraryCard from './itinerary-card';
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
-  // ✅ Ambos roles comparten el mismo ancho visual para que el borde derecho quede alineado.
-  const bubbleWidth = 'inline-block max-w-[92%] md:max-w-[900px]';
+  // Misma anchura para ambos → siempre alineados en escritorio
+  const bubbleWidth = 'inline-block max-w-[92%] xl:max-w-[980px]';
 
+  // Sin bordes; sólo sombras y color de marca
   const bubbleSkin = isUser
-    ? 'bg-[#d8c69a] border-[#b69965]/40 text-black'
-    : 'bg-black text-white border-white/10';
+    ? 'bg-[#d8c69a] text-black shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]'
+    : 'bg-black text-white shadow-[0_14px_32px_-14px_rgba(0,0,0,0.6)]';
 
-  const bubble = `${bubbleWidth} rounded-2xl border shadow-sm px-4 py-3 ${bubbleSkin}`;
+  const bubble = `${bubbleWidth} rounded-3xl px-4 py-3 ${bubbleSkin}`;
 
-  // Contenedor del hilo (igual para ambos: mismos paddings = misma alineación)
-  const row = 'w-full mx-auto max-w-3xl px-4';
+  // Contenedor del hilo: igual para ambos roles
+  const row = 'w-full mx-auto max-w-4xl px-4';
   const rowInner = isUser ? 'w-full flex justify-end' : 'w-full flex justify-start';
 
   return (
@@ -43,7 +44,7 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
             if (part?.type === 'itinerary' && part?.itinerary) {
               return (
                 <div key={idx} className="my-2">
-                  {/* La tarjeta ocupa el 100% del ancho de la burbuja */}
+                  {/* La tarjeta ocupa 100% de la burbuja */}
                   <ItineraryCard itinerary={part.itinerary} />
                 </div>
               );

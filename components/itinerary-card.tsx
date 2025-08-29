@@ -2,11 +2,6 @@
 
 import React, { useMemo, useState } from 'react';
 
-/**
- * JSON esperado (dinámico y retrocompatible).
- * days[].timeline[] es preferido. Si viene days[].items[], se convierte a timeline.
- */
-
 type Lang = 'es' | 'en';
 
 const DICT: Record<Lang, Record<string, string>> = {
@@ -48,8 +43,12 @@ const DICT: Record<Lang, Record<string, string>> = {
   },
 };
 
-// Heurística: intenta deducir idioma según el contenido del itinerario
-function guessLangFromItinerary(it: any): Lang {
+// 1) Si el Assistant manda itinerary.lang, lo usamos.
+// 2) Si no, inferimos por el contenido.
+function getLang(it: any): Lang {
+  const l = String(it?.lang || '').toLowerCase();
+  if (l.startsWith('es')) return 'es';
+  if (l.startsWith('en')) return 'en';
   try {
     const texts: string[] = [];
     if (typeof it?.tripTitle === 'string') texts.push(it.tripTitle);
@@ -62,11 +61,15 @@ function guessLangFromItinerary(it: any): Lang {
       });
     });
     const blob = texts.join(' ').toLowerCase();
-    const hasEs = /[áéíóúñü]/.test(blob) ||
-      /(bienvenido|itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|visita|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/.test(blob);
-    if (hasEs) return 'es';
-  } catch {}
-  return 'en';
+    const isEs =
+      /[áéíóúñü]/.test(blob) ||
+      /(itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/.test(
+        blob
+      );
+    return isEs ? 'es' : 'en';
+  } catch {
+    return 'en';
+  }
 }
 
 const ICON_BY_CATEGORY: Record<string, string> = {
@@ -86,7 +89,6 @@ function fmtCityCountry(x?: { city?: string; country?: string }) {
 
 function formatDuration(s?: string): string {
   if (!s) return '';
-  // ISO 8601: PT#H#M
   const iso = /^P(T(?:(\d+)H)?(?:(\d+)M)?)$/i.exec(s);
   if (iso) {
     const hh = iso[2] ? Number(iso[2]) : 0;
@@ -95,7 +97,6 @@ function formatDuration(s?: string): string {
     if (hh) return `${hh}h`;
     if (mm) return `${mm}m`;
   }
-  // "2h 30m" / "2h30m" / "2h" / "30m"
   const hm = /(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/i.exec(s);
   if (hm && (hm[1] || hm[2])) {
     const hh = hm[1] ? Number(hm[1]) : 0;
@@ -104,13 +105,12 @@ function formatDuration(s?: string): string {
     if (hh) return `${hh}h`;
     if (mm) return `${mm}m`;
   }
-  // "150m"
   const onlyM = /^(\d+)\s*m$/i.exec(s);
   if (onlyM) return `${onlyM[1]}m`;
   return s;
 }
 
-// Convierte items -> timeline y corrige mal tipados (flight como activity, etc.)
+// items -> timeline + tipado por heurística para "flight"/etc.
 function toTimeline(day: any): any[] {
   let tl: any[] = Array.isArray(day?.timeline) ? day.timeline : [];
   if ((!tl || tl.length === 0) && Array.isArray(day?.items)) {
@@ -127,9 +127,10 @@ function toTimeline(day: any): any[] {
       location: it.location,
       notes: it.notes,
       price: it.price,
+      duration: it.duration,
+      transport: it.transport,
     }));
   }
-  // Heurística de transporte
   tl = tl.map((it) => {
     if (it.category === 'transport') return it;
     const txt = `${it.title || ''} ${it.notes || ''}`.toLowerCase();
@@ -148,8 +149,6 @@ function toTimeline(day: any): any[] {
     }
     return it;
   });
-
-  // Orden por hora
   const toNum = (t: string) => {
     const m = /^(\d{1,2}):(\d{2})$/.exec(t || '');
     if (!m) return 9999;
@@ -159,7 +158,7 @@ function toTimeline(day: any): any[] {
 }
 
 export default function ItineraryCard({ itinerary }: { itinerary: any }) {
-  const lang: Lang = useMemo(() => guessLangFromItinerary(itinerary), [itinerary]);
+  const lang: Lang = useMemo(() => getLang(itinerary), [itinerary]);
   const L = DICT[lang];
 
   const days = itinerary?.days ?? [];
@@ -184,41 +183,40 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
 
   return (
     <div className="relative w-full">
-      {/* base oscura como “sombra sólida” (estilo referencia) */}
+      {/* base oscura (sombra tipo “puck”) */}
       <div className="pointer-events-none absolute -bottom-5 left-4 right-4 h-10 rounded-2xl bg-black/85 shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
 
-      {/* tarjeta dorada premium */}
+      {/* tarjeta dorada sin bordes — sólo sombras */}
       <div
         className="
           relative w-full overflow-hidden rounded-[26px]
-          ring-1 ring-black/10
           bg-gradient-to-br from-[#f4e5c9] via-[#ead5b4] to-[#d8c39a]
           shadow-[0_28px_60px_-20px_rgba(0,0,0,0.55),0_12px_24px_-12px_rgba(0,0,0,0.35)]
-          "
+        "
       >
-        {/* highlight suave */}
+        {/* Highlight superior suave */}
         <div className="pointer-events-none absolute inset-0 opacity-70 mix-blend-screen
                         bg-[radial-gradient(120%_80%_at_0%_0%,rgba(255,255,255,0.7),rgba(255,255,255,0)_60%)]" />
 
         {/* Header */}
-        <div className="relative px-5 py-4 border-b border-black/10">
+        <div className="relative px-5 py-4">
           <div className="text-[12px] uppercase tracking-[0.2em] text-[#6b5a35]">
             {L.brandHead}
           </div>
           <div className="text-xl md:text-[22px] font-semibold text-[#1a1a1a] mt-0.5">{title}</div>
         </div>
 
-        {/* Tabs de días */}
+        {/* Tabs de días (sin bordes) */}
         <div className="relative px-4 pt-3 flex gap-2 overflow-x-auto">
           {days.map((dayObj: any, idx: number) => (
             <button
               key={idx}
               onClick={() => setI(idx)}
               className={
-                'px-3 py-1.5 rounded-full text-sm whitespace-nowrap border transition ' +
+                'px-3 py-1.5 rounded-full text-sm whitespace-nowrap transition shadow ' +
                 (i === idx
-                  ? 'bg-[#b69965] text-black border-[#b69965] shadow'
-                  : 'bg-white/80 text-[#333] border-black/10 hover:bg-white')
+                  ? 'bg-[#b69965] text-black'
+                  : 'bg-white/85 text-[#333] hover:bg-white')
               }
             >
               {L.day} {dayObj.day}{dayObj.date ? ` · ${dayObj.date}` : ''}
@@ -226,12 +224,12 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
           ))}
         </div>
 
-        {/* Chips de localización */}
+        {/* Chips de localización (sin borde) */}
         <div className="relative px-5 pb-1 flex flex-wrap gap-2">
           {locations?.length > 0 ? locations.map((loc: any, idx: number) => (
             <span
               key={idx}
-              className="px-2.5 py-1 rounded-full text-xs bg-white/70 border border-black/10 text-[#1a1a1a]"
+              className="px-2.5 py-1 rounded-full text-xs bg-white/80 shadow-sm text-[#1a1a1a]"
               title={`${loc.city || ''}${loc.country ? ', ' + loc.country : ''}`}
             >
               {loc.city ? loc.city : ''}{loc.city && loc.country ? ', ' : ''}{loc.country || ''}
@@ -276,25 +274,22 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                     ].filter(Boolean).join(' ')
                   : (it.location || (locations?.[0] ? fmtCityCountry(locations[0]) : ''));
 
-                const tags: string[] = [];
+                const chips: string[] = [];
                 if (isTransport) {
-                  tags.push(mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land);
-                  tags.push(`${L.duration} ${tDur || L.unspecified}`);
-                  if (it?.transport?.code) tags.push(it.transport.code);
-                  if (it?.transport?.carrier) tags.push(it.transport.carrier);
+                  chips.push(mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land);
                 } else {
-                  if (it.category === 'meal') tags.push(L.meal);
-                  else if (it.category === 'activity') tags.push(L.activity);
-                  else if (it.category === 'reservation') tags.push(L.reservation);
-                  else if (it.category === 'hotel') tags.push(L.hotel);
-                  else if (it.category === 'ticket') tags.push(L.ticket);
-                  tags.push(`${L.duration} ${tDur || L.unspecified}`);
+                  if (it.category === 'meal') chips.push(L.meal);
+                  else if (it.category === 'activity') chips.push(L.activity);
+                  else if (it.category === 'reservation') chips.push(L.reservation);
+                  else if (it.category === 'hotel') chips.push(L.hotel);
+                  else if (it.category === 'ticket') chips.push(L.ticket);
                 }
+                chips.push(`${L.duration} ${tDur || L.unspecified}`);
 
                 rows.push(
                   <div
                     key={idx}
-                    className="flex items-start gap-3 rounded-2xl border border-black/10 p-3 bg-white/90 shadow-sm"
+                    className="flex items-start gap-3 rounded-2xl p-3 bg-white/95 shadow-[0_10px_24px_-14px_rgba(0,0,0,0.35)]"
                   >
                     <div className="text-xl leading-none">{icon}</div>
                     <div className="flex-1 min-w-0">
@@ -310,18 +305,18 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                         </div>
                       )}
 
-                      {(tags.length > 0 || typeof it.price !== 'undefined') && (
+                      {(chips.length > 0 || typeof it.price !== 'undefined') && (
                         <div className="flex flex-wrap gap-1.5 mt-1">
-                          {tags.map((t: string, i2: number) => (
+                          {chips.map((t: string, i2: number) => (
                             <span
                               key={i2}
-                              className="px-2 py-0.5 text-[11px] rounded-full bg-black/5 border border-black/10 text-[#333]"
+                              className="px-2 py-0.5 text-[11px] rounded-full bg-black/5 text-[#333] shadow-sm"
                             >
                               {t}
                             </span>
                           ))}
                           {typeof it.price !== 'undefined' && (
-                            <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#faf6ed] border border-[#e8d8b6] text-[#6b5a35]">
+                            <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#faf6ed] text-[#6b5a35] shadow-sm">
                               {L.price}: {String(it.price)}
                             </span>
                           )}
