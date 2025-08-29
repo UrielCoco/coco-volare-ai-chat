@@ -63,7 +63,6 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Refs/UI
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
@@ -80,9 +79,7 @@ export default function Chat() {
     try {
       if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
         ro = new ResizeObserver(() => {
-          try {
-            update();
-          } catch {}
+          try { update(); } catch {}
         });
         ro.observe(el);
       }
@@ -92,18 +89,14 @@ export default function Chat() {
     window.addEventListener('resize', onResize);
 
     return () => {
-      try {
-        ro && ro.disconnect();
-      } catch {}
+      try { ro && ro.disconnect(); } catch {}
       window.removeEventListener('resize', onResize);
     };
   }, []);
 
   useEffect(() => {
     inputRef.current?.focus();
-    ensureWebSession().catch((e) => {
-      console.warn('CV: ensureWebSession fallback:', e);
-    });
+    ensureWebSession().catch((e) => console.warn('CV: ensureWebSession fallback:', e));
   }, []);
 
   // ✅ Envío con SSE (sin placeholder de asistente)
@@ -116,12 +109,14 @@ export default function Chat() {
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
+      // formato amplio para que Messages siempre lo pinte
       // @ts-ignore
       parts: [{ type: 'text', text: raw }],
+      // @ts-ignore
+      content: raw,
     };
     setMessages((prev) => [...prev, userMessage]);
 
-    // Limpia input y muestra indicador de escribiendo…
     setInput('');
     setLoading(true);
 
@@ -145,18 +140,53 @@ export default function Chat() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+
       let buffer = '';
       let createdAssistant = false;
-      let assistantId = ''; // lo creamos hasta el primer delta
+      let assistantId = '';
       let finished = false;
       let accumulated = '';
 
+      const createAssistantMsg = (firstText: string) => {
+        createdAssistant = true;
+        assistantId = uuidv4();
+        const assistantMessage: ChatMessage = {
+          id: assistantId,
+          role: 'assistant',
+          // @ts-ignore
+          parts: [{ type: 'text', text: firstText }],
+          // @ts-ignore
+          content: firstText,
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        // apaga typing para que no aparezca segundo globito
+        setLoading(false);
+      };
+
+      const appendAssistant = (delta: string) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  // @ts-ignore
+                  parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
+                  // @ts-ignore
+                  content: String(((m as any).content ?? '') + delta),
+                }
+              : m
+          )
+        );
+      };
+
+      // lector SSE
       while (!finished) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        const chunks = buffer.split('\n\n');
+        // divide por doble salto (soporta \r\n\r\n y \n\n)
+        const chunks = buffer.split(/\r?\n\r?\n/);
         buffer = chunks.pop() || '';
 
         for (const chunk of chunks) {
@@ -173,71 +203,68 @@ export default function Chat() {
             continue;
           }
 
-          if (payload.type === 'delta') {
+          // Soportamos AMBOS esquemas: {type:'delta'|'done'|...} y {type:'message.delta'|'message.completed'|...}
+          const t = payload.type;
+
+          // 1) Deltas
+          if (t === 'delta' || t === 'message.delta') {
             const delta = String(payload.text || '');
             if (!delta) continue;
 
             accumulated += delta;
 
-            // Crea el mensaje del asistente en el PRIMER delta
             if (!createdAssistant) {
-              assistantId = uuidv4();
-              const assistantMessage: ChatMessage = {
-                id: assistantId,
-                role: 'assistant',
-                // @ts-ignore
-                parts: [{ type: 'text', text: delta }],
-              };
-              setMessages((prev) => [...prev, assistantMessage]);
-              // Apaga el indicador de “escribiendo” (evita doble burbuja)
-              setLoading(false);
-              createdAssistant = true;
+              createAssistantMsg(delta);
               continue;
             }
+            appendAssistant(delta);
+            continue;
+          }
 
-            // Para siguientes deltas, solo concatena
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId
-                  ? {
-                      ...m,
-                      // @ts-ignore
-                      parts: [{ type: 'text', text: String(((m as any).parts?.[0]?.text ?? '') + delta) }],
-                    }
-                  : m,
-              ),
-            );
-          } else if (payload.type === 'done') {
+          // 2) Final
+          if (t === 'done' || t === 'message.completed') {
             const finalText = String(payload.text || accumulated);
-            if (createdAssistant) {
+            if (!createdAssistant) {
+              createAssistantMsg(finalText);
+            } else if (finalText) {
+              // asegura que el texto final quede sincronizado
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
-                    ? { ...m, parts: [{ type: 'text', text: finalText }] as any }
-                    : m,
-                ),
+                    ? {
+                        ...m,
+                        // @ts-ignore
+                        parts: [{ type: 'text', text: finalText }],
+                        // @ts-ignore
+                        content: finalText,
+                      }
+                    : m
+                )
               );
-            } else if (finalText) {
-              // (poco común) si no hubo deltas y llegó final directo
-              assistantId = uuidv4();
-              setMessages((prev) => [
-                ...prev,
-                { id: assistantId, role: 'assistant', parts: [{ type: 'text', text: finalText }] as any },
-              ]);
             }
-          } else if (payload.type === 'error') {
+            continue;
+          }
+
+          // 3) Error
+          if (t === 'error') {
             throw new Error(payload.error || 'Stream error');
-          } else if (payload.type === 'eof') {
+          }
+
+          // 4) Cierre
+          if (t === 'eof') {
             finished = true;
             break;
           }
+
+          // 5) Otros (requires_action, etc.)
+          // Por ahora no hacemos nada en cliente
         }
       }
     } catch (error) {
-      console.error('Error sending message:', error);
+      console.error('CV Chat stream error:', error);
       alert('No se pudo enviar el mensaje. Intenta de nuevo.');
     } finally {
-      // Asegura que el “escribiendo…” se apague
+      // asegúrate de apagar typing
       setLoading(false);
     }
   };
@@ -256,7 +283,7 @@ export default function Chat() {
       >
         <Messages
           messages={messages}
-          isLoading={loading}   // ← solo un globito “…” mientras llega el primer delta
+          isLoading={loading}
           votes={[]}
           setMessages={setMessages as any}
           regenerate={async () => {}}
