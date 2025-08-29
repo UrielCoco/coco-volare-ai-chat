@@ -212,14 +212,33 @@ const showBackdrop = !hasVisibleChat ; // ← muestra GIF aunque existan 'system
     />
   </div>
 
-  {/* Composer (déjalo como ya lo tienes) */}
-  <div
-    ref={composerRef}
-    className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/90 backdrop-blur"
-    style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-  >
-    {/* ... */}
-  </div>
-</div>
+      {/* Composer */}
+      <div
+        ref={composerRef}
+        className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/90 backdrop-blur"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
+        <div className="mx-auto max-w-3xl p-3 flex gap-2">
+          <form onSubmit={handleSubmit} className="flex w-full gap-2">
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Escribe tu mensaje…"
+              className="flex-1 rounded-full px-4 py-3 bg-black text-white placeholder-white/50
+                         border border-[#b69965]/40 focus:outline-none focus:ring-2 focus:ring-[#b69965]/60"
+            />
+            <button
+              type="submit"
+              disabled={loading || !input.trim()}
+              className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
+              title="Enviar" aria-label="Enviar"
+            >
+              {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
   );
 }
