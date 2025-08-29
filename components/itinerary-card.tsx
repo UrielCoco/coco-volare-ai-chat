@@ -4,10 +4,8 @@ import React, { useMemo, useState } from 'react';
 
 /**
  * JSON esperado (dinámico y retrocompatible).
- * Ver notas anteriores; soporta "timeline" y convierte "items" -> "timeline".
+ * days[].timeline[] es preferido. Si viene days[].items[], se convierte a timeline.
  */
-
-/* ========================= i18n + detección ========================= */
 
 type Lang = 'es' | 'en';
 
@@ -50,28 +48,26 @@ const DICT: Record<Lang, Record<string, string>> = {
   },
 };
 
-// Heurística: detecta idioma según el contenido del itinerario
+// Heurística: intenta deducir idioma según el contenido del itinerario
 function guessLangFromItinerary(it: any): Lang {
   try {
     const texts: string[] = [];
     if (typeof it?.tripTitle === 'string') texts.push(it.tripTitle);
     (it?.days ?? []).slice(0, 3).forEach((d: any) => {
       if (typeof d?.title === 'string') texts.push(d.title);
-      (d?.timeline ?? d?.items ?? []).slice(0, 5).forEach((x: any) => {
+      (d?.timeline ?? d?.items ?? []).slice(0, 6).forEach((x: any) => {
         if (typeof x?.title === 'string') texts.push(x.title);
         if (typeof x?.notes === 'string') texts.push(x.notes);
         if (typeof x?.location === 'string') texts.push(x.location);
       });
     });
     const blob = texts.join(' ').toLowerCase();
-    const hasAccents = /[áéíóúñü]/.test(blob);
-    const spanishTokens = /(bienvenido|itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|visita|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/;
-    if (hasAccents || spanishTokens.test(blob)) return 'es';
+    const hasEs = /[áéíóúñü]/.test(blob) ||
+      /(bienvenido|itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|visita|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/.test(blob);
+    if (hasEs) return 'es';
   } catch {}
   return 'en';
 }
-
-/* ========================= helpers UI ========================= */
 
 const ICON_BY_CATEGORY: Record<string, string> = {
   activity: '🎟️',
@@ -90,7 +86,6 @@ function fmtCityCountry(x?: { city?: string; country?: string }) {
 
 function formatDuration(s?: string): string {
   if (!s) return '';
-
   // ISO 8601: PT#H#M
   const iso = /^P(T(?:(\d+)H)?(?:(\d+)M)?)$/i.exec(s);
   if (iso) {
@@ -100,7 +95,6 @@ function formatDuration(s?: string): string {
     if (hh) return `${hh}h`;
     if (mm) return `${mm}m`;
   }
-
   // "2h 30m" / "2h30m" / "2h" / "30m"
   const hm = /(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/i.exec(s);
   if (hm && (hm[1] || hm[2])) {
@@ -110,17 +104,13 @@ function formatDuration(s?: string): string {
     if (hh) return `${hh}h`;
     if (mm) return `${mm}m`;
   }
-
   // "150m"
   const onlyM = /^(\d+)\s*m$/i.exec(s);
   if (onlyM) return `${onlyM[1]}m`;
-
-  // Fallback: devuélvelo tal cual
   return s;
 }
 
-
-// Convierte items -> timeline y ordena por hora. Aplica heurística para transportes.
+// Convierte items -> timeline y corrige mal tipados (flight como activity, etc.)
 function toTimeline(day: any): any[] {
   let tl: any[] = Array.isArray(day?.timeline) ? day.timeline : [];
   if ((!tl || tl.length === 0) && Array.isArray(day?.items)) {
@@ -139,7 +129,7 @@ function toTimeline(day: any): any[] {
       price: it.price,
     }));
   }
-  // Heurística: si llega "Flight" como actividad, forzamos transport + mode
+  // Heurística de transporte
   tl = tl.map((it) => {
     if (it.category === 'transport') return it;
     const txt = `${it.title || ''} ${it.notes || ''}`.toLowerCase();
@@ -158,6 +148,8 @@ function toTimeline(day: any): any[] {
     }
     return it;
   });
+
+  // Orden por hora
   const toNum = (t: string) => {
     const m = /^(\d{1,2}):(\d{2})$/.exec(t || '');
     if (!m) return 9999;
@@ -174,7 +166,6 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
   const [i, setI] = useState(0);
   const d = days[i] || days[0];
 
-  // Título del bloque
   const title = useMemo(() => {
     if (itinerary?.tripTitle) return itinerary.tripTitle;
     if (days?.length) return `${L.day} ${days[0].day} – ${days[days.length - 1].day}`;
@@ -192,142 +183,158 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
   };
 
   return (
-    // 🔶 Estética premium: gradiente suave + sombra profunda + borde superior “pill”
-    <div className="w-full rounded-[28px] bg-gradient-to-b from-[#fef9f1] to-white shadow-[0_20px_60px_-20px_rgba(0,0,0,0.35)] ring-1 ring-black/5 overflow-hidden">
-      {/* Header */}
-      <div className="px-5 py-4 bg-gradient-to-b from-[#f7efe0] to-[#fffaf0] border-b border-black/5">
-        <div className="text-[12px] uppercase tracking-[0.2em] text-[#6b5a35]">
-          {L.brandHead}
+    <div className="relative w-full">
+      {/* base oscura como “sombra sólida” (estilo referencia) */}
+      <div className="pointer-events-none absolute -bottom-5 left-4 right-4 h-10 rounded-2xl bg-black/85 shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
+
+      {/* tarjeta dorada premium */}
+      <div
+        className="
+          relative w-full overflow-hidden rounded-[26px]
+          ring-1 ring-black/10
+          bg-gradient-to-br from-[#f4e5c9] via-[#ead5b4] to-[#d8c39a]
+          shadow-[0_28px_60px_-20px_rgba(0,0,0,0.55),0_12px_24px_-12px_rgba(0,0,0,0.35)]
+          "
+      >
+        {/* highlight suave */}
+        <div className="pointer-events-none absolute inset-0 opacity-70 mix-blend-screen
+                        bg-[radial-gradient(120%_80%_at_0%_0%,rgba(255,255,255,0.7),rgba(255,255,255,0)_60%)]" />
+
+        {/* Header */}
+        <div className="relative px-5 py-4 border-b border-black/10">
+          <div className="text-[12px] uppercase tracking-[0.2em] text-[#6b5a35]">
+            {L.brandHead}
+          </div>
+          <div className="text-xl md:text-[22px] font-semibold text-[#1a1a1a] mt-0.5">{title}</div>
         </div>
-        <div className="text-xl md:text-[22px] font-semibold text-[#1a1a1a] mt-0.5">{title}</div>
-      </div>
 
-      {/* Tabs de días */}
-      <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {days.map((dayObj: any, idx: number) => (
-          <button
-            key={idx}
-            onClick={() => setI(idx)}
-            className={
-              'px-3 py-1.5 rounded-full text-sm whitespace-nowrap border transition ' +
-              (i === idx
-                ? 'bg-[#b69965] text-black border-[#b69965] shadow'
-                : 'bg-white text-[#333] border-black/10 hover:bg-black/5')
-            }
-          >
-            {L.day} {dayObj.day}{dayObj.date ? ` · ${dayObj.date}` : ''}
-          </button>
-        ))}
-      </div>
+        {/* Tabs de días */}
+        <div className="relative px-4 pt-3 flex gap-2 overflow-x-auto">
+          {days.map((dayObj: any, idx: number) => (
+            <button
+              key={idx}
+              onClick={() => setI(idx)}
+              className={
+                'px-3 py-1.5 rounded-full text-sm whitespace-nowrap border transition ' +
+                (i === idx
+                  ? 'bg-[#b69965] text-black border-[#b69965] shadow'
+                  : 'bg-white/80 text-[#333] border-black/10 hover:bg-white')
+              }
+            >
+              {L.day} {dayObj.day}{dayObj.date ? ` · ${dayObj.date}` : ''}
+            </button>
+          ))}
+        </div>
 
-      {/* Chips de localización del día */}
-      <div className="px-5 pb-1 flex flex-wrap gap-2">
-        {locations?.length > 0 ? locations.map((loc: any, idx: number) => (
-          <span
-            key={idx}
-            className="px-2.5 py-1 rounded-full text-xs bg-black/5 border border-black/10 text-[#1a1a1a]"
-            title={`${loc.city || ''}${loc.country ? ', ' + loc.country : ''}`}
-          >
-            {loc.city ? loc.city : ''}{loc.city && loc.country ? ', ' : ''}{loc.country || ''}
-          </span>
-        )) : (
-          <span className="text-xs text-[#6b6b6b]">{L.locationUndefined}</span>
-        )}
-      </div>
+        {/* Chips de localización */}
+        <div className="relative px-5 pb-1 flex flex-wrap gap-2">
+          {locations?.length > 0 ? locations.map((loc: any, idx: number) => (
+            <span
+              key={idx}
+              className="px-2.5 py-1 rounded-full text-xs bg-white/70 border border-black/10 text-[#1a1a1a]"
+              title={`${loc.city || ''}${loc.country ? ', ' + loc.country : ''}`}
+            >
+              {loc.city ? loc.city : ''}{loc.city && loc.country ? ', ' : ''}{loc.country || ''}
+            </span>
+          )) : (
+            <span className="text-xs text-[#6b6b6b]">{L.locationUndefined}</span>
+          )}
+        </div>
 
-      {/* Contenido del día */}
-      <div className="p-5">
-        {d?.title && <div className="text-base font-semibold mb-2">{d.title}</div>}
+        {/* Contenido del día */}
+        <div className="relative p-5">
+          {d?.title && <div className="text-base font-semibold mb-2">{d.title}</div>}
 
-        <div className="space-y-3">
-          {(() => {
-            const rows: React.ReactNode[] = [];
-            let currentHour = '';
+          <div className="space-y-3">
+            {(() => {
+              const rows: React.ReactNode[] = [];
+              let currentHour = '';
 
-            timeline.forEach((it: any, idx: number) => {
-              const hr = hourOf(it.time);
-              if (hr !== currentHour) {
-                currentHour = hr;
+              timeline.forEach((it: any, idx: number) => {
+                const hr = hourOf(it.time);
+                if (hr !== currentHour) {
+                  currentHour = hr;
+                  rows.push(
+                    <div key={`h-${idx}`} className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5a35]/70 mt-3">
+                      {hr !== '--' ? `${hr}:00` : L.noTime}
+                    </div>
+                  );
+                }
+
+                const isTransport = it.category === 'transport';
+                const mode = it?.transport?.mode;
+                const icon = isTransport
+                  ? (ICON_BY_MODE[mode || 'land'] || '🚗')
+                  : (ICON_BY_CATEGORY[it.category] || '•');
+
+                const tDur = formatDuration(it?.transport?.duration || it?.duration);
+                const line2 = isTransport
+                  ? [
+                      fmtCityCountry(it?.transport?.from),
+                      '→',
+                      fmtCityCountry(it?.transport?.to),
+                    ].filter(Boolean).join(' ')
+                  : (it.location || (locations?.[0] ? fmtCityCountry(locations[0]) : ''));
+
+                const tags: string[] = [];
+                if (isTransport) {
+                  tags.push(mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land);
+                  tags.push(`${L.duration} ${tDur || L.unspecified}`);
+                  if (it?.transport?.code) tags.push(it.transport.code);
+                  if (it?.transport?.carrier) tags.push(it.transport.carrier);
+                } else {
+                  if (it.category === 'meal') tags.push(L.meal);
+                  else if (it.category === 'activity') tags.push(L.activity);
+                  else if (it.category === 'reservation') tags.push(L.reservation);
+                  else if (it.category === 'hotel') tags.push(L.hotel);
+                  else if (it.category === 'ticket') tags.push(L.ticket);
+                  tags.push(`${L.duration} ${tDur || L.unspecified}`);
+                }
+
                 rows.push(
-                  <div key={`h-${idx}`} className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5a35]/70 mt-3">
-                    {hr !== '--' ? `${hr}:00` : L.noTime}
+                  <div
+                    key={idx}
+                    className="flex items-start gap-3 rounded-2xl border border-black/10 p-3 bg-white/90 shadow-sm"
+                  >
+                    <div className="text-xl leading-none">{icon}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-x-2 text-[15px] font-medium">
+                        <span className="text-[#6b6b6b]">{it.time || '--:--'}</span>
+                        <span className="text-[#1a1a1a]">{it.title}</span>
+                      </div>
+
+                      {(line2 || it.notes) && (
+                        <div className="text-sm text-[#555] mt-0.5">
+                          {line2 && <span className="mr-2">📍 {line2}</span>}
+                          {it.notes && <span>· {it.notes}</span>}
+                        </div>
+                      )}
+
+                      {(tags.length > 0 || typeof it.price !== 'undefined') && (
+                        <div className="flex flex-wrap gap-1.5 mt-1">
+                          {tags.map((t: string, i2: number) => (
+                            <span
+                              key={i2}
+                              className="px-2 py-0.5 text-[11px] rounded-full bg-black/5 border border-black/10 text-[#333]"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                          {typeof it.price !== 'undefined' && (
+                            <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#faf6ed] border border-[#e8d8b6] text-[#6b5a35]">
+                              {L.price}: {String(it.price)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
-              }
+              });
 
-              const isTransport = it.category === 'transport';
-              const mode = it?.transport?.mode;
-              const icon = isTransport
-                ? (ICON_BY_MODE[mode || 'land'] || '🚗')
-                : (ICON_BY_CATEGORY[it.category] || '•');
-
-              const tDur = formatDuration(it?.transport?.duration || it?.duration);
-              const line2 = isTransport
-                ? [
-                    fmtCityCountry(it?.transport?.from),
-                    '→',
-                    fmtCityCountry(it?.transport?.to),
-                  ].filter(Boolean).join(' ')
-                : (it.location || (locations?.[0] ? fmtCityCountry(locations[0]) : ''));
-
-              const tags: string[] = [];
-              if (isTransport) {
-                tags.push(mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land);
-                tags.push(`${L.duration} ${tDur || L.unspecified}`);
-                if (it?.transport?.code) tags.push(it.transport.code);
-                if (it?.transport?.carrier) tags.push(it.transport.carrier);
-              } else {
-                if (it.category === 'meal') tags.push(L.meal);
-                else if (it.category === 'activity') tags.push(L.activity);
-                else if (it.category === 'reservation') tags.push(L.reservation);
-                else if (it.category === 'hotel') tags.push(L.hotel);
-                else if (it.category === 'ticket') tags.push(L.ticket);
-                tags.push(`${L.duration} ${tDur || L.unspecified}`);
-              }
-
-              rows.push(
-                <div
-                  key={idx}
-                  className="flex items-start gap-3 rounded-2xl border border-black/10 p-3 bg-white shadow-sm"
-                >
-                  <div className="text-xl leading-none">{icon}</div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex flex-wrap items-center gap-x-2 text-[15px] font-medium">
-                      <span className="text-[#6b6b6b]">{it.time || '--:--'}</span>
-                      <span className="text-[#1a1a1a]">{it.title}</span>
-                    </div>
-
-                    {(line2 || it.notes) && (
-                      <div className="text-sm text-[#555] mt-0.5">
-                        {line2 && <span className="mr-2">📍 {line2}</span>}
-                        {it.notes && <span>· {it.notes}</span>}
-                      </div>
-                    )}
-
-                    {(tags.length > 0 || typeof it.price !== 'undefined') && (
-                      <div className="flex flex-wrap gap-1.5 mt-1">
-                        {tags.map((t: string, i2: number) => (
-                          <span
-                            key={i2}
-                            className="px-2 py-0.5 text-[11px] rounded-full bg-black/5 border border-black/10 text-[#333]"
-                          >
-                            {t}
-                          </span>
-                        ))}
-                        {typeof it.price !== 'undefined' && (
-                          <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#faf6ed] border border-[#e8d8b6] text-[#6b5a35]">
-                            {L.price}: {String(it.price)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            });
-
-            return rows;
-          })()}
+              return rows;
+            })()}
+          </div>
         </div>
       </div>
     </div>
