@@ -2,8 +2,6 @@ import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
-
-// Cambia CV_DEBUG=0 para silenciar logs
 const DEBUG = process.env.CV_DEBUG !== '0';
 
 export async function POST(req: NextRequest) {
@@ -42,10 +40,17 @@ export async function POST(req: NextRequest) {
       if (DEBUG) console.log('[CV][server] created thread', threadId);
     }
 
-    const run = await openai.beta.threads.runs.create(threadId!, { assistant_id: assistantId });
+    // 🚫 Forzar que NO use tools; algunos SDKs ignoran esto, por eso también manejamos requires_action abajo
+    const run = await openai.beta.threads.runs.create(threadId!, {
+      assistant_id: assistantId,
+      
+      tool_choice: 'none',
+      additional_instructions:
+        'No uses herramientas. Responde directamente en el chat con texto. Si generas un itinerario, incluye el bloque ```cv:itinerary con JSON válido.',
+    });
     if (DEBUG) console.log('[CV][server] run created', { runId: run.id, status: run.status });
 
-    // Polling (compatible con SDKs)
+    // Polling (soporta SDKs viejos/nuevos)
     const t0 = Date.now();
     let status = run.status;
     while (
@@ -63,10 +68,36 @@ export async function POST(req: NextRequest) {
       }
       status = rnow.status;
       if (DEBUG) console.log('[CV][server] polling', { status });
-      if (status === 'requires_action') break;
+
+      if (status === 'requires_action') {
+        // 🔧 Si el Assistant pidió tools, las cancelamos devolviendo tool_outputs vacíos
+        const calls = rnow?.required_action?.submit_tool_outputs?.tool_calls ?? [];
+        if (calls.length && DEBUG) console.log('[CV][server] requires_action -> submitting empty tool outputs', calls.length);
+
+        if (calls.length) {
+          try {
+            await (openai as any).beta.threads.runs.submitToolOutputs(threadId!, run.id, {
+              tool_outputs: calls.map((c: any) => ({
+                tool_call_id: c.id,
+                output:
+                  'Tool execution is disabled in this chat. Provide the final answer directly in text, in the chat.',
+              })),
+            });
+          } catch (e) {
+            // SDK alternativo
+            await (openai as any).beta.threads.runs.submit_tool_outputs(threadId!, run.id, {
+              tool_outputs: calls.map((c: any) => ({
+                tool_call_id: c.id,
+                output:
+                  'Tool execution is disabled in this chat. Provide the final answer directly in text, in the chat.',
+              })),
+            });
+          }
+        }
+      }
     }
 
-    // Leer mensajes (último del asistente)
+    // Obtener la última respuesta del asistente
     const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 });
     const firstAssistant = list.data.find((m) => m.role === 'assistant');
 
@@ -100,8 +131,6 @@ function json(status: number, data: any) {
     headers: { 'Content-Type': 'application/json' },
   });
 }
- 
-
 function wait(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }

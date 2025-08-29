@@ -15,7 +15,7 @@ export default function Chat() {
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
-  // Medir altura del composer para reservar espacio en el scroll
+  // medir altura composer para separar el scroll
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -38,7 +38,6 @@ export default function Chat() {
     const text = input.trim();
     if (!text || loading) return;
 
-    // Mensaje del usuario
     const user: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -50,7 +49,6 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      // Reuso de threadId guardado
       const stored =
         (typeof window !== 'undefined' && (window as any).cvThreadId) ||
         (typeof window !== 'undefined' && localStorage.getItem('cv_thread_id')) ||
@@ -64,10 +62,7 @@ export default function Chat() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: { role: 'user', parts: [{ text }] },
-          threadId: stored,
-        }),
+        body: JSON.stringify({ message: { role: 'user', parts: [{ text }] }, threadId: stored }),
       });
 
       const ct = res.headers.get('content-type') || '';
@@ -78,8 +73,7 @@ export default function Chat() {
       }
       if (!ct.includes('application/json')) throw new Error('Respuesta no-JSON');
 
-      const data = await res.json(); // { reply, threadId, debug? }
-
+      const data = await res.json(); // { reply, threadId }
       if (data?.threadId) {
         try { localStorage.setItem('cv_thread_id', data.threadId); } catch {}
         (window as any).cvThreadId = data.threadId;
@@ -102,7 +96,7 @@ export default function Chat() {
         {
           id: uuidv4(),
           role: 'assistant',
-          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y número de personas?' }],
+          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y nº de personas?' }],
         },
       ]);
     } finally {
@@ -115,21 +109,21 @@ export default function Chat() {
 
   return (
     <div
-      className="relative flex flex-col w-full min-h-[100dvh]"
+      className="relative flex flex-col w-full min-h-[100dvh] bg-white"
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
-      {/* 🎬 Pre-chat: GIF centrado (no full screen), sin gradiente */}
+      {/* 🎬 Pre-chat: fondo blanco y GIF centrado (no expandido, sin gradientes) */}
       {showBackdrop && (
-        <div className="pointer-events-none fixed inset-0 -z-10 grid place-items-center bg-black">
+        <div className="pointer-events-none fixed inset-0 -z-10 grid place-items-center bg-white">
           <img
             src="../images/Texts.gif"
             alt="Coco Volare"
-            className="max-w-[min(92vw,900px)] max-h-[70vh] w-auto h-auto object-contain rounded-2xl"
+            className="max-w-[min(92vw,820px)] max-h-[68vh] w-auto h-auto object-contain"
           />
         </div>
       )}
 
-      {/* Área de conversación */}
+      {/* Mensajes */}
       <div
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
