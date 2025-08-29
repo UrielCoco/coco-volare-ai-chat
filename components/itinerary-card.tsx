@@ -21,6 +21,11 @@ const DICT: Record<Lang, Record<string, string>> = {
     reservation: 'Reservación',
     hotel: 'Hotel',
     ticket: 'Ticket',
+    weather: 'Clima',
+    humidity: 'Humedad',
+    disclaimerDefault:
+      '⚠️ Tiempos y disponibilidad son estimados y sujetos a confirmación. ' +
+      'Pueden aplicar condiciones de proveedor y cambios operativos.',
     unspecified: 'no especificada',
   },
   en: {
@@ -39,11 +44,16 @@ const DICT: Record<Lang, Record<string, string>> = {
     reservation: 'Reservation',
     hotel: 'Hotel',
     ticket: 'Ticket',
+    weather: 'Weather',
+    humidity: 'Humidity',
+    disclaimerDefault:
+      '⚠️ Times and availability are estimates and subject to confirmation. ' +
+      'Supplier conditions and operational changes may apply.',
     unspecified: 'unspecified',
   },
 };
 
-// 1) Si el Assistant manda itinerary.lang, lo usamos; 2) si no, lo inferimos.
+// Usa itinerary.lang si viene; si no, infiere.
 function getLang(it: any): Lang {
   const l = String(it?.lang || '').toLowerCase();
   if (l.startsWith('es')) return 'es';
@@ -62,9 +72,7 @@ function getLang(it: any): Lang {
     const blob = texts.join(' ').toLowerCase();
     const isEs =
       /[áéíóúñü]/.test(blob) ||
-      /(itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/.test(
-        blob
-      );
+      /(itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/.test(blob);
     return isEs ? 'es' : 'en';
   } catch {
     return 'en';
@@ -109,7 +117,7 @@ function formatDuration(s?: string): string {
   return s;
 }
 
-// items -> timeline + heurística para clasificar vuelos/traslados
+// items -> timeline + heurística transport
 function toTimeline(day: any): any[] {
   let tl: any[] = Array.isArray(day?.timeline) ? day.timeline : [];
   if ((!tl || tl.length === 0) && Array.isArray(day?.items)) {
@@ -180,12 +188,14 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
     return m ? m[1].padStart(2, '0') : '--';
   };
 
-  return (
-    <div className="relative w-full">
-      {/* Base “puck” dorada que hace flotar la tarjeta (sin bordes) */}
-      <div className="pointer-events-none absolute -bottom-5 left-4 right-4 h-10 rounded-[18px] bg-[#e8d8b6] shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
+  const disclaimer = itinerary?.disclaimer || L.disclaimerDefault;
 
-      {/* Tarjeta principal: negro con acentos dorados, esquinas moderadas */}
+  return (
+    <div className="relative w-full mb-8">
+      {/* “Puck” dorado inferior */}
+      <div className="pointer-events-none absolute -bottom-5 left-3 right-3 h-10 rounded-[18px] bg-[#e8d8b6] shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
+
+      {/* Panel negro principal */}
       <div
         className="
           relative w-full overflow-hidden rounded-[18px]
@@ -193,7 +203,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
           shadow-[0_28px_60px_-20px_rgba(0,0,0,0.55),0_12px_24px_-12px_rgba(0,0,0,0.35)]
         "
       >
-        {/* Glow sutil */}
+        {/* Glow */}
         <div className="pointer-events-none absolute inset-0 opacity-60 mix-blend-screen
                         bg-[radial-gradient(120%_80%_at_0%_0%,rgba(255,255,255,0.25),rgba(255,255,255,0)_60%)]" />
 
@@ -210,7 +220,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
         {/* Línea dorada */}
         <div className="h-[2px] mx-5 rounded-full bg-gradient-to-r from-transparent via-[#b69965] to-transparent opacity-90" />
 
-        {/* Tabs días (negro/gris con activo dorado) */}
+        {/* Tabs días */}
         <div className="relative px-4 pt-3 flex gap-2 overflow-x-auto">
           {days.map((dayObj: any, idx: number) => (
             <button
@@ -227,6 +237,21 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
             </button>
           ))}
         </div>
+
+        {/* Clima esperado del día activo */}
+        {d?.weather && (
+          <div className="px-5 pt-2 pb-1 text-xs text-white/85 flex items-center gap-2">
+            <span className="text-base">{d.weather.icon || '🌤️'}</span>
+            <span className="font-medium">{L.weather}:</span>
+            {d.weather.summary && <span>{d.weather.summary}</span>}
+            {typeof d.weather.temp !== 'undefined' && (
+              <span>· {Math.round(d.weather.temp)}°C</span>
+            )}
+            {typeof d.weather.humidity !== 'undefined' && (
+              <span>· {L.humidity}: {Math.round(d.weather.humidity)}%</span>
+            )}
+          </div>
+        )}
 
         {/* Chips de localización */}
         <div className="relative px-5 pb-1 flex flex-wrap gap-2">
@@ -333,6 +358,11 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
 
               return rows;
             })()}
+          </div>
+
+          {/* Aviso / disclaimer */}
+          <div className="mt-4 text-[12px] text-white/85 bg-white/5 rounded-lg px-3 py-2">
+            {disclaimer}
           </div>
         </div>
       </div>
