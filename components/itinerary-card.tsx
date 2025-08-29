@@ -43,8 +43,7 @@ const DICT: Record<Lang, Record<string, string>> = {
   },
 };
 
-// 1) Si el Assistant manda itinerary.lang, lo usamos.
-// 2) Si no, inferimos por el contenido.
+// 1) Si el Assistant manda itinerary.lang, lo usamos; 2) si no, lo inferimos.
 function getLang(it: any): Lang {
   const l = String(it?.lang || '').toLowerCase();
   if (l.startsWith('es')) return 'es';
@@ -110,7 +109,7 @@ function formatDuration(s?: string): string {
   return s;
 }
 
-// items -> timeline + tipado por heurística para "flight"/etc.
+// items -> timeline + heurística para clasificar vuelos/traslados
 function toTimeline(day: any): any[] {
   let tl: any[] = Array.isArray(day?.timeline) ? day.timeline : [];
   if ((!tl || tl.length === 0) && Array.isArray(day?.items)) {
@@ -183,30 +182,35 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
 
   return (
     <div className="relative w-full">
-      {/* base oscura (sombra tipo “puck”) */}
-      <div className="pointer-events-none absolute -bottom-5 left-4 right-4 h-10 rounded-2xl bg-black/85 shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
+      {/* Base “puck” dorada que hace flotar la tarjeta (sin bordes) */}
+      <div className="pointer-events-none absolute -bottom-5 left-4 right-4 h-10 rounded-[18px] bg-[#e8d8b6] shadow-[0_26px_60px_-20px_rgba(0,0,0,0.7)]" />
 
-      {/* tarjeta dorada sin bordes — sólo sombras */}
+      {/* Tarjeta principal: negro con acentos dorados, esquinas moderadas */}
       <div
         className="
-          relative w-full overflow-hidden rounded-[26px]
-          bg-gradient-to-br from-[#f4e5c9] via-[#ead5b4] to-[#d8c39a]
+          relative w-full overflow-hidden rounded-[18px]
+          bg-gradient-to-b from-[#111111] to-[#0b0b0b]
           shadow-[0_28px_60px_-20px_rgba(0,0,0,0.55),0_12px_24px_-12px_rgba(0,0,0,0.35)]
         "
       >
-        {/* Highlight superior suave */}
-        <div className="pointer-events-none absolute inset-0 opacity-70 mix-blend-screen
-                        bg-[radial-gradient(120%_80%_at_0%_0%,rgba(255,255,255,0.7),rgba(255,255,255,0)_60%)]" />
+        {/* Glow sutil */}
+        <div className="pointer-events-none absolute inset-0 opacity-60 mix-blend-screen
+                        bg-[radial-gradient(120%_80%_at_0%_0%,rgba(255,255,255,0.25),rgba(255,255,255,0)_60%)]" />
 
         {/* Header */}
         <div className="relative px-5 py-4">
-          <div className="text-[12px] uppercase tracking-[0.2em] text-[#6b5a35]">
+          <div className="text-[12px] uppercase tracking-[0.2em] text-[#d7c394]/90">
             {L.brandHead}
           </div>
-          <div className="text-xl md:text-[22px] font-semibold text-[#1a1a1a] mt-0.5">{title}</div>
+          <div className="text-xl md:text-[22px] font-semibold text-white mt-0.5">
+            {title}
+          </div>
         </div>
 
-        {/* Tabs de días (sin bordes) */}
+        {/* Línea dorada */}
+        <div className="h-[2px] mx-5 rounded-full bg-gradient-to-r from-transparent via-[#b69965] to-transparent opacity-90" />
+
+        {/* Tabs días (negro/gris con activo dorado) */}
         <div className="relative px-4 pt-3 flex gap-2 overflow-x-auto">
           {days.map((dayObj: any, idx: number) => (
             <button
@@ -216,7 +220,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                 'px-3 py-1.5 rounded-full text-sm whitespace-nowrap transition shadow ' +
                 (i === idx
                   ? 'bg-[#b69965] text-black'
-                  : 'bg-white/85 text-[#333] hover:bg-white')
+                  : 'bg-white/10 text-white hover:bg-white/15')
               }
             >
               {L.day} {dayObj.day}{dayObj.date ? ` · ${dayObj.date}` : ''}
@@ -224,24 +228,24 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
           ))}
         </div>
 
-        {/* Chips de localización (sin borde) */}
+        {/* Chips de localización */}
         <div className="relative px-5 pb-1 flex flex-wrap gap-2">
           {locations?.length > 0 ? locations.map((loc: any, idx: number) => (
             <span
               key={idx}
-              className="px-2.5 py-1 rounded-full text-xs bg-white/80 shadow-sm text-[#1a1a1a]"
+              className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-white shadow-sm"
               title={`${loc.city || ''}${loc.country ? ', ' + loc.country : ''}`}
             >
               {loc.city ? loc.city : ''}{loc.city && loc.country ? ', ' : ''}{loc.country || ''}
             </span>
           )) : (
-            <span className="text-xs text-[#6b6b6b]">{L.locationUndefined}</span>
+            <span className="text-xs text-white/70">{L.locationUndefined}</span>
           )}
         </div>
 
         {/* Contenido del día */}
         <div className="relative p-5">
-          {d?.title && <div className="text-base font-semibold mb-2">{d.title}</div>}
+          {d?.title && <div className="text-base font-semibold mb-2 text-white">{d.title}</div>}
 
           <div className="space-y-3">
             {(() => {
@@ -253,7 +257,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                 if (hr !== currentHour) {
                   currentHour = hr;
                   rows.push(
-                    <div key={`h-${idx}`} className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5a35]/70 mt-3">
+                    <div key={`h-${idx}`} className="text-[11px] font-semibold uppercase tracking-wide text-[#d7c394]/80 mt-3">
                       {hr !== '--' ? `${hr}:00` : L.noTime}
                     </div>
                   );
@@ -289,7 +293,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                 rows.push(
                   <div
                     key={idx}
-                    className="flex items-start gap-3 rounded-2xl p-3 bg-white/95 shadow-[0_10px_24px_-14px_rgba(0,0,0,0.35)]"
+                    className="flex items-start gap-3 rounded-xl p-3 bg-white text-[#111] shadow-[0_10px_24px_-14px_rgba(0,0,0,0.35)]"
                   >
                     <div className="text-xl leading-none">{icon}</div>
                     <div className="flex-1 min-w-0">
@@ -299,7 +303,7 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                       </div>
 
                       {(line2 || it.notes) && (
-                        <div className="text-sm text-[#555] mt-0.5">
+                        <div className="text-sm text-[#444] mt-0.5">
                           {line2 && <span className="mr-2">📍 {line2}</span>}
                           {it.notes && <span>· {it.notes}</span>}
                         </div>
@@ -310,13 +314,13 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
                           {chips.map((t: string, i2: number) => (
                             <span
                               key={i2}
-                              className="px-2 py-0.5 text-[11px] rounded-full bg-black/5 text-[#333] shadow-sm"
+                              className="px-2 py-0.5 text-[11px] rounded-full bg-[#b69965]/20 text-[#6b532a] shadow-sm"
                             >
                               {t}
                             </span>
                           ))}
                           {typeof it.price !== 'undefined' && (
-                            <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#faf6ed] text-[#6b5a35] shadow-sm">
+                            <span className="px-2 py-0.5 text-[11px] rounded-full bg-[#fff3e0] text-[#6b5a35] shadow-sm">
                               {L.price}: {String(it.price)}
                             </span>
                           )}
