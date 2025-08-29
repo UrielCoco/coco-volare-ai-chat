@@ -6,9 +6,9 @@ import ItineraryCard from './itinerary-card';
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
-  // ⬅️ Ancho: en mobile ocupa el ancho del contenedor (que ya tiene px-4 de margen lateral)
-  // y desde md limita a 820px. Así NO se pega al borde en móvil.
-  const bubbleWidth = 'w-full md:max-w-[820px]';
+  // 👉 Ancho contenido: no ocupa todo el contenedor en móvil,
+  //    deja ~12% de aire lateral; en desktop limita a 820px.
+  const bubbleWidth = 'inline-block max-w-[88%] md:max-w-[820px]';
 
   const bubbleSkin = isUser
     ? 'bg-[#d8c69a] border-[#b69965]/40 text-black' // cliente dorado
@@ -54,7 +54,7 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
                   key={idx}
                   className={
                     (isUser ? 'text-black' : 'text-white') +
-                    ' text-xs whitespace-pre-wrap'
+                    ' text-xs whitespace-pre-wrap break-words'
                   }
                 >
                   {JSON.stringify(part.quote, null, 2)}
