@@ -1,7 +1,7 @@
 // lib/ai/providers/openai-assistant.ts
 import OpenAI from "openai";
 
-// Evento que mandamos de regreso al route
+/** Eventos que regresamos al route (SSE) */
 export type AssistantEvent =
   | { type: "message.delta"; text: string }
   | { type: "message.completed"; text: string }
@@ -18,12 +18,42 @@ export interface RunAssistantParams {
     tools?: Array<{ type: "file_search" | "code_interpreter" }>;
   }>;
   metadata?: Record<string, string>;
-  onEvent?: (e: AssistantEvent) => void; // <-- parámetro tipado correctamente
+  onEvent?: (e: AssistantEvent) => void;
+}
+
+/** Extrae texto desde el shape de delta (message delta de Assistants) */
+function extractDeltaText(ev: any): string {
+  try {
+    const content = ev?.delta?.content ?? [];
+    let acc = "";
+    for (const c of content) {
+      if (typeof c?.text?.value === "string") acc += c.text.value;
+      else if (typeof c?.value === "string") acc += c.value;
+    }
+    return acc;
+  } catch {
+    return "";
+  }
+}
+
+/** Aplana un mensaje completado a texto plano */
+function extractCompletedText(ev: any): string {
+  try {
+    const content = ev?.message?.content ?? [];
+    let acc = "";
+    for (const c of content) {
+      if (typeof c?.text?.value === "string") acc += c.text.value;
+      else if (typeof c?.value === "string") acc += c.value;
+    }
+    return acc;
+  } catch {
+    return "";
+  }
 }
 
 /**
- * Ejecuta el Assistant con streaming de texto.
- * Sin prompts locales: todo vive en el Assistant.
+ * Ejecuta Assistant con streaming.
+ * Sin prompts locales: TODO vive en el Assistant.
  */
 export async function runAssistantWithStream({
   assistantId,
@@ -35,12 +65,12 @@ export async function runAssistantWithStream({
 }: RunAssistantParams) {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  // 1) Thread con mensaje del usuario
+  // 1) Thread con el mensaje del usuario (content nunca vacío)
   const thread = await client.beta.threads.create({
     messages: [
       {
         role: "user",
-        content: input,
+        content: input || "Mensaje",
         ...(attachments ? { attachments: attachments as any } : {}),
         ...(userId || metadata
           ? { metadata: { ...(metadata || {}), ...(userId ? { userId } : {}) } }
@@ -50,13 +80,14 @@ export async function runAssistantWithStream({
     ...(metadata ? { metadata } : {}),
   });
 
-  // 2) Run + stream
-  const stream = await client.beta.threads.runs.stream(thread.id, {
+  // 2) Run con stream
+  const stream: any = await client.beta.threads.runs.stream(thread.id, {
     assistant_id: assistantId,
   });
 
   let full = "";
 
+  // Algunas versiones emiten textDelta (string simple)
   stream.on("textDelta", (delta: any) => {
     const chunk = delta?.value ?? "";
     if (chunk) {
@@ -65,15 +96,38 @@ export async function runAssistantWithStream({
     }
   });
 
-  // Algunas versiones no emiten messageDone; cerramos en "end"
-  return new Promise<void>((resolve, reject) => {
-    stream.on("event", (ev: any) => {
-      if (ev?.type === "thread.run.requires_action") {
-        onEvent?.({ type: "run.requires_action" });
+  // Manejo universal por evento tipado como string
+  stream.on("event", (ev: any) => {
+    const t = ev?.type;
+
+    // Deltas del mensaje
+    if (t === "thread.message.delta") {
+      const piece = extractDeltaText(ev);
+      if (piece) {
+        full += piece;
+        onEvent?.({ type: "message.delta", text: piece });
       }
-    });
+      return;
+    }
+
+    // Mensaje completado
+    if (t === "thread.message.completed") {
+      const finalText = extractCompletedText(ev) || full;
+      onEvent?.({ type: "message.completed", text: finalText });
+      return;
+    }
+
+    // Run requiere acción (tool-calls)
+    if (t === "thread.run.requires_action") {
+      onEvent?.({ type: "run.requires_action" });
+      return;
+    }
+  });
+
+  // Fin / error
+  return new Promise<void>((resolve, reject) => {
     stream.on("end", () => {
-      onEvent?.({ type: "message.completed", text: full });
+      if (full) onEvent?.({ type: "message.completed", text: full });
       onEvent?.({ type: "run.completed" });
       resolve();
     });
@@ -84,6 +138,7 @@ export async function runAssistantWithStream({
   });
 }
 
+/** submitToolOutputs compatible con distintas firmas del SDK */
 export async function submitToolOutputs(params: {
   threadId: string;
   runId: string;
@@ -95,23 +150,17 @@ export async function submitToolOutputs(params: {
     output: o.output,
   }));
 
-  // Algunas versiones del SDK piden (runId, {thread_id, tool_outputs})
-  // otras usan (threadId, runId, {tool_outputs}).
-  // Usamos 'as any' para evitar conflicto de overloads en TS.
   const runsApi: any = (client as any).beta.threads.runs;
-
   try {
     // Firma 1: (runId, { thread_id, tool_outputs })
     await runsApi.submitToolOutputs(params.runId, {
       thread_id: params.threadId,
       tool_outputs,
     });
-  } catch (_e: any) {
+  } catch {
     // Firma 2: (threadId, runId, { tool_outputs })
     await runsApi.submitToolOutputs(params.threadId, params.runId, {
       tool_outputs,
     });
   }
 }
-
-
