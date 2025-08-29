@@ -3,57 +3,19 @@
 import React, { useMemo, useState } from 'react';
 
 /**
- * JSON esperado (dinámico y retrocompatible):
- * {
- *   tripTitle?: string,
- *   days: [{
- *     day: number,
- *     date?: "YYYY-MM-DD",
- *     title?: string,
- *     locations?: [{ city?: string, country?: string }, ...], // soporta varios
- *     timeline?: [{
- *       time: "HH:MM",
- *       category: "transport"|"meal"|"activity"|"hotel"|"ticket"|"reservation",
- *       title: string,
- *       location?: string,
- *       duration?: string, // PT2H10M | 2h 10m | 150m
- *       price?: string|number,
- *       transport?: {
- *         mode: "air"|"land"|"sea",
- *         from?: { city?: string, country?: string },
- *         to?:   { city?: string, country?: string },
- *         carrier?: string,
- *         code?: string,
- *         duration?: string
- *       },
- *       notes?: string
- *     }],
- *     // retrocompat: items -> se mapean a timeline
- *     items?: [{ time?: string, type?: string, title: string, location?: string, notes?: string, price?: string|number }]
- *   }]
- * }
+ * JSON esperado (dinámico y retrocompatible).
+ * Ver notas anteriores; soporta "timeline" y convierte "items" -> "timeline".
  */
 
-/* ========================= i18n ========================= */
+/* ========================= i18n + detección ========================= */
 
-function getLang(): 'es' | 'en' {
-  try {
-    const dlang = document?.documentElement?.lang || '';
-    if (dlang.toLowerCase().startsWith('es')) return 'es';
-  } catch {}
-  try {
-    const nlang = navigator?.language || '';
-    if (nlang.toLowerCase().startsWith('es')) return 'es';
-  } catch {}
-  return 'en';
-}
+type Lang = 'es' | 'en';
 
-const dict = {
+const DICT: Record<Lang, Record<string, string>> = {
   es: {
     brandHead: 'COCO VOLARE · ITINERARIO',
     itinerary: 'Itinerario',
     day: 'Día',
-    dateSep: ' · ',
     locationUndefined: 'Ubicación por definir',
     noTime: 'SIN HORA',
     duration: 'Duración',
@@ -67,14 +29,11 @@ const dict = {
     hotel: 'Hotel',
     ticket: 'Ticket',
     unspecified: 'no especificada',
-    from: 'De',
-    to: 'a',
   },
   en: {
     brandHead: 'COCO VOLARE · ITINERARY',
     itinerary: 'Itinerary',
     day: 'Day',
-    dateSep: ' · ',
     locationUndefined: 'Location to be defined',
     noTime: 'NO TIME',
     duration: 'Duration',
@@ -88,24 +47,40 @@ const dict = {
     hotel: 'Hotel',
     ticket: 'Ticket',
     unspecified: 'unspecified',
-    from: 'From',
-    to: 'to',
   },
-} as const;
+};
 
-const emojiByCategory: Record<string, string> = {
+// Heurística: detecta idioma según el contenido del itinerario
+function guessLangFromItinerary(it: any): Lang {
+  try {
+    const texts: string[] = [];
+    if (typeof it?.tripTitle === 'string') texts.push(it.tripTitle);
+    (it?.days ?? []).slice(0, 3).forEach((d: any) => {
+      if (typeof d?.title === 'string') texts.push(d.title);
+      (d?.timeline ?? d?.items ?? []).slice(0, 5).forEach((x: any) => {
+        if (typeof x?.title === 'string') texts.push(x.title);
+        if (typeof x?.notes === 'string') texts.push(x.notes);
+        if (typeof x?.location === 'string') texts.push(x.location);
+      });
+    });
+    const blob = texts.join(' ').toLowerCase();
+    const hasAccents = /[áéíóúñü]/.test(blob);
+    const spanishTokens = /(bienvenido|itinerario|día|traslado|vuelo|hotel|duraci[oó]n|comida|cena|almuerzo|visita|atracci[oó]n|reservaci[oó]n|a[eé]reo|terrestre|mar[ií]timo)/;
+    if (hasAccents || spanishTokens.test(blob)) return 'es';
+  } catch {}
+  return 'en';
+}
+
+/* ========================= helpers UI ========================= */
+
+const ICON_BY_CATEGORY: Record<string, string> = {
   activity: '🎟️',
   meal: '🍽️',
   hotel: '🏨',
   ticket: '🎫',
   reservation: '📑',
 };
-
-const emojiByMode: Record<string, string> = {
-  air: '✈️',
-  land: '🚗',
-  sea: '⛴️',
-};
+const ICON_BY_MODE: Record<string, string> = { air: '✈️', land: '🚗', sea: '⛴️' };
 
 function fmtCityCountry(x?: { city?: string; country?: string }) {
   if (!x) return '';
@@ -113,29 +88,39 @@ function fmtCityCountry(x?: { city?: string; country?: string }) {
   return a || '';
 }
 
-function formatDuration(s?: string) {
+function formatDuration(s?: string): string {
   if (!s) return '';
+
+  // ISO 8601: PT#H#M
   const iso = /^P(T(?:(\d+)H)?(?:(\d+)M)?)$/i.exec(s);
   if (iso) {
-    const h = iso[2] ? Number(iso[2]) : 0;
-    const m = iso[3] ? Number(iso[3]) : 0;
-    if (h && m) return `${h}h ${m}m`;
-    if (h) return `${h}h`;
-    if (m) return `${m}m`;
+    const hh = iso[2] ? Number(iso[2]) : 0;
+    const mm = iso[3] ? Number(iso[3]) : 0;
+    if (hh && mm) return `${hh}h ${mm}m`;
+    if (hh) return `${hh}h`;
+    if (mm) return `${mm}m`;
   }
+
+  // "2h 30m" / "2h30m" / "2h" / "30m"
   const hm = /(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/i.exec(s);
   if (hm && (hm[1] || hm[2])) {
-    const h = hm[1] ? Number(hm[1]) : 0;
-    const m = hm[2] ? Number(hm[2]) : 0;
-    if (h && m) return `${h}h ${m}m`;
-    if (h) return `${h}h`;
-    if (m) return `${m}m`;
+    const hh = hm[1] ? Number(hm[1]) : 0;
+    const mm = hm[2] ? Number(hm[2]) : 0;
+    if (hh && mm) return `${hh}h ${mm}m`;
+    if (hh) return `${hh}h`;
+    if (mm) return `${mm}m`;
   }
+
+  // "150m"
   const onlyM = /^(\d+)\s*m$/i.exec(s);
   if (onlyM) return `${onlyM[1]}m`;
+
+  // Fallback: devuélvelo tal cual
   return s;
 }
 
+
+// Convierte items -> timeline y ordena por hora. Aplica heurística para transportes.
 function toTimeline(day: any): any[] {
   let tl: any[] = Array.isArray(day?.timeline) ? day.timeline : [];
   if ((!tl || tl.length === 0) && Array.isArray(day?.items)) {
@@ -154,17 +139,13 @@ function toTimeline(day: any): any[] {
       price: it.price,
     }));
   }
-  // Heurística: si viene mal categorizado (e.g., "Flight" como actividad) lo forzamos a transport
+  // Heurística: si llega "Flight" como actividad, forzamos transport + mode
   tl = tl.map((it) => {
     if (it.category === 'transport') return it;
     const txt = `${it.title || ''} ${it.notes || ''}`.toLowerCase();
-    const looksAir =
-      /flight|vuelo|avión|a[eé]reo|airline|air\s/.test(txt);
-    const looksSea =
-      /ferry|barco|ship|cruise|mar[ií]timo|boat/.test(txt);
-    const looksLand =
-      /train|tren|bus|autob[uú]s|car|auto|drive|taxi|transfer|traslado|shuttle/.test(txt);
-
+    const looksAir = /(flight|vuelo|av[ií]on|a[eé]reo|airline|air\s)/.test(txt);
+    const looksSea = /(ferry|barco|ship|cruise|mar[ií]timo|boat)/.test(txt);
+    const looksLand = /(train|tren|bus|autob[uú]s|car|auto|drive|taxi|transfer|traslado|shuttle)/.test(txt);
     if (looksAir || looksSea || looksLand) {
       return {
         ...it,
@@ -177,26 +158,26 @@ function toTimeline(day: any): any[] {
     }
     return it;
   });
-
   const toNum = (t: string) => {
     const m = /^(\d{1,2}):(\d{2})$/.exec(t || '');
-    if (!m) return 99_99;
+    if (!m) return 9999;
     return Number(m[1]) * 60 + Number(m[2]);
   };
   return [...tl].sort((a, b) => toNum(a.time) - toNum(b.time));
 }
 
 export default function ItineraryCard({ itinerary }: { itinerary: any }) {
-  const lang = getLang();
-  const L = dict[lang];
+  const lang: Lang = useMemo(() => guessLangFromItinerary(itinerary), [itinerary]);
+  const L = DICT[lang];
 
   const days = itinerary?.days ?? [];
   const [i, setI] = useState(0);
   const d = days[i] || days[0];
 
+  // Título del bloque
   const title = useMemo(() => {
     if (itinerary?.tripTitle) return itinerary.tripTitle;
-    if (days?.length) return `${L.day} ${days[0].day}${L.dateSep}${days[days.length - 1].day}`;
+    if (days?.length) return `${L.day} ${days[0].day} – ${days[days.length - 1].day}`;
     return L.itinerary;
   }, [itinerary, days, L]);
 
@@ -205,20 +186,20 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
     : [{ city: d?.location || '', country: '' }].filter((x) => x.city);
 
   const timeline = toTimeline(d);
-
   const hourOf = (t?: string) => {
     const m = /^(\d{1,2}):/.exec(t || '');
     return m ? m[1].padStart(2, '0') : '--';
   };
 
   return (
-    <div className="rounded-3xl bg-white text-black shadow-lg ring-1 ring-black/5 overflow-hidden">
+    // 🔶 Estética premium: gradiente suave + sombra profunda + borde superior “pill”
+    <div className="w-full rounded-[28px] bg-gradient-to-b from-[#fef9f1] to-white shadow-[0_20px_60px_-20px_rgba(0,0,0,0.35)] ring-1 ring-black/5 overflow-hidden">
       {/* Header */}
-      <div className="px-5 py-4 bg-[#faf8f3] border-b border-black/5">
-        <div className="text-sm uppercase tracking-wide text-[#6b5a35]">
+      <div className="px-5 py-4 bg-gradient-to-b from-[#f7efe0] to-[#fffaf0] border-b border-black/5">
+        <div className="text-[12px] uppercase tracking-[0.2em] text-[#6b5a35]">
           {L.brandHead}
         </div>
-        <div className="text-xl font-semibold text-[#1a1a1a]">{title}</div>
+        <div className="text-xl md:text-[22px] font-semibold text-[#1a1a1a] mt-0.5">{title}</div>
       </div>
 
       {/* Tabs de días */}
@@ -228,9 +209,9 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
             key={idx}
             onClick={() => setI(idx)}
             className={
-              'px-3 py-1.5 rounded-full text-sm whitespace-nowrap border ' +
+              'px-3 py-1.5 rounded-full text-sm whitespace-nowrap border transition ' +
               (i === idx
-                ? 'bg-[#b69965] text-black border-[#b69965]'
+                ? 'bg-[#b69965] text-black border-[#b69965] shadow'
                 : 'bg-white text-[#333] border-black/10 hover:bg-black/5')
             }
           >
@@ -277,8 +258,8 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
               const isTransport = it.category === 'transport';
               const mode = it?.transport?.mode;
               const icon = isTransport
-                ? (emojiByMode[mode || 'land'] || '🚗')
-                : (emojiByCategory[it.category] || '•');
+                ? (ICON_BY_MODE[mode || 'land'] || '🚗')
+                : (ICON_BY_CATEGORY[it.category] || '•');
 
               const tDur = formatDuration(it?.transport?.duration || it?.duration);
               const line2 = isTransport
@@ -291,14 +272,11 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
 
               const tags: string[] = [];
               if (isTransport) {
-                tags.push(
-                  mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land
-                );
+                tags.push(mode === 'air' ? L.air : mode === 'sea' ? L.sea : L.land);
                 tags.push(`${L.duration} ${tDur || L.unspecified}`);
                 if (it?.transport?.code) tags.push(it.transport.code);
                 if (it?.transport?.carrier) tags.push(it.transport.carrier);
               } else {
-                // etiquetas por categoría
                 if (it.category === 'meal') tags.push(L.meal);
                 else if (it.category === 'activity') tags.push(L.activity);
                 else if (it.category === 'reservation') tags.push(L.reservation);
@@ -308,7 +286,10 @@ export default function ItineraryCard({ itinerary }: { itinerary: any }) {
               }
 
               rows.push(
-                <div key={idx} className="flex items-start gap-3 rounded-2xl border border-black/10 p-3 bg-white">
+                <div
+                  key={idx}
+                  className="flex items-start gap-3 rounded-2xl border border-black/10 p-3 bg-white shadow-sm"
+                >
                   <div className="text-xl leading-none">{icon}</div>
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2 text-[15px] font-medium">

@@ -6,13 +6,14 @@ import ItineraryCard from './itinerary-card';
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
-  // 👉 Ancho contenido: no ocupa todo el contenedor en móvil,
-  //    deja ~12% de aire lateral; en desktop limita a 820px.
-  const bubbleWidth = 'inline-block max-w-[88%] md:max-w-[820px]';
+  // Cliente: aire lateral; Asistente: más ancho para la tarjeta
+  const bubbleWidth = isUser
+    ? 'inline-block max-w-[88%] md:max-w-[820px]'
+    : 'inline-block max-w-[96%] md:max-w-[980px]';
 
   const bubbleSkin = isUser
-    ? 'bg-[#d8c69a] border-[#b69965]/40 text-black' // cliente dorado
-    : 'bg-black text-white border-white/10';        // asistente negro
+    ? 'bg-[#d8c69a] border-[#b69965]/40 text-black'
+    : 'bg-black text-white border-white/10';
 
   const bubble = `${bubbleWidth} rounded-2xl border shadow-sm px-4 py-3 ${bubbleSkin}`;
 
@@ -43,6 +44,7 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
             if (part?.type === 'itinerary' && part?.itinerary) {
               return (
                 <div key={idx} className="my-2">
+                  {/* La tarjeta ocupa el 100% del ancho de la burbuja */}
                   <ItineraryCard itinerary={part.itinerary} />
                 </div>
               );
