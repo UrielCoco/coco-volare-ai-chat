@@ -1,13 +1,13 @@
-"use client";
+'use client';
 
-import React from "react";
-import Message, { ChatMessage } from "./message";
+import Message from './message';
+import type { ChatMessage } from '@/lib/types';
 
-export default function Messages({ items }: { items: ChatMessage[] }) {
+export default function Messages({ items = [] }: { items?: ChatMessage[] }) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="w-full">
       {items.map((m) => (
-        <Message key={m.id} msg={m} />
+        <Message key={m.id} item={m} />
       ))}
     </div>
   );

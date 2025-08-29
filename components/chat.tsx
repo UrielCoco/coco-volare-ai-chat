@@ -23,11 +23,9 @@ async function fetchJson(input: RequestInfo, init?: RequestInit) {
 }
 
 async function ensureWebSession(): Promise<{ sessionId: string; threadId: string }> {
-  // 1) lee sid del storage si existe
   let sid = '';
   try { sid = localStorage.getItem(CV_SESSION_KEY) || ''; } catch {}
 
-  // 2) pregunta al backend por la sesión (crea o recupera)
   const url = sid ? `/api/chat/session?sid=${encodeURIComponent(sid)}` : `/api/chat/session`;
   const data = await fetchJson(url, {
     method: 'GET',
@@ -38,7 +36,6 @@ async function ensureWebSession(): Promise<{ sessionId: string; threadId: string
   const sessionId = String(data?.sessionId || '');
   const threadId  = String(data?.threadId  || '');
 
-  // 3) persiste sid en storage y window para depurar
   if (sessionId) {
     try { localStorage.setItem(CV_SESSION_KEY, sessionId); } catch {}
     (window as any).cvSessionId = sessionId;
@@ -54,15 +51,16 @@ function peekSessionId(): string {
 
 /* ========= Componente ========= */
 export default function Chat() {
+  // 👇 Usa ChatMessage con `parts`
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // 🔹 Refs
+  // 🔹 Refs para calcular altura del composer
   const formRef = useRef<HTMLFormElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
-  const [composerH, setComposerH] = useState<number>(96); // fallback
+  const [composerH, setComposerH] = useState<number>(96);
 
   useEffect(() => {
     const el = composerRef.current;
@@ -104,6 +102,7 @@ export default function Chat() {
     const raw = input.trim();
     if (!raw) return;
 
+    // Mensaje del usuario con `parts`
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -115,11 +114,9 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      // garantiza sesión/thread y lee sid para header
       await ensureWebSession();
       const sid = peekSessionId();
 
-      // IMPORTANTE: manda formato `messages` con STRING para robustez
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -127,8 +124,8 @@ export default function Chat() {
           ...(sid ? { 'x-cv-session': sid } : {}),
         },
         body: JSON.stringify({
+          // El backend espera el formato de OpenAI (string)
           messages: [{ role: 'user', content: raw }],
-          // selectedChatModel puede omitirse; el backend usa Assistant configurado en consola
         }),
       });
 
@@ -150,15 +147,19 @@ export default function Chat() {
       }
 
       const data = await response.json(); // { reply, threadId, toolEvents, ... }
-
-      // (Opcional) expón thread y toolEvents para debug
       if (data?.threadId) (window as any).cvThreadId = data.threadId;
       if (Array.isArray(data?.toolEvents)) console.log('CV toolEvents:', data.toolEvents);
 
+      const assistantText =
+        typeof data?.reply === 'string'
+          ? data.reply
+          : (data?.reply?.text ?? 'Sin respuesta');
+
+      // Mensaje del assistant con `parts`
       const assistantMessage: ChatMessage = {
         id: uuidv4(),
         role: 'assistant',
-        parts: [{ type: 'text', text: data.reply || 'Sin respuesta' }],
+        parts: [{ type: 'text', text: assistantText }],
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -182,15 +183,8 @@ export default function Chat() {
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
       >
-        <Messages
-          messages={messages}
-          isLoading={loading}
-          votes={[]}
-          setMessages={setMessages}
-          regenerate={async () => {}}
-          isReadonly={false}
-          chatId="local-chat"
-        />
+        {/* Messages espera `items` */}
+        <Messages items={messages} />
       </div>
 
       {/* Composer */}
