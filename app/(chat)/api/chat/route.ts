@@ -1,4 +1,3 @@
-// app/(chat)/api/chat/route.ts
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
@@ -20,26 +19,27 @@ export async function POST(req: NextRequest) {
 
     const assistantId = process.env.OPENAI_ASSISTANT_ID;
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey || !assistantId) {
-      return json(500, { error: 'Faltan OPENAI_API_KEY / OPENAI_ASSISTANT_ID' });
-    }
+    if (!apiKey || !assistantId) return json(500, { error: 'Faltan OPENAI_API_KEY / OPENAI_ASSISTANT_ID' });
 
     const openai = new OpenAI({ apiKey });
 
-    // 1) Crear thread con el mensaje del usuario
-    const thread = await openai.beta.threads.create({
-      messages: [{ role: 'user', content: text || 'Mensaje' }],
-    });
+    // 👇 Reuso de thread si viene de la UI
+    let threadId: string | null = body?.threadId ?? null;
 
-    // 2) Lanzar run
-    const run = await openai.beta.threads.runs.create(thread.id, {
-      assistant_id: assistantId,
-    });
+    if (threadId) {
+      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text || 'Mensaje' });
+    } else {
+      const thread = await openai.beta.threads.create({
+        messages: [{ role: 'user', content: text || 'Mensaje' }],
+      });
+      threadId = thread.id;
+    }
 
-    // 3) Polling hasta completar (máx. ~45s) con firmas compatibles
+    const run = await openai.beta.threads.runs.create(threadId!, { assistant_id: assistantId });
+
+    // Polling compatible con SDKs (firmas nuevas y antiguas)
     const start = Date.now();
     let status = run.status;
-
     while (
       status !== 'completed' &&
       status !== 'failed' &&
@@ -47,44 +47,29 @@ export async function POST(req: NextRequest) {
       Date.now() - start < 45_000
     ) {
       await wait(800);
-
-      // --- Compatibilidad de firmas:
-      // v4.x recientes: retrieve(runId, { thread_id })
-      // v4.x antiguas: retrieve(threadId, runId)
       let rnow: any;
       try {
-        rnow = await (openai as any).beta.threads.runs.retrieve(run.id, {
-          thread_id: thread.id,
-        });
+        rnow = await (openai as any).beta.threads.runs.retrieve(run.id, { thread_id: threadId });
       } catch {
-        rnow = await (openai as any).beta.threads.runs.retrieve(thread.id, run.id);
+        rnow = await (openai as any).beta.threads.runs.retrieve(threadId!, run.id);
       }
-
       status = rnow.status;
-      if (status === 'requires_action') {
-        // Si usas herramientas, aquí manejarías tool_outputs
-        break;
-      }
+      if (status === 'requires_action') break;
     }
 
-    // 4) Leer mensajes (tomamos el último del asistente)
-    const list = await openai.beta.threads.messages.list(thread.id, {
-      order: 'desc',
-      limit: 10,
-    });
-
+    const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 });
     const firstAssistant = list.data.find((m) => m.role === 'assistant');
 
     let reply = '';
     if (firstAssistant) {
-      const chunks: string[] = [];
-      for (const c of firstAssistant.content) {
-        if (c.type === 'text') chunks.push(c.text.value || '');
-      }
-      reply = chunks.join('\n\n').trim();
+      reply = firstAssistant.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text?.value || '')
+        .join('\n\n')
+        .trim();
     }
 
-    return json(200, { reply, threadId: thread.id });
+    return json(200, { reply, threadId });
   } catch (err: any) {
     return json(500, { error: String(err?.message || err) });
   }
