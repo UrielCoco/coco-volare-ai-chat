@@ -15,22 +15,19 @@ export async function saveChatModelAsCookie(model: string) {
   cookieStore.set('chat-model', model);
 }
 
+
 export async function generateTitleFromUserMessage({
   message,
 }: {
   message: UIMessage;
 }) {
-  const { text: title } = await generateText({
-    model: myProvider.languageModel('title-model'),
-    system: `\n
-    - you will generate a short title based on the first message a user begins a conversation with
-    - ensure it is not more than 80 characters long
-    - the title should be a summary of the user's message
-    - do not use quotes or colons`,
-    prompt: JSON.stringify(message),
-  });
-
-  return title;
+  // Local, sin modelo: primeras 6 palabras de la entrada
+  const raw = typeof (message as any)?.content === 'string'
+    ? String((message as any).content)
+    : JSON.stringify(message);
+  const first = raw.replace(/\s+/g, ' ').trim().slice(0, 120);
+  const words = first.split(' ').slice(0, 6).join(' ');
+  return words || 'Nueva conversación';
 }
 
 export async function deleteTrailingMessages({ id }: { id: string }) {

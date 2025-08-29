@@ -12,33 +12,40 @@
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
-    //"moduleResolution": "bundler",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
+    "baseUrl": ".",
     "paths": {
       "@/*": [
         "./*"
       ]
-    }
+    },
+    "types": [
+      "node"
+    ],
+    "typeRoots": [
+      "./types",
+      "./node_modules/@types"
+    ]
   },
   "include": [
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
-    "next.config.js"
+    "next.config.js",
+    "types/shims.d.ts"
   ],
   "exclude": [
     "node_modules",
     ".next",
-    "public"
+    "public",
+    "artifacts",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "Downloads/**"
   ]
 }

@@ -1,29 +1,25 @@
-import { motion } from 'framer-motion';
-
+// components/greeting.tsx
+// Versión sin framer-motion (no requiere dependencia)
 export const Greeting = () => {
   return (
     <div
-      key="overview"
-      className="max-w-3xl mx-auto md:mt-20 px-8 size-full flex flex-col justify-center"
+      className="relative min-h-[60vh] w-full flex items-center justify-center"
+      style={{
+        backgroundImage: "url('/cv-bg.gif')",
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
     >
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 10 }}
-        transition={{ delay: 0.5 }}
-        className="text-2xl font-semibold"
-      >
-        Hello there!
-      </motion.div>
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 10 }}
-        transition={{ delay: 0.6 }}
-        className="text-2xl text-zinc-500"
-      >
-        How can I help you today?
-      </motion.div>
+      <div className="absolute inset-0 bg-black/50" />
+
+      <div className="relative z-10 max-w-3xl mx-auto px-8 text-center">
+        <div className="text-2xl md:text-3xl font-semibold text-white">
+          Hello there!
+        </div>
+        <div className="mt-2 text-xl md:text-2xl text-zinc-200">
+          How can I help you today?
+        </div>
+      </div>
     </div>
   );
 };
