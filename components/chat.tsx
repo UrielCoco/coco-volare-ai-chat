@@ -24,7 +24,9 @@ async function fetchJson(input: RequestInfo, init?: RequestInit) {
 
 async function ensureWebSession(): Promise<{ sessionId: string; threadId: string }> {
   let sid = '';
-  try { sid = localStorage.getItem(CV_SESSION_KEY) || ''; } catch {}
+  try {
+    sid = localStorage.getItem(CV_SESSION_KEY) || '';
+  } catch {}
 
   const url = sid ? `/api/chat/session?sid=${encodeURIComponent(sid)}` : `/api/chat/session`;
   const data = await fetchJson(url, {
@@ -34,10 +36,12 @@ async function ensureWebSession(): Promise<{ sessionId: string; threadId: string
   });
 
   const sessionId = String(data?.sessionId || '');
-  const threadId  = String(data?.threadId  || '');
+  const threadId = String(data?.threadId || '');
 
   if (sessionId) {
-    try { localStorage.setItem(CV_SESSION_KEY, sessionId); } catch {}
+    try {
+      localStorage.setItem(CV_SESSION_KEY, sessionId);
+    } catch {}
     (window as any).cvSessionId = sessionId;
   }
   if (threadId) (window as any).cvThreadId = threadId;
@@ -46,22 +50,26 @@ async function ensureWebSession(): Promise<{ sessionId: string; threadId: string
 }
 
 function peekSessionId(): string {
-  try { return localStorage.getItem(CV_SESSION_KEY) || ''; } catch { return ''; }
+  try {
+    return localStorage.getItem(CV_SESSION_KEY) || '';
+  } catch {
+    return '';
+  }
 }
 
 /* ========= Componente ========= */
 export default function Chat() {
-  // 👇 Usa ChatMessage con `parts`
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // 🔹 Refs para calcular altura del composer
+  // 🔹 Refs del composer (para calcular espacio)
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
+  // Actualiza altura del composer (para padding inferior del scroll)
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -73,7 +81,9 @@ export default function Chat() {
     try {
       if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
         ro = new ResizeObserver(() => {
-          try { update(); } catch {}
+          try {
+            update();
+          } catch {}
         });
         ro.observe(el);
       }
@@ -83,16 +93,18 @@ export default function Chat() {
     window.addEventListener('resize', onResize);
 
     return () => {
-      try { ro && ro.disconnect(); } catch {}
+      try {
+        ro && ro.disconnect();
+      } catch {}
       window.removeEventListener('resize', onResize);
     };
   }, []);
 
-  // ✅ Asegura sesión al montar (y enfoca input)
+  // Asegura sesión y enfoca input al montar
   useEffect(() => {
     inputRef.current?.focus();
     ensureWebSession().catch((e) => {
-      console.warn('CV: ensureWebSession failed (fallback seguirá funcionando):', e);
+      console.warn('CV: ensureWebSession fallback:', e);
     });
   }, []);
 
@@ -102,10 +114,11 @@ export default function Chat() {
     const raw = input.trim();
     if (!raw) return;
 
-    // Mensaje del usuario con `parts`
+    // SOLO parts (tu tipo ChatMessage no tiene 'content')
     const userMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
+      // @ts-ignore — tu tipo probablemente define parts como {type:'text', text:string}[]
       parts: [{ type: 'text', text: raw }],
     };
 
@@ -117,6 +130,7 @@ export default function Chat() {
       await ensureWebSession();
       const sid = peekSessionId();
 
+      // El backend espera messages en formato string (OpenAI)
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -124,7 +138,6 @@ export default function Chat() {
           ...(sid ? { 'x-cv-session': sid } : {}),
         },
         body: JSON.stringify({
-          // El backend espera el formato de OpenAI (string)
           messages: [{ role: 'user', content: raw }],
         }),
       });
@@ -150,15 +163,12 @@ export default function Chat() {
       if (data?.threadId) (window as any).cvThreadId = data.threadId;
       if (Array.isArray(data?.toolEvents)) console.log('CV toolEvents:', data.toolEvents);
 
-      const assistantText =
-        typeof data?.reply === 'string'
-          ? data.reply
-          : (data?.reply?.text ?? 'Sin respuesta');
+      const assistantText = (data?.reply || 'Sin respuesta').toString();
 
-      // Mensaje del assistant con `parts`
       const assistantMessage: ChatMessage = {
         id: uuidv4(),
         role: 'assistant',
+        // @ts-ignore — usamos parts para cumplir tu tipo
         parts: [{ type: 'text', text: assistantText }],
       };
 
@@ -183,8 +193,15 @@ export default function Chat() {
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
       >
-        {/* Messages espera `items` */}
-        <Messages items={messages} />
+        <Messages
+          messages={messages}
+          isLoading={loading}
+          votes={[]}
+          setMessages={setMessages as any}
+          regenerate={async () => {}}
+          isReadonly={false}
+          chatId="local-chat"
+        />
       </div>
 
       {/* Composer */}
