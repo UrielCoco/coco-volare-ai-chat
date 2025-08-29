@@ -1,17 +1,14 @@
-// app/(chat)/api/chat/session/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { db } from "@/lib/db";
 import { webSessionThread } from "@/lib/db/schema";
 import { eq, sql } from "drizzle-orm";
-import { kommoCreateLead } from "@/lib/kommo-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// ---------- DB helpers (a nivel módulo para evitar scope issues) ----------
 async function ensureTableExists() {
   const ddl = sql`
     CREATE TABLE IF NOT EXISTS "WebSessionThread" (
@@ -23,9 +20,8 @@ async function ensureTableExists() {
       "updatedAt" timestamptz NOT NULL,
       "kommoLeadId" varchar(64),
       "kommoContactId" varchar(64)
-    );
-  `;
-  // @ts-ignore drizzle variance
+    );`;
+  // @ts-ignore
   await (db.execute?.(ddl) ?? db.run?.(ddl));
 }
 
@@ -46,17 +42,6 @@ async function insertRow(sessionId: string, threadId: string) {
   });
 }
 
-async function updateRow(sessionId: string, patch: Record<string, any>) {
-  // @ts-ignore
-  await db.update(webSessionThread).set(patch).where(eq(webSessionThread.sessionId, sessionId));
-}
-
-// ---------- Memory fallback ----------
-const SESSION_MAP: Map<string, { threadId: string; updatedAt: number; kommoLeadId?: string }> =
-  (global as any).__cvSessionMap || new Map();
-(global as any).__cvSessionMap = SESSION_MAP;
-
-// ---------- Util ----------
 function uuidv4() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0;
@@ -65,45 +50,12 @@ function uuidv4() {
   });
 }
 
-async function ensureKommoLead(sessionId: string, nameHint?: string): Promise<number | null> {
-  try {
-    // DB first
-    try {
-      const rows = await getRowBySessionId(sessionId);
-      const row = rows?.[0];
-      if (row?.kommoLeadId) return Number(row.kommoLeadId);
-    } catch (e) {
-      // ignored
-    }
-    // Create via Hub/Kommo
-    const leadName = nameHint || `Coco Volare Webchat · ${sessionId.slice(0, 8)}`;
-    const res: any = await kommoCreateLead(leadName, { source: "webchat", notes: "Sesión iniciada desde webchat" });
-    const leadId = Number(res?.data?.lead_id || res?.data?.id || 0) || null;
-    if (leadId) {
-      try {
-        await updateRow(sessionId, { kommoLeadId: String(leadId) });
-      } catch (e) {
-        // en caso de que tabla no exista todavía
-        const mem = SESSION_MAP.get(sessionId) || { threadId: "", updatedAt: Date.now() };
-        mem.kommoLeadId = String(leadId);
-        SESSION_MAP.set(sessionId, mem);
-      }
-      return leadId;
-    }
-  } catch (e) {
-    console.warn("CV:/api/chat/session ensureKommoLead error", e);
-  }
-  return null;
-}
-
-// ---------- Handler ----------
 export async function GET(req: NextRequest) {
   try {
     const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
     const cookie = req.cookies.get("cv_session")?.value || "";
     const sessionId = cookie || uuidv4();
 
-    // 1) DB path
     let threadId: string | null = null;
     try {
       await ensureTableExists();
@@ -116,25 +68,11 @@ export async function GET(req: NextRequest) {
         await insertRow(sessionId, threadId);
       }
     } catch (e) {
-      console.warn("CV:/api/chat/session DB path failed → memory fallback", e);
+      console.warn("CV:/api/chat/session DB path failed → fallback", e);
+      const created = await openai.beta.threads.create({});
+      threadId = created.id;
     }
 
-    // 2) Memory fallback si DB falló
-    if (!threadId) {
-      const mem = SESSION_MAP.get(sessionId);
-      if (mem?.threadId) {
-        threadId = mem.threadId;
-      } else {
-        const created = await openai.beta.threads.create({});
-        threadId = created.id;
-        SESSION_MAP.set(sessionId, { threadId, updatedAt: Date.now() });
-      }
-    }
-
-    // 3) Asegurar lead en Kommo (no bloqueante)
-    ensureKommoLead(sessionId).catch(e => console.warn("CV:/api/chat/session kommo lead init failed", e));
-
-    // 4) Responder y setear cookie
     const res = NextResponse.json({ ok: true, sessionId, threadId });
     res.cookies.set("cv_session", sessionId, {
       httpOnly: false,

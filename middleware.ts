@@ -15,11 +15,12 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // ✅ Siempre permitir embed / APIs del chat / auth
+  // ✅ Siempre permitir embed / APIs del chat / auth / history (para analytics/SSR)
   if (
     pathname.startsWith('/embed') ||
     pathname.startsWith('/_embed') ||
     pathname.startsWith('/api/chat') ||
+    pathname.startsWith('/api/history') ||
     pathname.startsWith('/api/auth')
   ) {
     return NextResponse.next();
@@ -55,16 +56,13 @@ export async function middleware(request: NextRequest) {
 
 export const runtime = 'nodejs';
 
-// ⛑️ Importante: ya no metemos /api/:path* en el matcher para que NINGUNA API pase por el middleware.
-// (Si prefieres mantenerlo, no hay problema porque arriba whitelisteamos /api/chat.)
+// ⛑️ Importante: mantenemos el matcher como lo tienes (excluye /api/:path*) y además whitelisteamos /api/history arriba.
 export const config = {
-  
   matcher: [
     '/',
     '/chat/:id',
     '/login',
     '/register',
-    // Excluye estáticos y también /embed /_embed
     '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|embed|_embed).*)',
   ],
 };
