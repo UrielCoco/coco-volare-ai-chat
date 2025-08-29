@@ -5,23 +5,39 @@ import Messages from './messages';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-// ⚠️ Usa SIEMPRE los tipos del proyecto:
 import type { ChatMessage, UIMessagePart } from '@/lib/types';
+
+type Props = {
+  id?: string;
+  initialMessages?: ChatMessage[];
+  initialChatModel?: string;
+  initialVisibilityType?: string;
+  isReadonly?: boolean;
+  session?: any;
+  autoResume?: boolean;
+};
 
 const THREAD_KEY = 'cv_thread_id';
 
-// -------- helpers de parseo --------
+// ——— helpers de parseo ———
+const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
+
 function normalizeJSON(s: string) {
   return s
+    .replace(ZERO_WIDTH, '')
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
-    .replace(/,\s*([}\]])/g, '$1'); // comas colgantes comunes
+    .replace(/,\s*([}\]])/g, '$1'); // quita comas colgantes comunes
 }
 
-function findBlock(reply: string, label: 'cv:itinerary' | 'cv:quote'): string | null {
+function findBlock(reply: string, label: 'cv:itinerary' | 'cv:quote' | 'cv:kommo'): string | null {
   const re = new RegExp('```\\s*' + label + '\\s*([\\s\\S]*?)```', 'i');
   const m = reply.match(re);
   return m?.[1]?.trim() ?? null;
+}
+
+function stripBlock(reply: string, label: 'cv:kommo'): string {
+  return reply.replace(new RegExp('```\\s*' + label + '\\s*[\\s\\S]*?```', 'gi'), '').trim();
 }
 
 function parseItinerary(reply: string): any | null {
@@ -53,11 +69,12 @@ function parseQuote(reply: string): any | null {
     return null;
   }
 }
+// ——— fin helpers ———
 
-// ----------------------------------
-
-export default function Chat() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export default function Chat({
+  initialMessages = [],
+}: Props) {
+  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -102,7 +119,7 @@ export default function Chat() {
     const text = input.trim();
     if (!text || loading) return;
 
-    // mensaje del usuario con tipos del proyecto
+    // mensaje del usuario
     const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -131,16 +148,28 @@ export default function Chat() {
       const data = await res.json() as { reply: string; threadId: string };
       if (data?.threadId) setThreadId(data.threadId);
 
-      const reply = (data?.reply ?? '').toString();
+      const replyOrig = (data?.reply ?? '').toString();
 
-      // Parseo especial → produce UIMessagePart[]
-      const parts: UIMessagePart[] = (() => {
-        const itin = parseItinerary(reply);
-        if (itin) return [{ type: 'itinerary', itinerary: itin } as unknown as UIMessagePart];
-        const quote = parseQuote(reply);
-        if (quote) return [{ type: 'quote', quote } as unknown as UIMessagePart];
-        return [{ type: 'text', text: reply } as UIMessagePart];
-      })();
+      // 1) oculta cv:kommo
+      const reply = stripBlock(replyOrig, 'cv:kommo');
+
+      // 2) detectar itinerary / quote y texto visible
+      const itin = parseItinerary(reply);
+      const quote = parseQuote(reply);
+
+      const visibleText = reply
+        .replace(/```cv:itinerary[\s\S]*?```/gi, '')
+        .replace(/```cv:quote[\s\S]*?```/gi, '')
+        .trim();
+
+      const parts: UIMessagePart[] = [];
+      if (visibleText) parts.push({ type: 'text', text: visibleText } as UIMessagePart);
+      if (itin)       parts.push({ type: 'itinerary', itinerary: itin } as unknown as UIMessagePart);
+      else if (quote) parts.push({ type: 'quote', quote } as unknown as UIMessagePart);
+      if (parts.length === 0) parts.push({ type: 'text', text: reply } as UIMessagePart);
+
+      // diagnóstico
+      console.log('[CV][client] reply.parts', parts.map(p => p.type));
 
       const assistantMsg: ChatMessage = {
         id: uuidv4(),
@@ -156,7 +185,7 @@ export default function Chat() {
         {
           id: uuidv4(),
           role: 'assistant',
-          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y nº de personas?' } as UIMessagePart],
+          parts: [{ type: 'text', text: 'Ocurrió un error, lamentamos los inconvenientes.' } as UIMessagePart],
         } as ChatMessage,
       ]);
     } finally {
@@ -166,51 +195,52 @@ export default function Chat() {
 
   const SPACER = `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`;
 
-const hasVisibleChat = messages.some(
-  (m: any) => m?.role === 'user' || m?.role === 'assistant'
-);
-const showBackdrop = !hasVisibleChat ; // ← muestra GIF aunque existan 'system'
+  const hasVisibleChat = messages.some(
+    (m: any) => m?.role === 'user' || m?.role === 'assistant'
+  );
+  const showBackdrop = !hasVisibleChat;
 
   return (
     <div
-  className="relative flex flex-col w-full min-h-[100dvh] bg-white"
-  style={{ ['--composer-h' as any]: `${composerH}px` }}
->
-  {/* 🎬 Pre-chat: fondo blanco + GIF centrado (≈ 1/3 pantalla). SIN z negativo */}
-  {showBackdrop && (
-    <div className="absolute inset-0 z-0 grid place-items-center bg-white">
-      <img
-        src="/images/Texts.gif"
-        alt="Coco Volare"
-        className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[65vh]"
-        onError={(e) => {
-          // Fallback por si el nombre cambió a minúsculas
-          const img = e.currentTarget as HTMLImageElement;
-          if (!img.dataset.triedfallback) {
-            img.dataset.triedfallback = '1';
-            img.src = '/images/texts.gif';
-          }
-        }}
-      />
-    </div>
-  )}
+      className="relative flex flex-col w-full min-h-[100dvh] bg-white"
+      style={{ ['--composer-h' as any]: `${composerH}px` }}
+    >
+      {/* Pre-chat */}
+      {showBackdrop && (
+        <div className="absolute inset-0 z-0 grid place-items-center bg-white">
+          <img
+            src="/images/Texts.gif"
+            alt="Coco Volare"
+            className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[65vh]"
+            onError={(e) => {
+              const img = e.currentTarget as HTMLImageElement;
+              if (!img.dataset.triedfallback) {
+                img.dataset.triedfallback = '1';
+                img.src = '/images/texts.gif';
+              }
+            }}
+          />
+        </div>
+      )}
 
-  {/* Conversación encima del GIF */}
-  <div
-    className="relative z-10 flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
-    style={{ paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`,
-             scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)` }}
-  >
-    <Messages
-      messages={messages}
-      isLoading={loading}
-      votes={[]}
-      setMessages={({ messages: m }: any) => setMessages(m)}
-      regenerate={async () => {}}
-      isReadonly={false}
-      chatId="cv"
-    />
-  </div>
+      {/* Conversación */}
+      <div
+        className="relative z-10 flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
+        style={{
+          paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`,
+          scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom) + 8px)`,
+        }}
+      >
+        <Messages
+          messages={messages}
+          isLoading={loading}
+          votes={[]}
+          setMessages={({ messages: m }: any) => setMessages(m)}
+          regenerate={async () => {}}
+          isReadonly={false}
+          chatId="cv"
+        />
+      </div>
 
       {/* Composer */}
       <div

@@ -6,21 +6,17 @@ import ItineraryCard from './itinerary-card';
 export function PreviewMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
-  // Misma anchura para que TODO quede alineado
   const bubbleWidth = 'inline-block max-w-[92%] xl:max-w-[980px]';
-
   const isOnlyItinerary =
     Array.isArray(message.parts) &&
     message.parts.length === 1 &&
     message.parts[0]?.type === 'itinerary';
 
-  // Piel sin bordes (sombras)
   const userSkin =
     'bg-[#d8c69a] text-black shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]';
   const assistantSkin =
     'bg-black text-white shadow-[0_14px_32px_-14px_rgba(0,0,0,0.6)]';
 
-  // Itinerario también lleva padding lateral para NO rebasar
   const bubbleSkin = isOnlyItinerary
     ? 'bg-transparent shadow-none px-4 py-0'
     : (isUser ? `${userSkin} px-4 py-3` : `${assistantSkin} px-4 py-3`);
@@ -51,10 +47,10 @@ export function PreviewMessage({ message }: { message: ChatMessage }) {
             }
 
             if (part?.type === 'itinerary' && part?.itinerary) {
-              // margen inferior extra bajo la tarjeta
               return (
                 <div key={idx} className="my-2 mb-8">
-                  <ItineraryCard itinerary={part.itinerary} />
+                  {/* ✅ tu ItineraryCard recibe prop "data" */}
+                  <ItineraryCard data={part.itinerary} />
                 </div>
               );
             }

@@ -1,140 +1,88 @@
-import { NextRequest } from 'next/server';
-import OpenAI from 'openai';
+import { NextRequest, NextResponse } from "next/server";
+import { runAssistantOnce } from "@/lib/ai/providers/openai-assistant";
+import { kommoAddNote, kommoCreateLead } from "@/lib/kommo-sync";
 
-export const runtime = 'nodejs';
+const RE_KOMMO = /```cv:kommo\s*([\s\S]*?)```/i;
 
-// CV_DEBUG=0 para silenciar logs; cualquier otro valor = logs ON
-const DEBUG = process.env.CV_DEBUG !== '0';
+export const runtime = "nodejs";
+
+/** Extrae un leadId:number de respuestas diversas del wrapper de Kommo */
+function pickLeadId(x: any): number | null {
+  if (typeof x === "number") return x;
+  if (!x || typeof x !== "object") return null;
+  if (typeof x.lead_id === "number") return x.lead_id;
+  if (typeof x.id === "number") return x.id;
+  if (typeof x?.data?.lead_id === "number") return x.data.lead_id;
+  if (Array.isArray(x?.data?.leads) && typeof x.data.leads[0]?.id === "number") return x.data.leads[0].id;
+  return null;
+}
 
 export async function POST(req: NextRequest) {
-  const startedAt = Date.now();
+  const traceId = `cv_${Math.random().toString(36).slice(2)}`;
+
   try {
-    const body = await req.json().catch(() => ({}));
-    const raw = body?.message;
+    const body = await req.json().catch(() => ({} as any));
+    const rawText =
+      body?.message?.parts?.[0]?.text ??
+      body?.message?.text ??
+      body?.message ??
+      body?.text ??
+      "";
+    const userInput: string = String(rawText || "").trim();
+    const threadId = body?.threadId || body?.thread_id || undefined;
 
-    const text =
-      typeof raw?.parts?.[0]?.text === 'string'
-        ? raw.parts[0].text
-        : typeof raw?.text === 'string'
-        ? raw.text
-        : typeof raw === 'string'
-        ? raw
-        : '';
-
-    const assistantId = process.env.OPENAI_ASSISTANT_ID;
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!assistantId || !apiKey) {
-      return json(500, { error: 'Faltan OPENAI_ASSISTANT_ID / OPENAI_API_KEY' });
-    }
-
-    const openai = new OpenAI({ apiKey });
-
-    // ====== THREAD (memoria) ======
-    let threadId: string | null = body?.threadId ?? null;
-    if (DEBUG) console.log('[CV][server] incoming', { threadId, textPreview: text.slice(0, 120) });
-
-    if (threadId) {
-      await openai.beta.threads.messages.create(threadId, {
-        role: 'user',
-        content: text || 'Mensaje',
-      });
-      if (DEBUG) console.log('[CV][server] appended message to', threadId);
-    } else {
-      const t = await openai.beta.threads.create({
-        messages: [{ role: 'user', content: text || 'Mensaje' }],
-      });
-      threadId = t.id;
-      if (DEBUG) console.log('[CV][server] created thread', threadId);
-    }
-
-    // ====== RUN (sin tools + evita saludos repetidos) ======
-    const run = await openai.beta.threads.runs.create(threadId!, {
-      assistant_id: assistantId,
-
-      tool_choice: 'none',
-      additional_instructions:
-        'No uses herramientas. Continúa exactamente desde el último mensaje del usuario en este thread; NO repitas saludos ni reinicies el flujo. Si el usuario ya dio datos, úsalos y sigue.',
+    const { reply, threadId: ensuredThread } = await runAssistantOnce({
+      input: userInput,
+      threadId,
+      metadata: { source: "webchat" },
     });
-    if (DEBUG) console.log('[CV][server] run', { id: run.id, status: run.status });
 
-    // ====== Polling ======
-    const T_LIMIT = 45_000;
-    let status = run.status;
-    const t0 = Date.now();
-
-    while (!['completed', 'failed', 'cancelled'].includes(status) && Date.now() - t0 < T_LIMIT) {
-      await sleep(600);
-
-      // firmas nuevas y viejas del SDK
-      let rnow: any;
+    // --- Lee bloque oculto cv:kommo (no se muestra al cliente) ---
+    const m = reply.match(RE_KOMMO);
+    if (m?.[1]) {
       try {
-        rnow = await (openai as any).beta.threads.runs.retrieve(run.id, { thread_id: threadId });
-      } catch {
-        rnow = await (openai as any).beta.threads.runs.retrieve(threadId!, run.id);
-      }
-      status = rnow.status;
-      if (DEBUG) console.log('[CV][server] polling', { status });
+        const ops = JSON.parse(m[1]);
+        console.log("[CV][kommo] ops:", JSON.stringify(ops));
 
-      // Si (a pesar de tool_choice) pide herramientas → las "satisface" con salidas vacías para forzar la respuesta final
-      if (status === 'requires_action') {
-        const calls = rnow?.required_action?.submit_tool_outputs?.tool_calls ?? [];
-        if (calls.length && DEBUG) console.log('[CV][server] requires_action -> submitting dummy outputs', calls.length);
-        if (calls.length) {
+        (async () => {
           try {
-            await (openai as any).beta.threads.runs.submitToolOutputs(threadId!, run.id, {
-              tool_outputs: calls.map((c: any) => ({
-                tool_call_id: c.id,
-                output:
-                  'Tool execution disabled in this chat. Provide the final answer directly as text using the context of this thread.',
-              })),
-            });
-          } catch {
-            await (openai as any).beta.threads.runs.submit_tool_outputs(threadId!, run.id, {
-              tool_outputs: calls.map((c: any) => ({
-                tool_call_id: c.id,
-                output:
-                  'Tool execution disabled in this chat. Provide the final answer directly as text using the context of this thread.',
-              })),
-            });
+            const list = Array.isArray(ops?.ops) ? ops.ops : [];
+            let leadId: number | null = null;
+
+            // create_lead (tu lib espera STRING, no objeto)
+            if (list.some((o: any) => o?.action === "create_lead")) {
+              const created = await kommoCreateLead("Lead desde webchat");
+              leadId = pickLeadId(created);
+              console.log("[CV][kommo] leadId:", leadId);
+            }
+
+            // add_note (tu lib espera (leadId:number, text:string))
+            for (const op of list) {
+              if (op?.action === "add_note") {
+                const text = typeof op?.text === "string" ? op.text : `🧑‍💻 Usuario: ${userInput}`;
+                if (leadId != null) {
+                  await kommoAddNote(leadId, text);
+                } else {
+                  console.warn("[CV][kommo] add_note omitida: leadId nulo");
+                }
+              }
+            }
+          } catch (err) {
+            console.warn("[CV][kommo] failed:", err);
           }
-        }
+        })();
+      } catch (err) {
+        console.warn("[CV][kommo] invalid json:", err);
       }
     }
 
-    // ====== Leer último mensaje del asistente ======
-    const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 });
-    const lastAssistant = list.data.find((m) => m.role === 'assistant');
-
-    let reply = '';
-    if (lastAssistant) {
-      reply = lastAssistant.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text?.value || '')
-        .join('\n\n')
-        .trim();
-    }
-
-    if (DEBUG) {
-      console.log('[CV][server] reply ready', {
-        ms: Date.now() - startedAt,
-        replyPreview: reply.slice(0, 140),
-        threadId,
-      });
-    }
-
-    return json(200, { reply, threadId });
-  } catch (err: any) {
-    console.error('[CV][server] error', { ms: Date.now() - startedAt, message: String(err?.message || err) });
-    return json(500, { error: String(err?.message || err) });
+    // Al cliente: devolvemos la respuesta TAL CUAL (no tocamos cv:itinerary)
+    return NextResponse.json({ reply, threadId: ensuredThread || threadId || null });
+  } catch (e: any) {
+    console.error(JSON.stringify({ level: "error", tag: "[CV][server]", msg: "exception", meta: { traceId, error: String(e?.message || e) } }));
+    return NextResponse.json(
+      { reply: "Ocurrió un error, lamentamos los inconvenientes. / An error occurred, we apologize for the inconvenience." },
+      { status: 500 }
+    );
   }
-}
-
-function json(status: number, data: any) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
 }
