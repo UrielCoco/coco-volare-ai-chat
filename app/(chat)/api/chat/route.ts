@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
+
+// CV_DEBUG=0 para silenciar logs; cualquier otro valor = logs ON
 const DEBUG = process.env.CV_DEBUG !== '0';
 
 export async function POST(req: NextRequest) {
@@ -21,45 +23,49 @@ export async function POST(req: NextRequest) {
 
     const assistantId = process.env.OPENAI_ASSISTANT_ID;
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey || !assistantId) return json(500, { error: 'Faltan OPENAI_API_KEY / OPENAI_ASSISTANT_ID' });
+    if (!assistantId || !apiKey) {
+      return json(500, { error: 'Faltan OPENAI_ASSISTANT_ID / OPENAI_API_KEY' });
+    }
 
     const openai = new OpenAI({ apiKey });
 
-    // ▶ Reusar threadId si viene de cliente
+    // ====== THREAD (memoria) ======
     let threadId: string | null = body?.threadId ?? null;
     if (DEBUG) console.log('[CV][server] incoming', { threadId, textPreview: text.slice(0, 120) });
 
     if (threadId) {
-      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text || 'Mensaje' });
-      if (DEBUG) console.log('[CV][server] appended message to thread', threadId);
+      await openai.beta.threads.messages.create(threadId, {
+        role: 'user',
+        content: text || 'Mensaje',
+      });
+      if (DEBUG) console.log('[CV][server] appended message to', threadId);
     } else {
-      const thread = await openai.beta.threads.create({
+      const t = await openai.beta.threads.create({
         messages: [{ role: 'user', content: text || 'Mensaje' }],
       });
-      threadId = thread.id;
+      threadId = t.id;
       if (DEBUG) console.log('[CV][server] created thread', threadId);
     }
 
-    // 🚫 Forzar que NO use tools; algunos SDKs ignoran esto, por eso también manejamos requires_action abajo
+    // ====== RUN (sin tools + evita saludos repetidos) ======
     const run = await openai.beta.threads.runs.create(threadId!, {
       assistant_id: assistantId,
-      
+
       tool_choice: 'none',
       additional_instructions:
-        'No uses herramientas. Responde directamente en el chat con texto. Si generas un itinerario, incluye el bloque ```cv:itinerary con JSON válido.',
+        'No uses herramientas. Continúa exactamente desde el último mensaje del usuario en este thread; NO repitas saludos ni reinicies el flujo. Si el usuario ya dio datos, úsalos y sigue.',
     });
-    if (DEBUG) console.log('[CV][server] run created', { runId: run.id, status: run.status });
+    if (DEBUG) console.log('[CV][server] run', { id: run.id, status: run.status });
 
-    // Polling (soporta SDKs viejos/nuevos)
-    const t0 = Date.now();
+    // ====== Polling ======
+    const T_LIMIT = 45_000;
     let status = run.status;
-    while (
-      status !== 'completed' &&
-      status !== 'failed' &&
-      status !== 'cancelled' &&
-      Date.now() - t0 < 45_000
-    ) {
-      await wait(800);
+    const t0 = Date.now();
+
+    while (!['completed', 'failed', 'cancelled'].includes(status) && Date.now() - t0 < T_LIMIT) {
+      await sleep(600);
+
+      // firmas nuevas y viejas del SDK
       let rnow: any;
       try {
         rnow = await (openai as any).beta.threads.runs.retrieve(run.id, { thread_id: threadId });
@@ -69,27 +75,25 @@ export async function POST(req: NextRequest) {
       status = rnow.status;
       if (DEBUG) console.log('[CV][server] polling', { status });
 
+      // Si (a pesar de tool_choice) pide herramientas → las "satisface" con salidas vacías para forzar la respuesta final
       if (status === 'requires_action') {
-        // 🔧 Si el Assistant pidió tools, las cancelamos devolviendo tool_outputs vacíos
         const calls = rnow?.required_action?.submit_tool_outputs?.tool_calls ?? [];
-        if (calls.length && DEBUG) console.log('[CV][server] requires_action -> submitting empty tool outputs', calls.length);
-
+        if (calls.length && DEBUG) console.log('[CV][server] requires_action -> submitting dummy outputs', calls.length);
         if (calls.length) {
           try {
             await (openai as any).beta.threads.runs.submitToolOutputs(threadId!, run.id, {
               tool_outputs: calls.map((c: any) => ({
                 tool_call_id: c.id,
                 output:
-                  'Tool execution is disabled in this chat. Provide the final answer directly in text, in the chat.',
+                  'Tool execution disabled in this chat. Provide the final answer directly as text using the context of this thread.',
               })),
             });
-          } catch (e) {
-            // SDK alternativo
+          } catch {
             await (openai as any).beta.threads.runs.submit_tool_outputs(threadId!, run.id, {
               tool_outputs: calls.map((c: any) => ({
                 tool_call_id: c.id,
                 output:
-                  'Tool execution is disabled in this chat. Provide the final answer directly in text, in the chat.',
+                  'Tool execution disabled in this chat. Provide the final answer directly as text using the context of this thread.',
               })),
             });
           }
@@ -97,13 +101,13 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Obtener la última respuesta del asistente
+    // ====== Leer último mensaje del asistente ======
     const list = await openai.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 });
-    const firstAssistant = list.data.find((m) => m.role === 'assistant');
+    const lastAssistant = list.data.find((m) => m.role === 'assistant');
 
     let reply = '';
-    if (firstAssistant) {
-      reply = firstAssistant.content
+    if (lastAssistant) {
+      reply = lastAssistant.content
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text?.value || '')
         .join('\n\n')
@@ -113,7 +117,7 @@ export async function POST(req: NextRequest) {
     if (DEBUG) {
       console.log('[CV][server] reply ready', {
         ms: Date.now() - startedAt,
-        replyPreview: reply.slice(0, 120),
+        replyPreview: reply.slice(0, 140),
         threadId,
       });
     }
@@ -131,6 +135,6 @@ function json(status: number, data: any) {
     headers: { 'Content-Type': 'application/json' },
   });
 }
-function wait(ms: number) {
+function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }

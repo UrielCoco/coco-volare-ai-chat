@@ -95,7 +95,7 @@ export default function Messages({
           })}
         </AnimatePresence>
 
-        {/* 3 puntos animados cuando está pensando */}
+        {/* Pensando... */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
@@ -109,7 +109,7 @@ export default function Messages({
             >
               <div className="flex gap-4 w-full">
                 <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-[#000000] text-[#b69965] overflow-hidden">
-                  <img src="../images/Intelligence.gif" alt="..." className="w-full h-full object-cover" />
+                  <img src="/images/Intelligence.gif" alt="..." className="w-full h-full object-cover" />
                 </div>
                 <div className="rounded-2xl bg-black text-white/80 border border-white/10 px-4 py-2 shadow-sm inline-flex items-center gap-1">
                   <span className="animate-bounce" style={{ animationDelay: '-0.2s' }}>•</span>
@@ -120,7 +120,6 @@ export default function Messages({
             </motion.div>
           )}
         </AnimatePresence>
-
 
         <div style={{ height: SPACER }} />
         <div ref={anchorRef} style={{ height: 1 }} />
