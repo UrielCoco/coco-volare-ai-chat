@@ -6,7 +6,6 @@ const RE_KOMMO = /```cv:kommo\s*([\s\S]*?)```/i;
 
 export const runtime = "nodejs";
 
-/** Extrae un leadId:number de respuestas diversas del wrapper de Kommo */
 function pickLeadId(x: any): number | null {
   if (typeof x === "number") return x;
   if (!x || typeof x !== "object") return null;
@@ -37,34 +36,25 @@ export async function POST(req: NextRequest) {
       metadata: { source: "webchat" },
     });
 
-    // --- Lee bloque oculto cv:kommo (no se muestra al cliente) ---
+    // Procesa cv:kommo sin bloquear la respuesta
     const m = reply.match(RE_KOMMO);
     if (m?.[1]) {
       try {
         const ops = JSON.parse(m[1]);
-        console.log("[CV][kommo] ops:", JSON.stringify(ops));
-
         (async () => {
           try {
             const list = Array.isArray(ops?.ops) ? ops.ops : [];
             let leadId: number | null = null;
 
-            // create_lead (tu lib espera STRING, no objeto)
             if (list.some((o: any) => o?.action === "create_lead")) {
-              const created = await kommoCreateLead("Lead desde webchat");
+              const created = await kommoCreateLead("Lead desde webchat"); // ← STRING, no objeto
               leadId = pickLeadId(created);
-              console.log("[CV][kommo] leadId:", leadId);
             }
 
-            // add_note (tu lib espera (leadId:number, text:string))
             for (const op of list) {
-              if (op?.action === "add_note") {
+              if (op?.action === "add_note" && leadId != null) {
                 const text = typeof op?.text === "string" ? op.text : `🧑‍💻 Usuario: ${userInput}`;
-                if (leadId != null) {
-                  await kommoAddNote(leadId, text);
-                } else {
-                  console.warn("[CV][kommo] add_note omitida: leadId nulo");
-                }
+                await kommoAddNote(leadId, text); // ← (leadId:number, text:string)
               }
             }
           } catch (err) {
@@ -76,7 +66,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Al cliente: devolvemos la respuesta TAL CUAL (no tocamos cv:itinerary)
     return NextResponse.json({ reply, threadId: ensuredThread || threadId || null });
   } catch (e: any) {
     console.error(JSON.stringify({ level: "error", tag: "[CV][server]", msg: "exception", meta: { traceId, error: String(e?.message || e) } }));

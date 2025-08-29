@@ -1,121 +1,112 @@
 // lib/ai/providers/openai-assistant.ts
-// Provider limpio SIN tools, maneja fallos con fallback bilingüe
-// y devuelve siempre la última respuesta del Assistant.
-
 import OpenAI from "openai";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_ASSISTANT_ID =
-  process.env.OPENAI_ASSISTANT_ID || process.env.NEXT_PUBLIC_OPENAI_ASSISTANT_ID || "";
+type RunOnceParams = {
+  input: string;
+  threadId?: string | null;
+  metadata?: Record<string, string>;
+};
 
-if (!OPENAI_API_KEY) console.warn("⚠️ OPENAI_API_KEY no está definido");
-if (!OPENAI_ASSISTANT_ID) console.warn("⚠️ OPENAI_ASSISTANT_ID no está definido");
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-async function createThread(meta?: Record<string, any>): Promise<string> {
-  const created = await (client as any).beta.threads.create({
-    metadata: { source: "webchat", ...(meta || {}) },
-  } as any);
-  return (created as any).id as string;
+function log(level: "info" | "error", msg: string, meta: any = {}) {
+  try { console.log(JSON.stringify({ level, tag: "[CV][ast]", msg, meta })); } catch {}
 }
-async function addUserMessage(threadId: string, content: string) {
-  const api: any = (client as any).beta.threads.messages;
+
+/** Helpers compatibles con SDK moderno/antiguo */
+async function createThread(metadata?: Record<string, any>) {
+  try { return await (client.beta.threads as any).create({ metadata }); }
+  catch { return await (client.beta.threads as any).create(); }
+}
+async function appendUserMessage(threadId: string, content: string) {
   try {
-    return await api.create(threadId, { role: "user", content });
+    return await (client.beta.threads.messages as any).create({
+      thread_id: threadId, role: "user", content
+    });
   } catch {
-    return await api.create({ thread_id: threadId, role: "user", content });
+    return await (client.beta.threads.messages as any).create(threadId, {
+      role: "user", content
+    });
   }
 }
 async function createRun(threadId: string, assistantId: string) {
-  const api: any = (client as any).beta.threads.runs;
-  const payload = { assistant_id: assistantId };
   try {
-    return await api.create(threadId, payload);
+    return await (client.beta.threads.runs as any).create({
+      assistant_id: assistantId, thread_id: threadId
+    });
   } catch {
-    return await api.create({ thread_id: threadId, ...payload });
+    return await (client.beta.threads.runs as any).create(threadId, {
+      assistant_id: assistantId
+    });
   }
 }
 async function retrieveRun(threadId: string, runId: string) {
-  const api: any = (client as any).beta.threads.runs;
-  try {
-    return await api.retrieve({ thread_id: threadId, run_id: runId });
-  } catch {
-    return await api.retrieve(threadId, runId);
-  }
+  try { return await (client.beta.threads.runs as any).retrieve(runId, { thread_id: threadId }); }
+  catch { return await (client.beta.threads.runs as any).retrieve(threadId, runId); }
 }
-async function listMessages(threadId: string, limit = 50) {
-  const api: any = (client as any).beta.threads.messages;
-  try { return await api.list({ thread_id: threadId, limit }); }
-  catch { return await api.list(threadId, { limit }); }
+async function listMessages(threadId: string) {
+  try { return await (client.beta.threads.messages as any).list({ thread_id: threadId, order: "desc", limit: 10 }); }
+  catch { return await (client.beta.threads.messages as any).list(threadId, { order: "desc", limit: 10 }); }
 }
 
-export async function runAssistantOnce(opts: {
-  input: string;
-  threadId?: string;
-  metadata?: Record<string, any>;
-}): Promise<{ reply: string; threadId: string }> {
-  const traceId = `ast_${Math.random().toString(36).slice(2)}`;
-  const startTs = Date.now();
-  try {
-    const threadId = opts.threadId || (await createThread(opts.metadata));
-    console.log(JSON.stringify({ level: "info", tag: "[CV][ast]", traceId, msg: "thread.ready", meta: { threadId } }));
+export async function runAssistantOnce({
+  input,
+  threadId,
+  metadata = {},
+}: RunOnceParams): Promise<{ reply: string; threadId: string }> {
+  if (!ASSISTANT_ID) throw new Error("OPENAI_ASSISTANT_ID is not set");
 
-    await addUserMessage(threadId, opts.input);
-    console.log(JSON.stringify({ level: "info", tag: "[CV][ast]", traceId, msg: "message.user.appended", meta: { preview: opts.input.slice(0, 120) } }));
-
-    const run: any = await createRun(threadId, OPENAI_ASSISTANT_ID);
-    console.log(JSON.stringify({ level: "info", tag: "[CV][ast]", traceId, msg: "run.created", meta: { runId: run.id, status: run.status } }));
-
-    const terminal = new Set(["completed", "failed", "cancelled", "expired"]);
-    let status: string = run.status;
-    let guard = 0;
-
-    while (!terminal.has(status)) {
-      await new Promise((r) => setTimeout(r, 800));
-      const last = await retrieveRun(threadId, run.id) as any;
-      status = last.status;
-      console.log(JSON.stringify({ level: "info", tag: "[CV][ast]", traceId, msg: "run.poll", meta: { status, last_error: last?.last_error } }));
-      guard++;
-      if (guard > 120) { console.warn("[CV][ast] run timeout"); break; }
-    }
-
-    const msgs: any = await listMessages(threadId, 50);
-    const data: any[] = Array.isArray(msgs?.data) ? msgs.data : Array.isArray(msgs?.body?.data) ? msgs.body.data : [];
-    const assistants = data.filter((m: any) => m.role === "assistant");
-
-    const fresh = assistants.filter((m: any) => (m.created_at ? m.created_at * 1000 >= startTs : true))
-                            .sort((a: any, b: any) => (a.created_at || 0) - (b.created_at || 0));
-
-    const chosen = fresh.length ? fresh[fresh.length - 1] : assistants[assistants.length - 1];
-    let reply = "";
-
-    if (chosen?.content?.length) {
-      for (const c of chosen.content) {
-        if (c.type === "text") reply += c.text?.value ?? "";
-      }
-    }
-
-    if (!reply) {
-      reply = opts.input.match(/[a-zA-Z]/)
-        ? "An error occurred, we apologize for the inconvenience."
-        : "Ocurrió un error, lamentamos los inconvenientes.";
-    }
-
-    console.log(JSON.stringify({
-      level: "info",
-      tag: "[CV][ast]",
-      traceId,
-      msg: "reply.ready",
-      meta: { status, replyPreview: reply.slice(0, 140), totalMsgs: data?.length ?? 0 }
-    }));
-
-    return { reply, threadId };
-  } catch (e: any) {
-    console.error(JSON.stringify({ level: "error", tag: "[CV][ast]", traceId, msg: "exception", meta: { error: String(e?.message || e) } }));
-    const reply = opts.input.match(/[a-zA-Z]/)
-      ? "An error occurred, we apologize for the inconvenience."
-      : "Ocurrió un error, lamentamos los inconvenientes.";
-    return { reply, threadId: opts.threadId || "" };
+  // 1) Garantizar threadId como string SIEMPRE
+  let ensuredThreadId: string;
+  if (threadId && typeof threadId === "string" && threadId.trim().length > 0) {
+    ensuredThreadId = threadId;
+  } else {
+    const t = await createThread(metadata);
+    ensuredThreadId = String((t as any).id);
   }
+  log("info", "thread.ready", { threadId: ensuredThreadId });
+
+  // 2) Mensaje del usuario
+  await appendUserMessage(ensuredThreadId, input);
+  log("info", "message.user.appended", { preview: input.slice(0, 160) });
+
+  // 3) Run
+  const run = await createRun(ensuredThreadId, ASSISTANT_ID);
+  log("info", "run.created", { runId: run.id, status: run.status });
+
+  // 4) Poll
+  const start = Date.now();
+  const DEADLINE = 90_000;
+  while (true) {
+    if (Date.now() - start > DEADLINE) {
+      log("error", "run.timeout", { runId: run.id });
+      throw new Error("Run timeout");
+    }
+    const cur = await retrieveRun(ensuredThreadId, run.id);
+    if (cur.status === "completed") break;
+    if (["failed","expired","cancelled","incomplete","requires_action"].includes(cur.status as string)) {
+      log("error", "run.failed", { status: cur.status, last_error: (cur as any)?.last_error });
+      throw new Error(`Run status: ${cur.status}`);
+    }
+    await new Promise(r => setTimeout(r, 900));
+  }
+
+  // 5) Mensaje del asistente
+  const msgs = await listMessages(ensuredThreadId);
+  let reply = "";
+  for (const m of msgs.data) {
+    if (m.role !== "assistant") continue;
+    for (const c of m.content) if (c.type === "text") reply += (c.text?.value || "") + "\n";
+    if (reply.trim()) break;
+  }
+  reply = reply.trim() || "Ocurrió un error, lamentamos los inconvenientes. / An error occurred, we apologize for the inconvenience.";
+
+  log("info", "reply.ready", {
+    ms: Date.now() - start,
+    replyPreview: reply.slice(0, 160),
+    threadId: ensuredThreadId,
+  });
+
+  return { reply, threadId: ensuredThreadId };
 }
