@@ -11,7 +11,7 @@ type RegenerateFn = () => Promise<void> | void;
 interface Props {
   messages: ChatMessage[];
   isLoading: boolean;
-  votes?: any[];
+  votes?: any[]; // opcional — si lo usas, ajústalo a tu tipo real de Vote
   setMessages: SetMessagesFn;
   regenerate: RegenerateFn;
   isReadonly: boolean;
@@ -30,6 +30,7 @@ export default function Messages({
   const scrollRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
 
+  // espacio que reserva el composer fijo
   const SPACER = 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 20px)';
 
   const toBottom = () => {
@@ -39,11 +40,13 @@ export default function Messages({
     if (el) el.scrollTop = el.scrollHeight;
   };
 
+  // autoscroll al agregar mensajes o cambiar loading
   useLayoutEffect(() => {
     const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
     return () => cancelAnimationFrame(id);
   }, [messages.length, isLoading]);
 
+  // autoscroll durante renders de markdown/typewriter
   useEffect(() => {
     const root = scrollRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
@@ -67,35 +70,23 @@ export default function Messages({
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
       >
         <AnimatePresence mode="popLayout">
-          {messages.map((message) => {
-            const vote = votes.find?.((v) => v?.messageId === message.id);
-            return (
-              <motion.div
-                key={message.id}
-                className="chat-message"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 10 }}
-                transition={{ duration: 0.25 }}
-                style={{ scrollMarginBottom: SPACER }}
-              >
-                <PreviewMessage
-                  key={message.id}
-                  message={message}
-                  chatId={chatId}
-                  vote={vote}
-                  isLoading={isLoading}
-                  setMessages={setMessages}
-                  regenerate={regenerate}
-                  isReadonly={isReadonly}
-                  requiresScrollPadding={false}
-                />
-              </motion.div>
-            );
-          })}
+          {messages.map((message) => (
+            <motion.div
+              key={message.id}
+              className="chat-message"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.25 }}
+              style={{ scrollMarginBottom: SPACER }}
+            >
+              {/* ✅ Solo pasamos la prop que PreviewMessage realmente espera */}
+              <PreviewMessage message={message} />
+            </motion.div>
+          ))}
         </AnimatePresence>
 
-        {/* Pensando... */}
+        {/* Indicador “pensando…” (opcional) */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div

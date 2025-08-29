@@ -2,11 +2,59 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Messages from './messages';
-import type { ChatMessage } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 import { PaperPlaneIcon } from '@radix-ui/react-icons';
 
-const KEY = 'cv_thread_id';
+// ⚠️ Usa SIEMPRE los tipos del proyecto:
+import type { ChatMessage, UIMessagePart } from '@/lib/types';
+
+const THREAD_KEY = 'cv_thread_id';
+
+// -------- helpers de parseo --------
+function normalizeJSON(s: string) {
+  return s
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1'); // comas colgantes comunes
+}
+
+function findBlock(reply: string, label: 'cv:itinerary' | 'cv:quote'): string | null {
+  const re = new RegExp('```\\s*' + label + '\\s*([\\s\\S]*?)```', 'i');
+  const m = reply.match(re);
+  return m?.[1]?.trim() ?? null;
+}
+
+function parseItinerary(reply: string): any | null {
+  const candidates: string[] = [];
+  const tagged = findBlock(reply, 'cv:itinerary');
+  if (tagged) candidates.push(tagged);
+
+  const mJson = reply.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (mJson?.[1]) candidates.push(mJson[1].trim());
+
+  const t = reply.trim();
+  if (t.startsWith('{') && t.endsWith('}')) candidates.push(t);
+
+  for (const raw of candidates) {
+    try {
+      const obj = JSON.parse(normalizeJSON(raw));
+      if (obj && Array.isArray(obj.days) && obj.days.length > 0) return obj;
+    } catch {}
+  }
+  return null;
+}
+
+function parseQuote(reply: string): any | null {
+  const block = findBlock(reply, 'cv:quote');
+  if (!block) return null;
+  try {
+    return JSON.parse(normalizeJSON(block));
+  } catch {
+    return null;
+  }
+}
+
+// ----------------------------------
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -17,7 +65,7 @@ export default function Chat() {
   const composerRef = useRef<HTMLDivElement | null>(null);
   const [composerH, setComposerH] = useState<number>(96);
 
-  // ===== medir altura composer y exponer --composer-h =====
+  // medir altura composer y exponer --composer-h
   useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -35,16 +83,16 @@ export default function Chat() {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  // Helpers de memoria de hilo por sesión de ventana
+  // threadId por sesión de pestaña (memoria mientras la ventana está abierta)
   const getThreadId = () => {
     try {
-      return sessionStorage.getItem(KEY) || localStorage.getItem(KEY) || null;
+      return sessionStorage.getItem(THREAD_KEY) || localStorage.getItem(THREAD_KEY) || null;
     } catch { return null; }
   };
   const setThreadId = (id: string) => {
     try {
-      sessionStorage.setItem(KEY, id);
-      localStorage.setItem(KEY, id); // fallback si el usuario reabre en la misma pestaña
+      sessionStorage.setItem(THREAD_KEY, id);
+      localStorage.setItem(THREAD_KEY, id);
       (window as any).cvThreadId = id;
     } catch {}
   };
@@ -54,24 +102,19 @@ export default function Chat() {
     const text = input.trim();
     if (!text || loading) return;
 
-    const user: ChatMessage = {
+    // mensaje del usuario con tipos del proyecto
+    const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      parts: [{ type: 'text', text }],
+      parts: [{ type: 'text', text } as UIMessagePart],
       createdAt: new Date().toISOString(),
     };
-    setMessages((p) => [...p, user]);
+    setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
     try {
       const threadId = (window as any).cvThreadId || getThreadId();
-
-      console.log('[CV][client] sending ->', {
-        textPreview: text.slice(0, 80),
-        threadId,
-      });
-
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -81,34 +124,40 @@ export default function Chat() {
       const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
         const t = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
-        console.error('[CV][client] /api/chat error', res.status, t);
         throw new Error(`HTTP ${res.status}: ${t.slice(0, 300)}`);
       }
       if (!ct.includes('application/json')) throw new Error('Respuesta no-JSON');
 
-      const data = await res.json(); // { reply, threadId }
+      const data = await res.json() as { reply: string; threadId: string };
       if (data?.threadId) setThreadId(data.threadId);
 
-      console.log('[CV][client] received <-', {
-        replyPreview: (data?.reply ?? '').slice(0, 80),
-        threadId: data?.threadId,
-      });
+      const reply = (data?.reply ?? '').toString();
 
-      const assistant: ChatMessage = {
+      // Parseo especial → produce UIMessagePart[]
+      const parts: UIMessagePart[] = (() => {
+        const itin = parseItinerary(reply);
+        if (itin) return [{ type: 'itinerary', itinerary: itin } as unknown as UIMessagePart];
+        const quote = parseQuote(reply);
+        if (quote) return [{ type: 'quote', quote } as unknown as UIMessagePart];
+        return [{ type: 'text', text: reply } as UIMessagePart];
+      })();
+
+      const assistantMsg: ChatMessage = {
         id: uuidv4(),
         role: 'assistant',
-        parts: [{ type: 'text', text: (data?.reply ?? '').toString() || '…' }],
+        parts,
+        createdAt: new Date().toISOString(),
       };
-      setMessages((p) => [...p, assistant]);
+      setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      console.error('[CV][client] exception', err);
-      setMessages((p) => [
-        ...p,
+      console.error('[CV][client] /api/chat error', err);
+      setMessages((prev) => [
+        ...prev,
         {
           id: uuidv4(),
           role: 'assistant',
-          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y nº de personas?' }],
-        },
+          parts: [{ type: 'text', text: 'Tuvimos un problema. ¿Destino, fechas y nº de personas?' } as UIMessagePart],
+        } as ChatMessage,
       ]);
     } finally {
       setLoading(false);
@@ -123,18 +172,18 @@ export default function Chat() {
       className="relative flex flex-col w-full min-h-[100dvh] bg-white"
       style={{ ['--composer-h' as any]: `${composerH}px` }}
     >
-      {/* ===== Pre-chat: fondo blanco con GIF centrado (≈ 1/3 pantalla), sin gradientes ===== */}
+      {/* Pre-chat: fondo blanco + GIF centrado a ~1/3 de la pantalla */}
       {showBackdrop && (
         <div className="pointer-events-none fixed inset-0 -z-10 grid place-items-center bg-white">
           <img
-            src="/images/Texts.gif"
+            src="/images/Texts.gif" // ⚠️ ruta ABSOLUTA desde /public
             alt="Coco Volare"
             className="w-auto h-auto object-contain max-w-[min(92vw,900px)] max-h-[33vh]"
           />
         </div>
       )}
 
-      {/* Mensajes */}
+      {/* Conversación */}
       <div
         className="flex-1 min-h-0 overflow-y-auto px-0 py-0 scroll-smooth"
         style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
@@ -150,7 +199,7 @@ export default function Chat() {
         />
       </div>
 
-      {/* Composer fijo negro/dorado */}
+      {/* Composer */}
       <div
         ref={composerRef}
         className="fixed inset-x-0 bottom-0 z-50 border-t border-[#b69965]/25 bg-black/90 backdrop-blur"
@@ -163,16 +212,14 @@ export default function Chat() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Escribe tu mensaje…"
-              className="flex-1 rounded-full px-4 py-3 bg-black text-white
-                         placeholder-white/50 border border-[#b69965]/40
-                         focus:outline-none focus:ring-2 focus:ring-[#b69965]/60"
+              className="flex-1 rounded-full px-4 py-3 bg-black text-white placeholder-white/50
+                         border border-[#b69965]/40 focus:outline-none focus:ring-2 focus:ring-[#b69965]/60"
             />
             <button
               type="submit"
               disabled={loading || !input.trim()}
               className="h-12 w-12 rounded-full grid place-items-center bg-[#b69965] text-black disabled:opacity-50"
-              title="Enviar"
-              aria-label="Enviar"
+              title="Enviar" aria-label="Enviar"
             >
               {loading ? '…' : <PaperPlaneIcon className="w-5 h-5" />}
             </button>
