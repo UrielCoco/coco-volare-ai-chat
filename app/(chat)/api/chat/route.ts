@@ -5,13 +5,12 @@ import OpenAI from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-// ---------- Utils ----------
-const logI = (...args: any[]) => console.info('[CV][server]', ...args);
-const logE = (...args: any[]) => console.error('[CV][server]', ...args);
+// ---------- Logs ----------
+const logI = (...a: any[]) => console.info('[CV][server]', ...a);
+const logE = (...a: any[]) => console.error('[CV][server]', ...a);
 
 // ---------- Kommo ----------
 const HAS_KOMMO = Boolean(process.env.KOMMO_BASE_URL && process.env.KOMMO_API_KEY);
-
 async function upsertKommo(payload: any) {
   if (!HAS_KOMMO) {
     logI('[kommo] saltado: faltan envs');
@@ -26,16 +25,15 @@ async function upsertKommo(payload: any) {
       },
       body: JSON.stringify(payload),
     });
-
     let data: any = null;
-    try { data = await res.json(); } catch { /* puede no devolver JSON */ }
+    try { data = await res.json(); } catch {}
     logI('[kommo] upsert ok', { status: res.status, data });
   } catch (err) {
     logE('[kommo] upsert error', err);
   }
 }
 
-// ---------- Heurística simple de lead ----------
+// ---------- Hints de lead ----------
 function extractLeadHints(text: string) {
   const t = (text || '').trim();
   const paxMatch =
@@ -52,36 +50,35 @@ function extractLeadHints(text: string) {
   return { destino, fechas: dateIso || dateLatam, pax, email, whatsapp };
 }
 
-// ---------- Parseo de bloques cv:itinerary / cv:quote ----------
+// ---------- Parser de bloques cv:itinerary / cv:quote ----------
 function parsePartsFromText(text: string): any[] {
   const parts: any[] = [];
   if (!text) return parts;
-  const fenceRegex = /```(cv:(itinerary|quote))\s*([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let m: RegExpExecArray | null;
 
-  while ((m = fenceRegex.exec(text))) {
-    const [full, , subType, body] = m;
+  const fence = /```(cv:(itinerary|quote))\s*([\s\S]*?)```/g;
+  let last = 0; let m: RegExpExecArray | null;
+  while ((m = fence.exec(text))) {
+    const [full, , subtype, body] = m;
     const start = m.index;
-    const before = text.slice(lastIndex, start).trim();
+    const before = text.slice(last, start).trim();
     if (before) parts.push({ type: 'text', text: before });
 
-    if (subType === 'itinerary') {
+    if (subtype === 'itinerary') {
       try { parts.push({ type: 'itinerary', itinerary: JSON.parse(body.trim()) }); }
       catch { parts.push({ type: 'text', text: body.trim() }); }
-    } else if (subType === 'quote') {
+    } else if (subtype === 'quote') {
       try { parts.push({ type: 'quote', quote: JSON.parse(body.trim()) }); }
       catch { parts.push({ type: 'text', text: body.trim() }); }
     }
-    lastIndex = m.index + full.length;
+    last = m.index + full.length;
   }
-  const tail = text.slice(lastIndex).trim();
+  const tail = text.slice(last).trim();
   if (tail) parts.push({ type: 'text', text: tail });
   if (parts.length === 0) parts.push({ type: 'text', text });
   return parts;
 }
 
-// ---------- Helpers OpenAI ----------
+// ---------- OpenAI helpers ----------
 async function ensureThread(threadId?: string) {
   if (threadId) return threadId;
   const th = await openai.beta.threads.create({});
@@ -89,65 +86,65 @@ async function ensureThread(threadId?: string) {
 }
 
 async function appendUserMessage(threadId: string, text: string) {
-  // OpenAI 400 si content vacío: por eso validamos antes
-  await openai.beta.threads.messages.create(threadId, {
-    role: 'user',
-    content: text,
-  });
+  await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
 }
 
 async function runAssistant(threadId: string) {
-  const assistantId = process.env.OPENAI_ASSISTANT_ID!;
   const run = await openai.beta.threads.runs.create(threadId, {
-    assistant_id: assistantId,
+    assistant_id: process.env.OPENAI_ASSISTANT_ID!,
   });
   return run.id;
 }
 
-/** Compat firma vieja/nueva:
- *  - Antiguo: runs.retrieve(threadId, runId)
- *  - Nuevo:   runs.retrieve({ thread_id, run_id })
+/**
+ * Compat sin “desacoplar” métodos (para no perder this/_client):
+ * 1) Intento firma vieja: retrieve(threadId, runId)
+ * 2) Si falla, intento firma nueva: retrieve({ thread_id, run_id })
  */
 async function retrieveRunSafe(threadId: string, runId: string): Promise<any> {
-  const fn: any = (openai as any).beta.threads.runs.retrieve;
-  if (typeof fn === 'function' && fn.length >= 2) {
-    return await fn(threadId, runId);
-  }
   try {
-    return await fn({ thread_id: threadId, run_id: runId });
-  } catch {
     return await (openai as any).beta.threads.runs.retrieve(threadId, runId);
+  } catch (e1) {
+    try {
+      return await (openai as any).beta.threads.runs.retrieve({
+        thread_id: threadId,
+        run_id: runId,
+      });
+    } catch (e2) {
+      throw e2;
+    }
   }
 }
 
-/** Compat firma vieja/nueva de messages.list */
+/** list messages: firma vieja y nueva, sin desacoplar */
 async function listMessagesSafe(threadId: string, limit = 20): Promise<any> {
-  const fn: any = (openai as any).beta.threads.messages.list;
-  if (typeof fn === 'function' && fn.length >= 2) {
-    // firma vieja: list(threadId, { limit })
-    return await fn(threadId, { limit });
-  }
   try {
-    // firma nueva: list({ thread_id, limit })
-    return await fn({ thread_id: threadId, limit });
-  } catch {
     return await (openai as any).beta.threads.messages.list(threadId, { limit });
+  } catch (e1) {
+    try {
+      return await (openai as any).beta.threads.messages.list({
+        thread_id: threadId,
+        limit,
+      });
+    } catch (e2) {
+      throw e2;
+    }
   }
 }
 
 async function pollRun(threadId: string, runId: string, timeoutMs = 60_000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     const run = await retrieveRunSafe(threadId, runId);
     if (run.status === 'completed') {
-      logI('[CV][server] run completed', { threadId, runId });
+      logI('run completed', { threadId, runId });
       return run;
     }
     if (['failed', 'cancelled', 'expired'].includes(run.status)) {
-      logI('[CV][server] run final', { status: run.status });
+      logI('run final', { status: run.status });
       return run;
     }
-    logI('[CV][server] polling', { status: run.status });
+    logI('polling', { status: run.status });
     await new Promise((r) => setTimeout(r, 1000));
   }
   throw new Error('Run polling timeout');
@@ -167,7 +164,7 @@ async function getLastAssistantMessage(threadId: string): Promise<string> {
   return '';
 }
 
-// ---------- Handler principal ----------
+// ---------- Handler ----------
 export async function POST(req: NextRequest) {
   try {
     const { text, threadId: threadIn, meta } = await req.json();
@@ -176,12 +173,12 @@ export async function POST(req: NextRequest) {
 
     const threadId = await ensureThread(threadIn);
 
-    // ⛔️ FIX: si text vacío, NO llamamos messages.create (evita 400 de OpenAI)
+    // Evitar 400 "Missing content" si es bootstrap/ping
     if (userText.length > 0) {
       await appendUserMessage(threadId, userText);
       logI('appended message to thread', threadId);
 
-      // Sólo subimos a Kommo si hay mensaje real del usuario
+      // Kommo sólo con texto real
       const hints = extractLeadHints(userText);
       upsertKommo({
         lead: {
@@ -206,25 +203,22 @@ export async function POST(req: NextRequest) {
     await pollRun(threadId, runId);
 
     const assistantText = await getLastAssistantMessage(threadId);
-    logI('reply ready', {
-      ms: Date.now(),
-      replyPreview: assistantText.slice(0, 140),
-      threadId,
-    });
+    logI('reply ready', { replyPreview: assistantText.slice(0, 140), threadId });
 
     const parts = parsePartsFromText(assistantText);
 
-    // CTA tras itinerario (en el idioma del JSON si viene)
-    const hasItinerary = parts.some((p) => p.type === 'itinerary');
-    if (hasItinerary) {
+    // CTA al final si hubo itinerario
+    if (parts.some((p) => p.type === 'itinerary')) {
       try {
         const it = parts.find((p) => p.type === 'itinerary')?.itinerary;
         const lang = String(it?.lang || '').toLowerCase().startsWith('es') ? 'es' : 'en';
-        const msg =
-          lang === 'es'
-            ? '¿Continuamos con la cotización o prefieres que te contacte un asesor?'
-            : 'Shall we proceed with the quote, or would you like an advisor to contact you?';
-        parts.push({ type: 'text', text: msg });
+        parts.push({
+          type: 'text',
+          text:
+            lang === 'es'
+              ? '¿Continuamos con la cotización o prefieres que te contacte un asesor?'
+              : 'Shall we proceed with the quote, or would you like an advisor to contact you?',
+        });
       } catch {}
     }
 
@@ -235,7 +229,6 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// -------- Healthcheck --------
 export async function GET() {
   return NextResponse.json({
     ok: true,
