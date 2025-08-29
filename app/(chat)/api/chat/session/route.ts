@@ -51,6 +51,7 @@ function uuidv4() {
 }
 
 export async function GET(req: NextRequest) {
+  const traceId = `ses_${Math.random().toString(36).slice(2)}`;
   try {
     const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
     const cookie = req.cookies.get("cv_session")?.value || "";
@@ -62,15 +63,17 @@ export async function GET(req: NextRequest) {
       const rows = await getRowBySessionId(sessionId);
       if (rows?.[0]?.threadId) {
         threadId = rows[0].threadId;
+        console.log(JSON.stringify({ level: "info", tag: "[CV][session]", traceId, msg: "thread.from.db", meta: { sessionId, threadId } }));
       } else {
         const created = await openai.beta.threads.create({});
-        threadId = created.id;
-        await insertRow(sessionId, threadId);
+        threadId = (created as any).id;
+        await insertRow(sessionId, threadId!);
+        console.log(JSON.stringify({ level: "info", tag: "[CV][session]", traceId, msg: "thread.created", meta: { sessionId, threadId } }));
       }
     } catch (e) {
-      console.warn("CV:/api/chat/session DB path failed → fallback", e);
+      console.warn(JSON.stringify({ level: "warn", tag: "[CV][session]", traceId, msg: "db.path.failed", meta: { error: String(e) } }));
       const created = await openai.beta.threads.create({});
-      threadId = created.id;
+      threadId = (created as any).id;
     }
 
     const res = NextResponse.json({ ok: true, sessionId, threadId });
@@ -83,7 +86,7 @@ export async function GET(req: NextRequest) {
     });
     return res;
   } catch (e: any) {
-    console.error("CV:/api/chat/session ERROR", e);
+    console.error(JSON.stringify({ level: "error", tag: "[CV][session]", traceId, msg: "exception", meta: { error: String(e?.message || e) } }));
     return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 500 });
   }
 }
