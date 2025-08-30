@@ -1,8 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import ItineraryCard from './ItineraryCard';
 import type { ChatMessage } from '@/lib/types';
+
+function ulog(event: string, meta: any = {}) {
+  try { console.debug('[CV][ui][messages]', event, meta); } catch {}
+}
 
 type Props = {
   messages: ChatMessage[];
@@ -14,8 +17,6 @@ type Props = {
   votes?: any[];
 };
 
-// --- Helpers mínimos ---------------------------------------------------------
-
 const getText = (m: any): string => {
   if (!m) return '';
   if (typeof m.text === 'string') return m.text;
@@ -24,7 +25,38 @@ const getText = (m: any): string => {
   return '';
 };
 
+const extractBlock = (txt: string) => {
+  // cv:itinerary
+  const itRegex = /```cv:itinerary\s*([\s\S]*?)```/i;
+  const itMatch = txt.match(itRegex);
+  if (itMatch) {
+    try {
+      const json = JSON.parse(itMatch[1]);
+      return { kind: 'itinerary' as const, data: json };
+    } catch (e) {
+      ulog('itinerary.parse.error', { e: String(e) });
+    }
+  }
+  // cv:quote (por si lo usas)
+  const qRegex = /```cv:quote\s*([\s\S]*?)```/i;
+  const qMatch = txt.match(qRegex);
+  if (qMatch) {
+    try {
+      const json = JSON.parse(qMatch[1]);
+      return { kind: 'quote' as const, data: json };
+    } catch (e) {
+      ulog('quote.parse.error', { e: String(e) });
+    }
+  }
+  return { kind: 'text' as const, data: txt };
+};
+
 const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const t = getText(msgs[i]);
+    const b = extractBlock(t);
+    if (b.kind === 'itinerary' && b.data?.lang) return b.data.lang === 'en' ? 'en' : 'es';
+  }
   for (let i = msgs.length - 1; i >= 0; i--) {
     if ((msgs[i] as any).role === 'user') {
       const t = getText(msgs[i]).toLowerCase();
@@ -35,69 +67,9 @@ const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
   return 'es';
 };
 
-/** Busca un JSON balanceado a partir de la primera `{` y lo devuelve si cierra. */
-function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false;
-  let escape = false;
-  let depth = 0;
-  let first = -1;
-
-  for (let i = startIdx; i < src.length; i++) {
-    const ch = src[i];
-    if (inString) {
-      if (escape) { escape = false; continue; }
-      if (ch === '\\') { escape = true; continue; }
-      if (ch === '"') { inString = false; continue; }
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') {
-      depth--;
-      if (depth === 0 && first >= 0) {
-        return src.slice(first, i + 1);
-      }
-    }
-  }
-  return null;
-}
-
-/** Intenta extraer y parsear cv:itinerary, permitiendo bloque con o sin backticks. */
-function extractItineraryFromText(text: string): { found: boolean; complete: boolean; data?: any } {
-  const lower = text.toLowerCase();
-  const label = 'cv:itinerary';
-  const labelIdx = lower.indexOf(label);
-  if (labelIdx === -1) return { found: false, complete: false };
-
-  // 1) Caso con backticks ```cv:itinerary ... ```
-  const fenced = text.match(/```[\s]*cv:itinerary\s*([\s\S]*?)```/i);
-  if (fenced) {
-    try {
-      const data = JSON.parse(fenced[1]);
-      return { found: true, complete: true, data };
-    } catch {
-      return { found: true, complete: false };
-    }
-  }
-
-  // 2) Caso SIN backticks: tomar JSON balanceado a partir del primer `{` tras la etiqueta
-  const braceIdx = text.indexOf('{', labelIdx);
-  if (braceIdx === -1) return { found: true, complete: false };
-  const jsonSlice = extractBalancedJson(text, braceIdx);
-  if (!jsonSlice) return { found: true, complete: false };
-  try {
-    const data = JSON.parse(jsonSlice);
-    return { found: true, complete: true, data };
-  } catch {
-    return { found: true, complete: false };
-  }
-}
-
-// --- Burbujas & Loader -------------------------------------------------------
-
 function UserBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className="w-full flex justify-end my-2 cv-appear">
+    <div className="w-full flex justify-end my-2">
       <div className="max-w-[80%] rounded-2xl bg-[#bba36d] text-black px-4 py-3 shadow">
         {children}
       </div>
@@ -107,7 +79,7 @@ function UserBubble({ children }: { children: React.ReactNode }) {
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className="w-full flex justify-start my-2 cv-appear">
+    <div className="w-full flex justify-start my-2">
       <div className="max-w-[80%] rounded-2xl bg-neutral-900 text-white px-4 py-3 shadow">
         {children}
       </div>
@@ -115,14 +87,14 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
+function LoaderBubble({ lang }: { lang: 'es' | 'en' }) {
   const label = lang === 'en' ? 'thinking' : 'pensando';
   return (
-    <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
+    <div className="w-full flex items-center gap-2 my-3">
       <img
         src="/images/Intelligence.gif"
         alt="Coco Volare thinking"
-        className="h-8 w-auto select-none" /* sin sombra */
+        className="h-8 w-auto select-none"  // SIN sombra
         draggable={false}
       />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
@@ -135,32 +107,18 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   );
 }
 
-// --- Componente principal ----------------------------------------------------
-
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
-
-  // Loader con fade in/out sin tocar tu flujo
-  const [showLoader, setShowLoader] = useState(false);
-  const [phase, setPhase] = useState<'in' | 'out'>('in');
-
-  useEffect(() => {
-    if (isLoading) {
-      setShowLoader(true);
-      setPhase('in');
-    } else if (showLoader) {
-      setPhase('out');
-      const t = setTimeout(() => setShowLoader(false), 180);
-      return () => clearTimeout(t);
-    }
-  }, [isLoading, showLoader]);
 
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
       {messages.map((m, i) => {
         const text = getText(m);
         const role = (m as any).role as 'user' | 'assistant' | 'system';
+
+        // Ocultar placeholder vacío de assistant
+        if (role === 'assistant' && (!text || !text.trim())) return null;
 
         if (role === 'user') {
           return (
@@ -171,21 +129,23 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // 1) Si detectamos cv:itinerary, solo mostramos la tarjeta cuando el JSON esté COMPLETO
-          const it = extractItineraryFromText(text);
-          if (it.found && !it.complete) {
-            // Ocultamos el texto (para no ver JSON) y dejamos que el loader sea lo único visible
+          // Si viene iniciando el bloque pero aún no cierra, NO pintes el texto (evita ver JSON parcial)
+          const hasStart = /```cv:itinerary/i.test(text);
+          const hasComplete = /```cv:itinerary[\s\S]*?```/i.test(text);
+          if (hasStart && !hasComplete) {
+            // Mostramos sólo el loader global (abajo); aquí no pintamos nada.
             return null;
           }
-          if (it.complete && it.data) {
+
+          const block = extractBlock(text);
+          if (block.kind === 'itinerary') {
             return (
-              <div key={m.id || i} className="w-full flex justify-start my-3 cv-appear">
-                <ItineraryCard data={it.data} />
+              <div key={m.id || i} className="w-full flex justify-start my-3">
+                <ItineraryCard data={block.data} />
               </div>
             );
           }
 
-          // 2) Si no hay cv:itinerary, render normal
           return (
             <AssistantBubble key={m.id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
@@ -196,21 +156,8 @@ export default function Messages(props: Props) {
         return null;
       })}
 
-      {/* Loader con fade-in/out */}
-      {showLoader && <Loader lang={lang} phase={phase} />}
-
-      {/* Animaciones globales (solo apariencia) */}
-      <style jsx global>{`
-        @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
-        @keyframes cvAppear { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
-        .cv-fade-in  { animation: cvFadeIn .18s ease-out both; }
-        .cv-fade-out { animation: cvFadeOut .18s ease-out both; }
-        .cv-appear   { animation: cvAppear .22s ease-out both; }
-        @media (prefers-reduced-motion: reduce) {
-          .cv-fade-in, .cv-fade-out, .cv-appear { animation-duration: .001s; }
-        }
-      `}</style>
+      {/* Loader único mientras llega contenido */}
+      {isLoading && <LoaderBubble lang={lang} />}
     </div>
   );
 }
