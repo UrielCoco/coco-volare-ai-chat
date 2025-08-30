@@ -67,10 +67,13 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
       <div className="hero">
         <div className="heroInner">
           <div className="brand">
-            <picture>
-              <source srcSet="/images/coco-volare-logo.svg" type="image/svg+xml" />
-              <img src="/images/coco-volare-logo.png" alt="Coco Volare" className="logo" />
-            </picture>
+            {/* 👇 Logo desde /public/images/logo-coco-volare.png */}
+            <img
+              src="/images/logo-coco-volare.png"
+              alt="Coco Volare"
+              className="logo"
+              draggable={false}
+            />
             <div className="brandText">
               <div className="title">{data?.meta?.title || 'COTIZACIÓN'}</div>
               {data?.meta?.quoteId && <div className="subtitle">Folio · {safe(data.meta.quoteId)}</div>}
@@ -83,7 +86,7 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
           </div>
         </div>
 
-        {/* Watermark grande tipo “LHR → JFK” */}
+        {/* Watermark grande tipo “CV ✈︎ USD” */}
         <div className="wm">
           <span className="wmLeft">CV</span>
           <span className="wmArrow">✈︎</span>
@@ -97,7 +100,7 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
       </div>
 
       {/* INFO rápida (cliente + fechas) */}
-      {(safe(data?.customer?.name) || safe(data?.meta?.createdAt)) && (
+      {(safe(data?.customer?.name) || safe(data?.meta?.createdAt) || safe(data?.customer?.email)) && (
         <div className="gridInfo">
           {safe(data?.customer?.name) && (
             <div className="info">
@@ -194,7 +197,6 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
         .bp {
           position: relative;
           width: 100%;
-          max-width: 680px;
           background: #fff;
           color: #111;
           border-radius: 22px;
@@ -203,97 +205,28 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
           overflow: hidden;
         }
 
-        .hero {
-          position: relative;
-          background: #bba36d; /* dorado Coco Volare */
-          color: #0a0a0a;
-          padding: 16px;
-        }
-        .heroInner {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 16px;
-        }
+        .hero { position: relative; background: #bba36d; color: #0a0a0a; padding: 16px; }
+        .heroInner { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
         .brand { display: flex; align-items: center; gap: 12px; }
         .logo { height: 28px; width: auto; object-fit: contain; }
-        .brandText .title {
-          font-weight: 900; font-size: 13px; letter-spacing: .08em;
-        }
-        .brandText .subtitle {
-          font-size: 11px; opacity: .9;
-        }
+        .brandText .title { font-weight: 900; font-size: 13px; letter-spacing: .08em; }
+        .brandText .subtitle { font-size: 11px; opacity: .9; }
 
-        .priceBadge {
-          display: flex;
-          flex-direction: column;
-          align-items: flex-end;
-          gap: 4px;
-        }
-        .priceBadge .ccy {
-          font-weight: 800;
-          font-size: 11px;
-          background: #111;
-          color: #fff;
-          padding: 3px 8px;
-          border-radius: 999px;
-          letter-spacing: .05em;
-        }
-        .priceBadge .price {
-          font-weight: 900;
-          font-size: 18px;
-          line-height: 1;
-        }
+        .priceBadge { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+        .priceBadge .ccy { font-weight: 800; font-size: 11px; background: #111; color: #fff; padding: 3px 8px; border-radius: 999px; letter-spacing: .05em; }
+        .priceBadge .price { font-weight: 900; font-size: 18px; line-height: 1; }
 
-        /* Watermark tipo boarding */
-        .wm {
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 22px;
-          opacity: .15;
-          font-weight: 900;
-          letter-spacing: .06em;
-        }
+        .wm { position: absolute; inset: 0; pointer-events: none; display: flex; align-items: center; justify-content: center; gap: 22px; opacity: .15; font-weight: 900; letter-spacing: .06em; }
         .wmLeft, .wmRight { font-size: 56px; line-height: 1; }
         .wmArrow { font-size: 32px; }
 
-        .perforation {
-          position: relative;
-          height: 18px;
-          background: #fff;
-        }
-        .perforation::before,
-        .perforation::after {
-          content: "";
-          position: absolute;
-          top: 50%;
-          width: 22px; height: 22px;
-          background: #f7f7f7;
-          border-radius: 50%;
-          transform: translateY(-50%);
-          box-shadow: inset 0 0 0 1px rgba(0,0,0,.06);
-        }
+        .perforation { position: relative; height: 18px; background: #fff; }
+        .perforation::before, .perforation::after { content: ""; position: absolute; top: 50%; width: 22px; height: 22px; background: #f7f7f7; border-radius: 50%; transform: translateY(-50%); box-shadow: inset 0 0 0 1px rgba(0,0,0,.06); }
         .perforation::before { left: -11px; }
         .perforation::after  { right: -11px; }
-        .dots {
-          width: 100%;
-          height: 1px;
-          background-image: radial-gradient(#bbb 1px, transparent 1px);
-          background-size: 6px 1px;
-          background-repeat: repeat-x;
-          background-position: center;
-        }
+        .dots { width: 100%; height: 1px; background-image: radial-gradient(#bbb 1px, transparent 1px); background-size: 6px 1px; background-repeat: repeat-x; background-position: center; }
 
-        .gridInfo {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 12px;
-          padding: 12px 16px 4px;
-        }
+        .gridInfo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 12px 16px 4px; }
         .info .label { font-size: 11px; opacity: .65; }
         .info .value { font-weight: 700; }
 
@@ -301,9 +234,7 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
         .row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; }
         .row + .row { border-top: 1px dashed rgba(0,0,0,.12); }
         .left .line1 { font-weight: 700; display: flex; gap: 6px; align-items: baseline; }
-        .left .chip {
-          background: #bba36d; color: #111; font-weight: 900; border-radius: 999px; padding: 2px 8px; font-size: 11px;
-        }
+        .left .chip { background: #bba36d; color: #111; font-weight: 900; border-radius: 999px; padding: 2px 8px; font-size: 11px; }
         .left .ref { font-size: 11px; opacity: .7; margin-top: 2px; }
         .right { text-align: right; min-width: 140px; }
         .right .unit { font-size: 12px; opacity: .8; }
@@ -314,28 +245,12 @@ export default function QuoteCard({ data }: { data: QuoteData }) {
         .totals { padding: 4px 16px 8px; display: grid; gap: 6px; }
         .trow { display: flex; justify-content: space-between; }
         .trow span:first-child { opacity: .8; }
-        .trow.grand {
-          padding-top: 6px;
-          border-top: 1px dashed rgba(0,0,0,.22);
-          font-size: 16px;
-          font-weight: 900;
-        }
+        .trow.grand { padding-top: 6px; border-top: 1px dashed rgba(0,0,0,.22); font-size: 16px; font-weight: 900; }
 
         .notes { padding: 0 16px 14px; font-size: 13px; }
         .notes .line + .line { margin-top: 6px; }
 
-        .barcode {
-          height: 46px;
-          background: repeating-linear-gradient(90deg,
-            #111 0 2px,
-            transparent 2px 5px,
-            #111 5px 7px,
-            transparent 7px 10px
-          );
-          opacity: .7;
-          border-bottom-left-radius: 22px;
-          border-bottom-right-radius: 22px;
-        }
+        .barcode { height: 46px; background: repeating-linear-gradient(90deg,#111 0 2px,transparent 2px 5px,#111 5px 7px,transparent 7px 10px); opacity: .7; border-bottom-left-radius: 22px; border-bottom-right-radius: 22px; }
 
         @media (max-width: 520px) {
           .gridInfo { grid-template-columns: 1fr; }
