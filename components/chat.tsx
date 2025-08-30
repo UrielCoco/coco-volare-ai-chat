@@ -236,6 +236,7 @@ export default function Chat() {
             className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
             aria-label="Enviar"
           >
+            
             ➤
           </button>
         </div>
