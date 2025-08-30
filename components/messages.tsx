@@ -89,7 +89,7 @@ export default function Messages({
           ))}
         </AnimatePresence>
 
-        {/* typing bubble (ÚNICA) */}
+        {/* ÚNICA burbuja de “pensando” */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div

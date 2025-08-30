@@ -23,7 +23,7 @@ type Itin = {
       category: 'activity' | 'hotel' | 'transport' | string;
       title: string;
       location?: string;
-      duration: string; // ISO8601
+      duration: string;
       optional?: boolean;
       notes?: string;
       options?: { title: string; notes?: string }[];
@@ -39,6 +39,9 @@ type Itin = {
 };
 
 export default function ItineraryCard({ data }: { data: Itin }) {
+  // 🚧 Si no es válido, no renderizamos (evita crashear la app)
+  if (!data || !Array.isArray((data as any).days)) return null;
+
   return (
     <div className="w-full max-w-3xl mx-auto rounded-2xl border border-zinc-800/50 bg-zinc-950 text-zinc-100 shadow-xl overflow-hidden">
       <div className="bg-gradient-to-r from-zinc-900 to-zinc-800 px-6 py-4">
