@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic'
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!
 
-const POLL_MS = 200
+const POLL_MS = 150
 const MAX_WAIT_MS = 120000
 const ACTIVE_STATUSES = new Set(['queued','in_progress','requires_action','cancelling'])
 
@@ -36,6 +36,55 @@ function log(obj: any) {
   catch { console.log('[CV][server]', obj) }
 }
 
+// --- reemplaza tu runAndWait completo por este ---
+async function runAndWait(threadId: string, instructions?: string) {
+  const run = await client.beta.threads.runs.create(threadId, {
+    assistant_id: ASSISTANT_ID,
+    instructions,
+    metadata: { channel: 'web-embed' },
+  })
+  log({ step: 'run.created', runId: run.id })
+
+  let status = run.status
+  const tStart = now()
+
+  while (true) {
+    // 👇 Firma correcta: (runId, { thread_id })
+    const poll = await client.beta.threads.runs.retrieve(run.id, { thread_id: threadId })
+
+    if (status !== poll.status) {
+      status = poll.status
+      log({ step: 'run.status', status })
+    }
+
+    if (['completed', 'failed', 'expired', 'cancelled'].includes(status)) break
+
+    if (now() - tStart > MAX_WAIT_MS) {
+      try {
+        // 👇 Firma correcta: (runId, { thread_id })
+        await client.beta.threads.runs.cancel(run.id, { thread_id: threadId })
+      } catch {}
+      log({ step: 'run.timeout.cancelled' })
+      break
+    }
+
+    await sleep(POLL_MS)
+  }
+
+  return status
+}
+
+
+function extractAssistantText(messages: any[]) {
+  const firstAssistant = messages.find((m: any) => m.role === 'assistant')
+  const reply =
+    firstAssistant?.content
+      ?.filter((c: any) => c?.type === 'text' && c?.text?.value)
+      .map((c: any) => c.text.value as string)
+      .join('\n') ?? ''
+  return reply
+}
+
 export async function POST(req: NextRequest) {
   const t0 = now()
   try {
@@ -59,47 +108,43 @@ export async function POST(req: NextRequest) {
     await client.beta.threads.messages.create(threadId!, { role: 'user', content: text })
     log({ step: 'message.appended' })
 
-    const run = await client.beta.threads.runs.create(threadId!, {
-      assistant_id: ASSISTANT_ID,
-      instructions: [
-        'Responde de inmediato; evita frases como "un momento" o "te aviso".',
-        'Si ya hay destino + fechas/duración + nº de personas, entrega el itinerario en bloque:',
-        '```cv:itinerary',
-        '{ JSON válido según el esquema del sistema }',
-        '```',
-        'Si falta un dato crítico, haz UNA pregunta de avance.',
-      ].join('\n'),
-      metadata: { channel: 'web-embed' },
-    })
-    log({ step: 'run.created', runId: run.id })
+    // Primera corrida: exige formato desde el inicio
+    const baseInstructions = [
+      'Responde de inmediato; evita "un momento" o similares.',
+      'Si ya hay destino + fechas/duración + nº de personas, entrega el itinerario SOLO en bloque:',
+      '```cv:itinerary',
+      '{ JSON válido según el esquema del sistema }',
+      '```',
+      'Si falta un dato crítico, haz UNA sola pregunta de avance.'
+    ].join('\n')
 
-    let status = run.status
-    const tStart = now()
-    while (true) {
-      const poll = await client.beta.threads.runs.retrieve(run.id, { thread_id: threadId! })
-      if (status !== poll.status) {
-        status = poll.status
-        log({ step: 'run.status', status })
-      }
-      if (['completed','failed','expired','cancelled'].includes(status)) break
-      if (now() - tStart > MAX_WAIT_MS) {
-        try { await client.beta.threads.runs.cancel(run.id, { thread_id: threadId! }) } catch {}
-        log({ step: 'run.timeout.cancelled' })
-        break
-      }
-      await sleep(POLL_MS)
+    const status = await runAndWait(threadId!, baseInstructions)
+
+    const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 })
+    let reply = extractAssistantText(msgs.data)
+    let hasItin = /```(?:\s*)cv:itinerary/i.test(reply)
+
+    log({ step: 'reply.ready', hasItineraryBlock: hasItin, size: reply.length, ms: now() - t0, status })
+
+    // Fallback: si habló de itinerario pero no lo entregó en bloque, forzamos conversión
+    const userAskedItinerary = /itinerar|itinerary|ruta|plan de viaje|propuesta/i.test(text)
+    if (!hasItin && userAskedItinerary) {
+      await client.beta.threads.messages.create(threadId!, {
+        role: 'user',
+        content:
+          'Convierte tu propuesta anterior a un ÚNICO bloque ```cv:itinerary {…}``` ' +
+          'siguiendo exactamente el esquema del sistema. Sin texto antes o después.',
+      })
+      log({ step: 'retry_forced_itinerary', reason: 'no block in reply' })
+
+      await runAndWait(threadId!,
+        'Output ONLY one code block in the form ```cv:itinerary { JSON }```. No extra text.')
+
+      const msgs2 = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 })
+      reply = extractAssistantText(msgs2.data)
+      hasItin = /```(?:\s*)cv:itinerary/i.test(reply)
+      log({ step: 'retry.done', hasItineraryBlock: hasItin })
     }
-
-    const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 })
-    const firstAssistant = msgs.data.find((m) => m.role === 'assistant')
-    const reply =
-      firstAssistant?.content
-        ?.filter((c: any) => c?.type === 'text' && c?.text?.value)
-        .map((c: any) => c.text.value as string)
-        .join('\n') ?? ''
-
-    const hasItin = /```(?:\s*)cv:itinerary/i.test(reply)
-    log({ step: 'reply.ready', hasItineraryBlock: hasItin, size: reply.length, ms: now() - t0 })
 
     return NextResponse.json({ threadId, reply, runStatus: status })
   } catch (err: any) {
