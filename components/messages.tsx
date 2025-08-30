@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import ItineraryCard from './ItineraryCard';
+import QuoteCard from './QuoteCard';
 import type { ChatMessage } from '@/lib/types';
 
+// ---------------- Helpers ----------------
 type Props = {
   messages: ChatMessage[];
   isLoading: boolean;
@@ -13,8 +15,6 @@ type Props = {
   chatId?: string;
   votes?: any[];
 };
-
-// --- Helpers ---------------------------------------------------------
 
 const getText = (m: any): string => {
   if (!m) return '';
@@ -35,7 +35,6 @@ const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
   return 'es';
 };
 
-/** JSON balanceado desde el primer { a partir de startIdx */
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -53,19 +52,21 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
   return null;
 }
 
-/** Extrae cv:itinerary (fenced o directo) y valida si está completo */
-function extractItineraryFromText(text: string): { found: boolean; complete: boolean; data?: any } {
+function extractLabeledJson(text: string, label: string): { found: boolean; complete: boolean; data?: any } {
   const lower = text.toLowerCase();
-  const labelIdx = lower.indexOf('cv:itinerary');
-  if (labelIdx === -1) return { found: false, complete: false };
+  const idx = lower.indexOf(label.toLowerCase());
+  if (idx === -1) return { found: false, complete: false };
 
-  const fenced = text.match(/```[\s]*cv:itinerary\s*([\s\S]*?)```/i);
+  // Fenced
+  const re = new RegExp("```\\s*" + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "\\s*([\\s\\S]*?)```", "i");
+  const fenced = text.match(re);
   if (fenced) {
     try { return { found: true, complete: true, data: JSON.parse(fenced[1]) }; }
     catch { return { found: true, complete: false }; }
   }
 
-  const braceIdx = text.indexOf('{', labelIdx);
+  // Plain JSON after label
+  const braceIdx = text.indexOf('{', idx);
   if (braceIdx === -1) return { found: true, complete: false };
   const jsonSlice = extractBalancedJson(text, braceIdx);
   if (!jsonSlice) return { found: true, complete: false };
@@ -73,8 +74,7 @@ function extractItineraryFromText(text: string): { found: boolean; complete: boo
   catch { return { found: true, complete: false }; }
 }
 
-// --- UI bits ---------------------------------------------------------
-
+// -------------- UI bits ------------------
 function UserBubble({ children }: { children: React.ReactNode }) {
   return (
     <div className="w-full flex justify-end my-2 cv-appear">
@@ -99,12 +99,7 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   const label = lang === 'en' ? 'thinking' : 'pensando';
   return (
     <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
-      <img
-        src="/images/Intelligence.gif"
-        alt="Coco Volare thinking"
-        className="h-8 w-auto select-none"
-        draggable={false}
-      />
+      <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
         <span className="opacity-90">{label}</span>
         <span className="w-1.5 h-1.5 rounded-full bg-white/80 animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -115,25 +110,17 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   );
 }
 
-// --- Componente -------------------------------------------------------
-
+// -------------- Main ---------------------
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
 
-  // Loader con fade in/out
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
 
   useEffect(() => {
-    if (isLoading) {
-      setShowLoader(true);
-      setPhase('in');
-    } else if (showLoader) {
-      setPhase('out');
-      const t = setTimeout(() => setShowLoader(false), 180);
-      return () => clearTimeout(t);
-    }
+    if (isLoading) { setShowLoader(true); setPhase('in'); }
+    else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
   }, [isLoading, showLoader]);
 
   return (
@@ -141,10 +128,8 @@ export default function Messages(props: Props) {
       {messages.map((m, i) => {
         const role = (m as any).role as 'user' | 'assistant' | 'system';
         const raw = getText(m) ?? '';
-        // 🔒 Regla anti-doble-burbuja:
-        // si el asistente aún no ha emitido tokens y el texto está vacío,
-        // NO renderizamos la burbuja (el loader será lo único visible).
         const trimmed = raw.replace(/\u200B/g, '').trim();
+        const stopped = (m as any)?.stopped === true;
 
         if (role === 'user') {
           return (
@@ -155,13 +140,11 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // Oculta burbujas vacías (evita el “globo negro” mini)
-          if (!trimmed) {
-            return null;
-          }
+          // Evita burbuja doble cuando aún no hay tokens
+          if (!trimmed) return null;
 
-          // Itinerary: solo muestra tarjeta cuando el JSON esté completo
-          const it = extractItineraryFromText(trimmed);
+          // 1) Itinerario
+          const it = extractLabeledJson(trimmed, 'cv:itinerary');
           if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
             return (
@@ -171,12 +154,22 @@ export default function Messages(props: Props) {
             );
           }
 
+          // 2) Quote (cotización)
+          const q = extractLabeledJson(trimmed, 'cv:quote');
+          if (q.found && !q.complete) return null;
+          if (q.complete && q.data) {
+            return (
+              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                <QuoteCard data={q.data} />
+              </div>
+            );
+          }
+
+          // 3) Texto normal
           return (
             <AssistantBubble key={(m as any).id || i}>
               <div className="whitespace-pre-wrap break-words">{trimmed}</div>
-              {(m as any)?.stopped === true && (
-                <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>
-              )}
+              {stopped && <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>}
             </AssistantBubble>
           );
         }
@@ -184,7 +177,6 @@ export default function Messages(props: Props) {
         return null;
       })}
 
-      {/* Loader */}
       {showLoader && <Loader lang={lang} phase={phase} />}
 
       <style jsx global>{`
