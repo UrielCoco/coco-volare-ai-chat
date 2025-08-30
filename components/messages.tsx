@@ -37,7 +37,7 @@ const extractBlock = (txt: string) => {
       ulog('itinerary.parse.error', { e: String(e) });
     }
   }
-  // cv:quote (por si lo usas más adelante)
+  // cv:quote (por si lo usas)
   const qRegex = /```cv:quote\s*([\s\S]*?)```/i;
   const qMatch = txt.match(qRegex);
   if (qMatch) {
@@ -52,15 +52,11 @@ const extractBlock = (txt: string) => {
 };
 
 const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
-  // 1) Si ya hubo un cv:itinerary antes, usa su lang
   for (let i = msgs.length - 1; i >= 0; i--) {
     const t = getText(msgs[i]);
     const b = extractBlock(t);
-    if (b.kind === 'itinerary' && b.data?.lang) {
-      return b.data.lang === 'en' ? 'en' : 'es';
-    }
+    if (b.kind === 'itinerary' && b.data?.lang) return b.data.lang === 'en' ? 'en' : 'es';
   }
-  // 2) Si no, mira el último mensaje del usuario
   for (let i = msgs.length - 1; i >= 0; i--) {
     if ((msgs[i] as any).role === 'user') {
       const t = getText(msgs[i]).toLowerCase();
@@ -98,7 +94,7 @@ function LoaderBubble({ lang }: { lang: 'es' | 'en' }) {
       <img
         src="/images/Intelligence.gif"
         alt="Coco Volare thinking"
-        className="h-8 w-auto rounded-md shadow select-none"
+        className="h-8 w-auto select-none"  // SIN sombra
         draggable={false}
       />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
@@ -113,20 +109,16 @@ function LoaderBubble({ lang }: { lang: 'es' | 'en' }) {
 
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
-
   const lang = guessLang(messages);
 
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
-      {/* Render de mensajes */}
       {messages.map((m, i) => {
         const text = getText(m);
         const role = (m as any).role as 'user' | 'assistant' | 'system';
 
-        // Evita burbujas vacías del assistant (placeholder durante streaming)
-        if (role === 'assistant' && (!text || !text.trim())) {
-          return null;
-        }
+        // Ocultar placeholder vacío de assistant
+        if (role === 'assistant' && (!text || !text.trim())) return null;
 
         if (role === 'user') {
           return (
@@ -137,8 +129,15 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          const block = extractBlock(text);
+          // Si viene iniciando el bloque pero aún no cierra, NO pintes el texto (evita ver JSON parcial)
+          const hasStart = /```cv:itinerary/i.test(text);
+          const hasComplete = /```cv:itinerary[\s\S]*?```/i.test(text);
+          if (hasStart && !hasComplete) {
+            // Mostramos sólo el loader global (abajo); aquí no pintamos nada.
+            return null;
+          }
 
+          const block = extractBlock(text);
           if (block.kind === 'itinerary') {
             return (
               <div key={m.id || i} className="w-full flex justify-start my-3">
@@ -147,7 +146,6 @@ export default function Messages(props: Props) {
             );
           }
 
-          // (Opcional) Si más adelante manejas 'quote', aquí iría su card
           return (
             <AssistantBubble key={m.id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
@@ -155,11 +153,10 @@ export default function Messages(props: Props) {
           );
         }
 
-        // Ignora 'system', sólo por seguridad
         return null;
       })}
 
-      {/* Loader único (gif + 3 puntos) mientras llega el primer delta */}
+      {/* Loader único mientras llega contenido */}
       {isLoading && <LoaderBubble lang={lang} />}
     </div>
   );

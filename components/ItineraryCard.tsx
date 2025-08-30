@@ -71,7 +71,6 @@ function DaySection({ d, index }: { d: Day; index: number }) {
       d.weather.humidity != null ||
       d.weather.icon ||
       d.weather.summary);
-
   const showDate = isISODate(d.date);
 
   return (
@@ -212,7 +211,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
 
   return (
     <div className="w-full flex justify-start">
-      {/* Sin bordes, con sombra y logo visible */}
+      {/* Sin bordes, con sombra y LOGO MÁS GRANDE */}
       <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -232,7 +231,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
             <img
               src="/images/logo-coco-volare.png"
               alt="Coco Volare"
-              className="h-12 md:h-14 lg:h-16 w-auto select-none drop-shadow-sm"
+              className="h-14 md:h-16 lg:h-20 w-auto select-none drop-shadow-sm"
               draggable={false}
             />
           </div>
