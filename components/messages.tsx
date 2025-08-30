@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import ItineraryCard from './ItineraryCard';
 import type { ChatMessage } from '@/lib/types';
 
@@ -26,7 +27,7 @@ const getText = (m: any): string => {
 };
 
 const extractBlock = (txt: string) => {
-  // cv:itinerary
+  // cv:itinerary bloque completo
   const itRegex = /```cv:itinerary\s*([\s\S]*?)```/i;
   const itMatch = txt.match(itRegex);
   if (itMatch) {
@@ -69,7 +70,7 @@ const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
 
 function UserBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className="w-full flex justify-end my-2">
+    <div className="w-full flex justify-end my-2 cv-fade-in">
       <div className="max-w-[80%] rounded-2xl bg-[#bba36d] text-black px-4 py-3 shadow">
         {children}
       </div>
@@ -79,7 +80,7 @@ function UserBubble({ children }: { children: React.ReactNode }) {
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className="w-full flex justify-start my-2">
+    <div className="w-full flex justify-start my-2 cv-fade-in">
       <div className="max-w-[80%] rounded-2xl bg-neutral-900 text-white px-4 py-3 shadow">
         {children}
       </div>
@@ -87,14 +88,14 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
   );
 }
 
-function LoaderBubble({ lang }: { lang: 'es' | 'en' }) {
+function LoaderBubble({ lang, state }: { lang: 'es' | 'en'; state: 'in' | 'out' }) {
   const label = lang === 'en' ? 'thinking' : 'pensando';
   return (
-    <div className="w-full flex items-center gap-2 my-3">
+    <div className={`w-full flex items-center gap-2 my-3 ${state === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
       <img
         src="/images/Intelligence.gif"
         alt="Coco Volare thinking"
-        className="h-8 w-auto select-none"  // SIN sombra
+        className="h-8 w-auto select-none" // sin sombra
         draggable={false}
       />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
@@ -111,13 +112,25 @@ export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
 
+  // Control para fade-out del loader al terminar
+  const [loaderState, setLoaderState] = useState<'hidden' | 'in' | 'out'>('hidden');
+  useEffect(() => {
+    if (isLoading) {
+      setLoaderState('in');
+    } else if (loaderState === 'in') {
+      setLoaderState('out');
+      const t = setTimeout(() => setLoaderState('hidden'), 180);
+      return () => clearTimeout(t);
+    }
+  }, [isLoading]); // eslint-disable-line
+
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
       {messages.map((m, i) => {
         const text = getText(m);
         const role = (m as any).role as 'user' | 'assistant' | 'system';
 
-        // Ocultar placeholder vacío de assistant
+        // Oculta placeholders vacíos del assistant
         if (role === 'assistant' && (!text || !text.trim())) return null;
 
         if (role === 'user') {
@@ -129,23 +142,21 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // Si viene iniciando el bloque pero aún no cierra, NO pintes el texto (evita ver JSON parcial)
+          // Si el bloque cv:itinerary aún NO está completo (empieza pero no cierra), no muestres nada (evita JSON)
           const hasStart = /```cv:itinerary/i.test(text);
           const hasComplete = /```cv:itinerary[\s\S]*?```/i.test(text);
-          if (hasStart && !hasComplete) {
-            // Mostramos sólo el loader global (abajo); aquí no pintamos nada.
-            return null;
-          }
+          if (hasStart && !hasComplete) return null;
 
           const block = extractBlock(text);
           if (block.kind === 'itinerary') {
             return (
-              <div key={m.id || i} className="w-full flex justify-start my-3">
+              <div key={m.id || i} className="w-full flex justify-start my-3 cv-fade-in">
                 <ItineraryCard data={block.data} />
               </div>
             );
           }
 
+          // Texto normal del assistant
           return (
             <AssistantBubble key={m.id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
@@ -156,8 +167,19 @@ export default function Messages(props: Props) {
         return null;
       })}
 
-      {/* Loader único mientras llega contenido */}
-      {isLoading && <LoaderBubble lang={lang} />}
+      {/* Loader único con fade in/out */}
+      {loaderState !== 'hidden' && <LoaderBubble lang={lang} state={loaderState === 'out' ? 'out' : 'in'} />}
+
+      {/* Animaciones globales */}
+      <style jsx global>{`
+        @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
+        .cv-fade-in  { animation: cvFadeIn .18s ease-out both; }
+        .cv-fade-out { animation: cvFadeOut .18s ease-out both; }
+        @media (prefers-reduced-motion: reduce) {
+          .cv-fade-in, .cv-fade-out { animation-duration: .001s; }
+        }
+      `}</style>
     </div>
   );
 }
