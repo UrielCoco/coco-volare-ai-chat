@@ -2,10 +2,15 @@
 
 type Role = 'user' | 'assistant' | 'system' | string;
 
+function ulog(event: string, meta: any = {}) {
+  try { console.debug('[CV][ui][bubble]', event, meta); } catch {}
+}
+
 export default function Message({ role, text }: { role: Role; text: string }) {
   const isUser = role === 'user';
-  // Cualquier rol que no sea "user" lo tratamos visualmente como assistant (incluye "system", "tool", etc.)
   const isAssistantLike = !isUser;
+
+  ulog('render', { role, len: (text || '').length });
 
   return (
     <div className={`w-full flex ${isUser ? 'justify-end' : 'justify-start'}`}>
