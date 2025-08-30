@@ -14,7 +14,8 @@ type Props = {
   votes?: any[];
 };
 
-// Helpers mínimos
+// --- Helpers mínimos ---------------------------------------------------------
+
 const getText = (m: any): string => {
   if (!m) return '';
   if (typeof m.text === 'string') return m.text;
@@ -25,13 +26,74 @@ const getText = (m: any): string => {
 
 const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
   for (let i = msgs.length - 1; i >= 0; i--) {
-    const t = getText(msgs[i]).toLowerCase();
-    const looksEn =
-      /\b(the|and|to|please|when|how|where|days?)\b/.test(t) && !/[áéíóúñ¿¡]/.test(t);
-    if ((msgs[i] as any).role === 'user') return looksEn ? 'en' : 'es';
+    if ((msgs[i] as any).role === 'user') {
+      const t = getText(msgs[i]).toLowerCase();
+      const looksEn = /\b(the|and|to|please|when|how|where|days?)\b/.test(t) && !/[áéíóúñ¿¡]/.test(t);
+      return looksEn ? 'en' : 'es';
+    }
   }
   return 'es';
 };
+
+/** Busca un JSON balanceado a partir de la primera `{` y lo devuelve si cierra. */
+function extractBalancedJson(src: string, startIdx: number): string | null {
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let first = -1;
+
+  for (let i = startIdx; i < src.length; i++) {
+    const ch = src[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') { inString = false; continue; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
+    if (ch === '}') {
+      depth--;
+      if (depth === 0 && first >= 0) {
+        return src.slice(first, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+/** Intenta extraer y parsear cv:itinerary, permitiendo bloque con o sin backticks. */
+function extractItineraryFromText(text: string): { found: boolean; complete: boolean; data?: any } {
+  const lower = text.toLowerCase();
+  const label = 'cv:itinerary';
+  const labelIdx = lower.indexOf(label);
+  if (labelIdx === -1) return { found: false, complete: false };
+
+  // 1) Caso con backticks ```cv:itinerary ... ```
+  const fenced = text.match(/```[\s]*cv:itinerary\s*([\s\S]*?)```/i);
+  if (fenced) {
+    try {
+      const data = JSON.parse(fenced[1]);
+      return { found: true, complete: true, data };
+    } catch {
+      return { found: true, complete: false };
+    }
+  }
+
+  // 2) Caso SIN backticks: tomar JSON balanceado a partir del primer `{` tras la etiqueta
+  const braceIdx = text.indexOf('{', labelIdx);
+  if (braceIdx === -1) return { found: true, complete: false };
+  const jsonSlice = extractBalancedJson(text, braceIdx);
+  if (!jsonSlice) return { found: true, complete: false };
+  try {
+    const data = JSON.parse(jsonSlice);
+    return { found: true, complete: true, data };
+  } catch {
+    return { found: true, complete: false };
+  }
+}
+
+// --- Burbujas & Loader -------------------------------------------------------
 
 function UserBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -73,11 +135,13 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   );
 }
 
+// --- Componente principal ----------------------------------------------------
+
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
 
-  // Loader con fade in/out (sin tocar tu lógica)
+  // Loader con fade in/out sin tocar tu flujo
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
 
@@ -107,29 +171,21 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // 1) Si el assistant está “abriendo” un bloque pero aún NO lo cierra, NO lo mostramos (evita JSON parcial)
-          const hasStart = /```cv:(itinerary|quote)/i.test(text);
-          const hasComplete = /```cv:(itinerary|quote)[\s\S]*?```/i.test(text);
-          if (hasStart && !hasComplete) {
-            return null; // el loader global se encarga del estado de “pensando…”
+          // 1) Si detectamos cv:itinerary, solo mostramos la tarjeta cuando el JSON esté COMPLETO
+          const it = extractItineraryFromText(text);
+          if (it.found && !it.complete) {
+            // Ocultamos el texto (para no ver JSON) y dejamos que el loader sea lo único visible
+            return null;
+          }
+          if (it.complete && it.data) {
+            return (
+              <div key={m.id || i} className="w-full flex justify-start my-3 cv-appear">
+                <ItineraryCard data={it.data} />
+              </div>
+            );
           }
 
-          // 2) Si hay bloque completo de itinerary -> card
-          const itMatch = text.match(/```cv:itinerary\s*([\s\S]*?)```/i);
-          if (itMatch) {
-            try {
-              const data = JSON.parse(itMatch[1]);
-              return (
-                <div key={m.id || i} className="w-full flex justify-start my-3 cv-appear">
-                  <ItineraryCard data={data} />
-                </div>
-              );
-            } catch {
-              // Si no parsea, seguimos con texto normal
-            }
-          }
-
-          // 3) Texto normal del assistant
+          // 2) Si no hay cv:itinerary, render normal
           return (
             <AssistantBubble key={m.id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
@@ -143,7 +199,7 @@ export default function Messages(props: Props) {
       {/* Loader con fade-in/out */}
       {showLoader && <Loader lang={lang} phase={phase} />}
 
-      {/* Animaciones globales */}
+      {/* Animaciones globales (solo apariencia) */}
       <style jsx global>{`
         @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
         @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
