@@ -1,3 +1,4 @@
+// app/(chat)/api/chat/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
@@ -14,31 +15,68 @@ const rid = () => `cv_${Math.random().toString(36).slice(2, 8)}_${Date.now().toS
 function jlog(event: string, meta: any = {}, traceId?: string) {
   try {
     console.log(JSON.stringify({ tag: '[CV][server]', event, traceId, ...meta }));
-  } catch {
-    console.log('[CV][server]', event, meta);
-  }
+  } catch {}
 }
 
+// ---------- UTIL: append con reintento breve ----------
 async function appendUserMessageWithMinimalRetry(threadId: string, userText: string, traceId: string) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      jlog('message.append.start', { attempt }, traceId);
-      await client.beta.threads.messages.create(threadId, { role: 'user', content: userText });
-      jlog('message.append.ok', { attempt }, traceId);
-      return;
-    } catch (e: any) {
-      const msg = e?.message || String(e);
-      jlog('message.append.err', { attempt, error: msg }, traceId);
-      if (msg.includes('run is active') || msg.includes("Can't add messages")) {
-        await new Promise((r) => setTimeout(r, 400 + attempt * 250));
-        continue;
-      }
-      throw e;
-    }
+  try {
+    await client.beta.threads.messages.create(threadId, { role: 'user', content: userText });
+    jlog('message.append.ok', {}, traceId);
+  } catch (e: any) {
+    jlog('message.append.retry', { error: e?.message }, traceId);
+    await new Promise((r) => setTimeout(r, 250));
+    await client.beta.threads.messages.create(threadId, { role: 'user', content: userText });
+    jlog('message.append.ok.retry', {}, traceId);
   }
-  throw new Error('Thread ocupado: hay un run activo cerrando.');
 }
 
+// ---------- Tool: emit_itinerary (schema) ----------
+const itineraryParameters = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    days: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          day: { type: 'integer' },
+          date: { type: 'string' },
+          meals: {
+            type: 'object',
+            properties: {
+              breakfast: { type: 'string' },
+              lunch: { type: 'string' },
+              dinner: { type: 'string' }
+            }
+          },
+          activities: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                time: { type: 'string' },
+                title: { type: 'string' },
+                location: { type: 'string' },
+                notes: { type: 'string' }
+              },
+              required: ['time', 'title']
+            }
+          },
+          hotelPickup: { type: 'boolean' },
+          hotelDropoff: { type: 'boolean' }
+        },
+        required: ['day', 'activities']
+      }
+    },
+    currency: { type: 'string' },
+    notes: { type: 'string' }
+  },
+  required: ['title', 'days']
+} as const;
+
+// ---------- STREAM ----------
 async function handleStream(req: NextRequest) {
   const traceId = rid();
   const t0 = now();
@@ -77,23 +115,69 @@ async function handleStream(req: NextRequest) {
 
         await appendUserMessageWithMinimalRetry(threadId!, userText, traceId);
 
-        // @ts-ignore (stream events)
+        // Create+Stream el run (SDK v4) — event emitter
+        // @ts-ignore tipos del stream varían por versión del SDK
         const runStream: any = await client.beta.threads.runs.stream(threadId!, {
           assistant_id: ASSISTANT_ID,
           metadata: { channel: 'web-embed' },
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'emit_itinerary',
+                description: 'Emite un itinerario estructurado para renderizar tarjeta en el front.',
+                parameters: itineraryParameters
+              }
+            }
+          ]
         });
+
+        // >>> Intentamos obtener el runId para poder cancelar desde el front
+        (async () => {
+          try {
+            // poll cortito hasta ver el run activo más reciente
+            const tStart = Date.now();
+            let announced = false;
+            while (!announced && Date.now() - tStart < 4000) {
+              const list = await client.beta.threads.runs.list(threadId!, { order: 'desc', limit: 3 });
+              const active = list.data.find(r => ['queued','in_progress','requires_action','cancelling'].includes(String(r.status)));
+              if (active) {
+                send('run', { runId: active.id });
+                announced = true;
+                break;
+              }
+              await new Promise(r => setTimeout(r, 200));
+            }
+          } catch {}
+        })();
 
         let lastTokenAt = now();
         let firstDeltaMs: number | null = null;
         let deltaCount = 0;
+        let hadDelta = false;
 
-        const watchdog = setInterval(() => {
-          const idle = now() - lastTokenAt;
-          if (idle > IDLE_FALLBACK_MS) {
-            jlog('idle.fallback', { idleMs: idle, deltaCount }, traceId);
+        // Watchdog: si el stream “se queda mudo”, hacemos fallback
+        const watchdog = setInterval(async () => {
+          const gap = now() - lastTokenAt;
+          if (gap > IDLE_FALLBACK_MS) {
             clearInterval(watchdog);
+            jlog('stream.idle', { gap }, traceId);
             try { runStream.close(); } catch {}
-            try { send('done', { ms: now() - t0, first_delta_ms: firstDeltaMs, idleFallback: true, deltaCount }); } catch {}
+            // Fallback: traer último mensaje del asistente
+            try {
+              const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 });
+              let finalText = '';
+              for (const m of msgs.data) {
+                if (m.role !== 'assistant') continue;
+                for (const c of m.content) if (c.type === 'text') finalText += (c.text?.value || '') + '\n';
+                if (finalText.trim()) break;
+              }
+              finalText = finalText.trim();
+              send('final', { text: finalText, idleFallback: true });
+            } catch (e: any) {
+              send('error', { message: e?.message || 'idle fallback error' });
+            }
+            try { send('done', { ms: now() - t0, first_delta_ms: firstDeltaMs, deltaCount }); } catch {}
             try { controller.close(); } catch {}
           }
         }, 3000);
@@ -103,11 +187,11 @@ async function handleStream(req: NextRequest) {
             jlog('stream.textCreated', {}, traceId);
           })
           .on('textDelta', (d: any) => {
+            hadDelta = true;
             deltaCount++;
             if (firstDeltaMs == null) firstDeltaMs = now() - t0;
             lastTokenAt = now();
             const value = d?.value || '';
-            // No loggear cada token para no saturar, solo cada 60
             if (deltaCount % 60 === 0) {
               jlog('stream.delta.tick', { deltaCount, firstDeltaMs }, traceId);
             }
@@ -116,52 +200,77 @@ async function handleStream(req: NextRequest) {
           .on('messageCompleted', (m: any) => {
             jlog('stream.messageCompleted', { role: m?.role, contentLen: JSON.stringify(m?.content || '').length }, traceId);
           })
+          // Tool-calls (itinerario)
+          .on('toolCallCreated', (ev: any) => {
+            // opcional: puedes loggear
+          })
+          .on('toolCallDelta', async (ev: any) => {
+            // si quisieras streamear args, aquí
+          })
+          .on('toolCallCompleted', async (ev: any) => {
+            try {
+              if (ev?.toolCall?.function?.name === 'emit_itinerary') {
+                const argsRaw = ev.toolCall.function.arguments ?? '{}';
+                const data = JSON.parse(argsRaw);
+                if (data?.title && Array.isArray(data?.days)) {
+                  send('itinerary', { payload: data });
+                }
+              }
+            } catch {}
+          })
           .on('error', (err: any) => {
             jlog('stream.error', { error: String(err?.message || err) }, traceId);
             send('error', { message: String(err?.message || err) });
           })
           .on('end', async () => {
             try {
-              const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 });
-              let finalText = '';
-              for (const m of msgs.data) {
-                if (m.role !== 'assistant') continue;
-                for (const c of m.content) {
-                  if (c.type === 'text') finalText += (c.text?.value || '') + '\n';
-                }
-                if (finalText.trim()) break;
-              }
-              finalText = finalText.trim();
-              jlog('stream.end', { deltaCount, firstDeltaMs, finalLen: finalText.length }, traceId);
-              send('final', { text: finalText });
-            } catch (e: any) {
-              jlog('final.fetch.err', { error: String(e?.message || e) }, traceId);
-              send('error', { message: String(e?.message || e) });
-            } finally {
               clearInterval(watchdog);
-              send('done', { ms: now() - t0, first_delta_ms: firstDeltaMs, idleFallback: false, deltaCount });
-              try { controller.close(); } catch {}
-              jlog('request.out', { totalMs: now() - t0 }, traceId);
+            } catch {}
+            try {
+              // Si no hubo deltas, hacemos fallback a messages.list (para no dejar colgado)
+              if (!hadDelta) {
+                const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 });
+                let finalText = '';
+                for (const m of msgs.data) {
+                  if (m.role !== 'assistant') continue;
+                  for (const c of m.content) if (c.type === 'text') finalText += (c.text?.value || '') + '\n';
+                  if (finalText.trim()) break;
+                }
+                finalText = finalText.trim();
+                jlog('stream.end.nodeltas', { finalLen: finalText.length }, traceId);
+                send('final', { text: finalText, nodeltas: true });
+              } else {
+                // caso normal: el front ya juntó los deltas
+                send('final', { ok: true });
+              }
+            } catch (e: any) {
+              send('error', { message: e?.message || 'finalize error' });
+            } finally {
+              send('done', { ms: now() - t0, first_delta_ms: firstDeltaMs, deltaCount });
+              controller.close();
             }
           });
+
       } catch (err: any) {
-        jlog('exception', { error: String(err?.message || err) }, traceId);
+        jlog('exception.stream', { error: String(err?.message || err) }, traceId);
         controller.enqueue(`event: error\ndata: ${JSON.stringify({ message: String(err?.message || err) })}\n\n`);
-        controller.enqueue(`event: done\ndata: ${JSON.stringify({ ms: now() - t0 })}\n\n`);
-        try { controller.close(); } catch {}
+        controller.enqueue(`event: done\ndata: ${JSON.stringify({ ms: now() - t0, error: true })}\n\n`);
+        controller.close();
       }
-    },
+    }
   });
 
-  return new Response(stream, {
+  return new NextResponse(stream as any, {
     headers: {
-      'Content-Type': 'text/event-stream',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     },
   });
 }
 
+// ---------- JSON (por si alguien llama sin streaming) ----------
 async function handleJson(req: NextRequest) {
   const traceId = rid();
   const t0 = now();
@@ -185,18 +294,23 @@ async function handleJson(req: NextRequest) {
 
     await appendUserMessageWithMinimalRetry(threadId!, userText, traceId);
 
+    // create & poll
     const run = await client.beta.threads.runs.createAndPoll(threadId!, {
       assistant_id: ASSISTANT_ID,
       metadata: { channel: 'web-embed' },
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'emit_itinerary', description: 'Itinerary', parameters: itineraryParameters }
+        }
+      ]
     });
 
     const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 });
     let reply = '';
     for (const m of msgs.data) {
       if (m.role !== 'assistant') continue;
-      for (const c of m.content) {
-        if (c.type === 'text') reply += (c.text?.value || '') + '\n';
-      }
+      for (const c of m.content) if (c.type === 'text') reply += (c.text?.value || '') + '\n';
       if (reply.trim()) break;
     }
     reply = reply.trim();

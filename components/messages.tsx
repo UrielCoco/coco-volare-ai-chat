@@ -1,3 +1,4 @@
+// components/messages.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -122,7 +123,7 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
       <img
         src="/images/Intelligence.gif"
         alt="Coco Volare thinking"
-        className="h-8 w-auto select-none" /* sin sombra */
+        className="h-8 w-auto select-none"
         draggable={false}
       />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
@@ -161,10 +162,11 @@ export default function Messages(props: Props) {
       {messages.map((m, i) => {
         const text = getText(m);
         const role = (m as any).role as 'user' | 'assistant' | 'system';
+        const stopped = (m as any)?.stopped === true; // opcional, no rompe si no existe
 
         if (role === 'user') {
           return (
-            <UserBubble key={m.id || i}>
+            <UserBubble key={(m as any).id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
             </UserBubble>
           );
@@ -179,7 +181,7 @@ export default function Messages(props: Props) {
           }
           if (it.complete && it.data) {
             return (
-              <div key={m.id || i} className="w-full flex justify-start my-3 cv-appear">
+              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <ItineraryCard data={it.data} />
               </div>
             );
@@ -187,8 +189,11 @@ export default function Messages(props: Props) {
 
           // 2) Si no hay cv:itinerary, render normal
           return (
-            <AssistantBubble key={m.id || i}>
+            <AssistantBubble key={(m as any).id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
+              {stopped && (
+                <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>
+              )}
             </AssistantBubble>
           );
         }
