@@ -4,6 +4,8 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui][itin]', event, meta); } catch {}
 }
 
+const isISODate = (s?: string) => !!(s && /^\d{4}-\d{2}-\d{2}$/.test(s));
+
 type Weather = {
   tempCmin?: number; tempCmax?: number;
   tempFmin?: number; tempFmax?: number;
@@ -46,8 +48,7 @@ type Day = {
 type Itinerary = {
   lang?: string;
   tripTitle?: string;
-  /** <- FIX: permitir también `title` por compatibilidad con algunas respuestas */
-  title?: string;
+  title?: string; // compat
   clientBooksLongHaulFlights?: boolean;
   disclaimer?: string;
   days?: Day[];
@@ -85,13 +86,26 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
           {days.map((d, i) => {
             const locs = (d.locations || []).filter(Boolean);
             const tl = (d.timeline || []).filter(Boolean);
+            const showWeather =
+              !!d.weather &&
+              (d.weather.tempCmin != null ||
+                d.weather.tempCmax != null ||
+                d.weather.tempFmin != null ||
+                d.weather.tempFmax != null ||
+                d.weather.humidity != null ||
+                d.weather.icon ||
+                d.weather.summary);
+
+            const showDate = isISODate(d.date);
+
             return (
               <div key={i} className="rounded-xl border border-neutral-200 bg-neutral-50">
                 <div className="px-4 py-3 border-b border-neutral-200">
                   <div className="text-sm text-neutral-500">
-                    Día {d.day ?? i + 1}{d.date ? ` • ${d.date}` : ''}
+                    Día {d.day ?? i + 1}{showDate ? ` • ${d.date}` : ''}
                   </div>
-                  <div className="font-semibold">{d.title || 'Día'}</div>
+                  {d.title && <div className="font-semibold">{d.title}</div>}
+
                   {/* Locations chips */}
                   {locs.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
@@ -102,14 +116,20 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                       ))}
                     </div>
                   )}
-                  {/* Weather */}
-                  {d.weather && (
+
+                  {/* Weather (solo si hay algo que mostrar) */}
+                  {showWeather && (
                     <div className="mt-2 text-sm text-neutral-700 flex items-center gap-2">
-                      <span>{d.weather.icon || '🌤️'}</span>
+                      <span>{d.weather?.icon || '🌤️'}</span>
                       <span>
-                        {d.weather.summary || 'Clima estimado'} •
-                        {' '}min {d.weather.tempCmin ?? '-'}°C / max {d.weather.tempCmax ?? '-'}°C
-                        {' '}({d.weather.tempFmin ?? '-'}–{d.weather.tempFmax ?? '-'}°F), hum {d.weather.humidity ?? '-'}%
+                        {d.weather?.summary || ''}
+                        {d.weather?.tempCmin != null || d.weather?.tempCmax != null ? (
+                          <> • min {d.weather?.tempCmin ?? '-'}°C / max {d.weather?.tempCmax ?? '-'}°C</>
+                        ) : null}
+                        {d.weather?.tempFmin != null || d.weather?.tempFmax != null ? (
+                          <> ({d.weather?.tempFmin ?? '-'}–{d.weather?.tempFmax ?? '-'}°F)</>
+                        ) : null}
+                        {d.weather?.humidity != null ? <> • hum {d.weather?.humidity}%</> : null}
                       </span>
                     </div>
                   )}
@@ -123,9 +143,11 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                       {d.hotelOptions.map((h, j) => (
                         <li key={j} className="rounded-lg bg-white border border-neutral-200 p-3">
                           <div className="font-medium">{h.name}</div>
-                          <div className="text-xs text-neutral-600">
-                            {h.area ? `${h.area}` : ''}{h.area && h.style ? ' • ' : ''}{h.style || ''}
-                          </div>
+                          {(h.area || h.style) && (
+                            <div className="text-xs text-neutral-600">
+                              {h.area ? `${h.area}` : ''}{h.area && h.style ? ' • ' : ''}{h.style || ''}
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -141,8 +163,10 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                         <li key={k} className="rounded-lg bg-white border border-neutral-200 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <div className="text-xs text-neutral-500">{item.time || '--:--'} • {item.category || 'activity'}</div>
-                              <div className="font-medium">{item.title}</div>
+                              <div className="text-xs text-neutral-500">
+                                {(item.time || '--:--')}{item.category ? ` • ${item.category}` : ''}
+                              </div>
+                              {item.title && <div className="font-medium">{item.title}</div>}
                               {item.location && <div className="text-sm text-neutral-700">{item.location}</div>}
                               {item.duration && <div className="text-xs text-neutral-600 mt-1">Duración: {item.duration}</div>}
                               {item.optional ? <div className="text-xs text-neutral-600">Opcional</div> : null}
@@ -153,8 +177,9 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                                 <ul className="mt-2 list-disc pl-5 text-sm">
                                   {item.options.map((op, z) => (
                                     <li key={z}>
-                                      <span className="font-medium">{op.title}</span>
-                                      {op.notes ? ` — ${op.notes}` : ''}
+                                      {op.title && <span className="font-medium">{op.title}</span>}
+                                      {op.title && op.notes ? ' — ' : ''}
+                                      {op.notes || ''}
                                     </li>
                                   ))}
                                 </ul>
@@ -162,13 +187,18 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
 
                               {/* Transporte */}
                               {item.category === 'transport' && item.transport && (
-                                <div className="mt-2 text-xs text-neutral-700">
-                                  <div>Modo: {item.transport.mode}</div>
-                                  <div>
-                                    Ruta: {(item.transport.from?.city || '')}{item.transport.from?.country ? `, ${item.transport.from.country}` : ''}
-                                    {' → '}
-                                    {(item.transport.to?.city || '')}{item.transport.to?.country ? `, ${item.transport.to.country}` : ''}
-                                  </div>
+                                <div className="mt-2 text-xs text-neutral-700 space-y-0.5">
+                                  {item.transport.mode && <div>Modo: {item.transport.mode}</div>}
+                                  {(item.transport.from || item.transport.to) && (
+                                    <div>
+                                      Ruta:{' '}
+                                      {(item.transport.from?.city || '')}
+                                      {item.transport.from?.country ? `, ${item.transport.from.country}` : ''}
+                                      {' → '}
+                                      {(item.transport.to?.city || '')}
+                                      {item.transport.to?.country ? `, ${item.transport.to.country}` : ''}
+                                    </div>
+                                  )}
                                   {item.transport.carrier && <div>Compañía: {item.transport.carrier}</div>}
                                   {item.transport.code && <div>Código: {item.transport.code}</div>}
                                   {item.transport.duration && <div>Duración: {item.transport.duration}</div>}

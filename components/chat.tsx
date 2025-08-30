@@ -8,10 +8,7 @@ const THREAD_KEY = 'cv_thread_id_session';
 const COMPOSER_H = 84;
 
 function ulog(event: string, meta: any = {}) {
-  try {
-    // console.debug para que no ensucie tanto; cambia a log si quieres
-    console.debug('[CV][ui]', event, meta);
-  } catch {}
+  try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
 export default function Chat() {
@@ -22,6 +19,12 @@ export default function Chat() {
 
   const threadIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    // preferir el ancla para que no se corte por padding del composer
+    endRef.current?.scrollIntoView({ behavior, block: 'end' });
+  };
 
   useEffect(() => {
     try {
@@ -29,28 +32,28 @@ export default function Chat() {
       if (ss) {
         threadIdRef.current = ss;
         ulog('thread.restore', { threadId: ss });
-      } else {
-        ulog('thread.none');
       }
     } catch {}
   }, []);
 
+  // Auto-scroll cuando cambian mensajes o llega el primer token
   useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const t = setTimeout(() => {
-      el.scrollTop = el.scrollHeight;
-    }, 0);
-    return () => clearTimeout(t);
+    scrollToBottom('auto');
   }, [messages, hasFirstDelta]);
+
+  // También cuando el usuario enfoca el input (mobile/desktop)
+  useEffect(() => {
+    const handler = () => scrollToBottom('smooth');
+    const el = listRef.current;
+    window.addEventListener('resize', handler); // teclado móvil
+    return () => window.removeEventListener('resize', handler);
+  }, []);
 
   async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
     setHasFirstDelta(false);
-    const t0 = performance.now();
 
     try {
-      ulog('stream.start', { userLen: userText.length, hasThreadId: Boolean(threadIdRef.current) });
       const res = await fetch('/api/chat?stream=1', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -65,8 +68,6 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let deltaCount = 0;
-      let firstDeltaMs: number | null = null;
 
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
@@ -80,13 +81,15 @@ export default function Chat() {
           }
           return next;
         });
+        // cada delta mantiene el fondo abajo
+        requestAnimationFrame(() => scrollToBottom('auto'));
       };
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
 
+        buffer += decoder.decode(value, { stream: true });
         const events = buffer.split('\n\n');
         buffer = events.pop() || '';
 
@@ -104,58 +107,32 @@ export default function Chat() {
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
                 ulog('meta', { threadId: data.threadId });
               }
-            } catch (e) {
-              ulog('meta.parse.err', { e });
-            }
+            } catch {}
           } else if (event === 'delta') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              const v = data?.value ?? '';
-              if (typeof v === 'string' && v.length) {
-                deltaCount++;
+              if (typeof data?.value === 'string' && data.value.length) {
                 if (!hasFirstDelta) setHasFirstDelta(true);
-                if (firstDeltaMs == null) firstDeltaMs = performance.now() - t0;
-                if (deltaCount % 60 === 0) {
-                  ulog('delta.tick', { deltaCount, firstDeltaMs });
-                }
-                applyText(v);
+                applyText(data.value);
               }
-            } catch (e) {
-              ulog('delta.parse.err', { e });
-            }
+            } catch {}
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                ulog('final', { len: data.text.length });
                 applyText(data.text, true);
               }
-            } catch (e) {
-              ulog('final.parse.err', { e });
-            }
+            } catch {}
           } else if (event === 'done') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              ulog('done', { ...data, deltaCount, totalMs: Math.round(performance.now() - t0) });
-            } catch {
-              ulog('done');
-            }
             setIsLoading(false);
+            requestAnimationFrame(() => scrollToBottom('smooth'));
           } else if (event === 'error') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              ulog('error.ev', { message: data?.message });
-            } catch {
-              ulog('error.ev');
-            }
             setIsLoading(false);
-          } else if (event === 'ping') {
-            // keepalive del server
           }
         }
       }
     } catch (err) {
-      ulog('stream.exception', { err });
+      console.error('[CV][chat] stream error:', err);
       setIsLoading(false);
       setMessages((prev) => {
         const next = [...prev];
@@ -192,13 +169,14 @@ export default function Chat() {
 
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    ulog('submit', { userLen: text.length, totalMsgs: messages.length + 2 });
+    // scrollea inmediato tras enviar
+    requestAnimationFrame(() => scrollToBottom('smooth'));
     await handleStream(text, assistantId);
   };
 
   return (
     <div
-      className="relative flex flex-col w-full min-h=[100dvh] min-h-screen bg-background"
+      className="relative flex flex-col w-full min-h-[100dvh] bg-background"
       style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}
     >
       {/* Lista scrolleable con padding inferior para no tapar el último mensaje */}
@@ -216,6 +194,8 @@ export default function Chat() {
           chatId="main"
           votes={[]}
         />
+        {/* Ancla de auto-scroll */}
+        <div ref={endRef} />
       </div>
 
       {/* Composer cristal, fijo abajo */}
@@ -228,6 +208,7 @@ export default function Chat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onFocus={() => requestAnimationFrame(() => scrollToBottom('smooth'))}
             placeholder="Escribe tu mensaje…"
             className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground"
           />
@@ -236,7 +217,6 @@ export default function Chat() {
             className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
             aria-label="Enviar"
           >
-            
             ➤
           </button>
         </div>
