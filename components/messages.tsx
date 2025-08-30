@@ -89,7 +89,8 @@ export default function Messages({
           ))}
         </AnimatePresence>
 
-        {/* ÚNICA burbuja de “pensando” */}
+
+        {/* ÚNICA burbuja de “pensando” alineada como el assistant */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
@@ -97,19 +98,23 @@ export default function Messages({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.2 }}
-              className="w-full mx-auto max-w-4xl px-4"
+              className="chat-message"
+              style={{ scrollMarginBottom: SPACER }}
             >
-              <div className="inline-flex items-center gap-3 rounded-2xl bg-[#131313] px-5 py-4 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
-                <img src="/images/Intelligence.gif" alt="pensando" className="h-6 w-6" />
-                <div className="flex items-center gap-1">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '120ms' }} />
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '240ms' }} />
+              <div className="w-full max-w-4xl mx-auto flex justify-start">
+                <div className="inline-flex items-center gap-3 rounded-2xl bg-[#131313] px-5 py-4 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
+                  <img src="/images/Intelligence.gif" alt="pensando" className="h-6 w-6" />
+                  <div className="flex items-center gap-1">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '120ms' }} />
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '240ms' }} />
+                  </div>
                 </div>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+
 
         <div style={{ height: SPACER }} />
         <div ref={anchorRef} style={{ height: 1 }} />
