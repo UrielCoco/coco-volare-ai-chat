@@ -5,7 +5,6 @@ import Messages from './messages';
 import type { ChatMessage } from '@/lib/types';
 
 const THREAD_KEY = 'cv_thread_id_session';
-const COMPOSER_H = 84;
 
 function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
@@ -18,11 +17,38 @@ export default function Chat() {
   const [hasFirstDelta, setHasFirstDelta] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') =>
-    endRef.current?.scrollIntoView({ behavior, block: 'end' });
+  // Altura real del composer (dinámica, depende de viewport/teclado)
+  const [composerH, setComposerH] = useState<number>(84);
 
+  // Observa cambios de altura del composer
+  useEffect(() => {
+    if (!composerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = Math.ceil(entries[0].contentRect.height);
+      if (h && h !== composerH) setComposerH(h);
+    });
+    ro.observe(composerRef.current);
+    return () => ro.disconnect();
+  }, [composerH]);
+
+  // Soporte teclado móvil (iOS/Android): cuando el viewport cambia, bajamos
+  useEffect(() => {
+    const vv = (window as any).visualViewport as VisualViewport | undefined;
+    if (!vv) return;
+    const handler = () => scrollToBottom('smooth');
+    vv.addEventListener('resize', handler);
+    vv.addEventListener('scroll', handler);
+    return () => {
+      vv.removeEventListener('resize', handler);
+      vv.removeEventListener('scroll', handler);
+    };
+  }, []);
+
+  // Restaurar thread si existía
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -33,8 +59,21 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  useEffect(() => { scrollToBottom('auto'); }, [messages, hasFirstDelta]);
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const scroller = listRef.current;
+    if (!scroller) return;
+    // scrollIntoView + ajuste directo por compatibilidad
+    endRef.current?.scrollIntoView({ behavior, block: 'end' });
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+  };
 
+  // Auto-scroll en cambios de mensajes, primer token y cuando cambia altura del composer
+  useEffect(() => {
+    // dos cuadros garantizan layout aplicado antes del scroll
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('auto')));
+  }, [messages, hasFirstDelta, composerH]);
+
+  // También cuando la ventana cambia (rotación, split view, etc.)
   useEffect(() => {
     const handler = () => scrollToBottom('smooth');
     window.addEventListener('resize', handler);
@@ -96,6 +135,7 @@ export default function Chat() {
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
+                ulog('meta', { threadId: data.threadId });
               }
             } catch {}
           } else if (event === 'delta') {
@@ -162,14 +202,15 @@ export default function Chat() {
   const showEmpty = messages.length === 0;
 
   return (
-    <div
-      className="relative flex flex-col w-full min-h-[100dvh] bg-background"
-      style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}
-    >
-      {/* Zona scroll con fondo inicial */}
+    <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
+      {/* Scroll area con padding dinámico para no tapar el último mensaje */}
       <div
+        ref={listRef}
         className="relative flex-1 overflow-y-auto"
-        style={{ paddingBottom: `calc(var(--composer-h) + env(safe-area-inset-bottom))` }}
+        style={{
+          paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
+          scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
+        }}
       >
         {showEmpty && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -191,11 +232,15 @@ export default function Chat() {
           votes={[]}
         />
 
+        {/* Spacer fantasma del alto del composer para garantizar visibilidad */}
+        <div style={{ height: composerH }} />
+        {/* Ancla para scrollIntoView */}
         <div ref={endRef} />
       </div>
 
-      {/* Composer */}
+      {/* Composer cristal, medido por ResizeObserver */}
       <form
+        ref={composerRef}
         onSubmit={handleSubmit}
         className="sticky bottom-0 left-0 right-0 w-full bg-background/70 backdrop-blur"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
