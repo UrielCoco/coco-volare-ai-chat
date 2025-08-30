@@ -48,7 +48,7 @@ type Day = {
 type Itinerary = {
   lang?: string;
   tripTitle?: string;
-  title?: string;
+  title?: string; // compat
   clientBooksLongHaulFlights?: boolean;
   disclaimer?: string;
   days?: Day[];
@@ -66,23 +66,32 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
   return (
     <div className="w-full flex justify-start">
       {/* SIN bordes, con sombra */}
-      <div className="w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4">
-        {/* Header */}
+      <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
+        {/* Encabezado con logo */}
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-lg font-semibold">{title}</h3>
+          <div className="min-w-0">
+            <h3 className="text-lg md:text-xl font-semibold leading-tight truncate">{title}</h3>
             {data?.disclaimer && (
-              <p className="text-xs text-neutral-600 mt-1">{data.disclaimer}</p>
+              <p className="text-xs text-neutral-600 mt-1 line-clamp-3">{data.disclaimer}</p>
             )}
           </div>
-          {data?.price != null && (
-            <div className="text-sm font-medium whitespace-nowrap">
-              {data.price} {data.currency || ''}
-            </div>
-          )}
+
+          <div className="flex items-start gap-3 shrink-0">
+            {data?.price != null && (
+              <div className="text-sm font-medium whitespace-nowrap mt-1">
+                {data.price} {data.currency || ''}
+              </div>
+            )}
+            <img
+              src="/images/logo-coco-volare.png"
+              alt="Coco Volare"
+              className="h-7 md:h-8 w-auto select-none"
+              draggable={false}
+            />
+          </div>
         </div>
 
-        {/* Days */}
+        {/* Días */}
         <div className="space-y-3">
           {days.map((d, i) => {
             const locs = (d.locations || []).filter(Boolean);
@@ -108,6 +117,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                   </div>
                   {d.title && <div className="font-semibold">{d.title}</div>}
 
+                  {/* Ubicaciones */}
                   {locs.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {locs.map((l, j) => (
@@ -118,6 +128,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                     </div>
                   )}
 
+                  {/* Clima */}
                   {showWeather && (
                     <div className="mt-2 text-sm text-neutral-700 flex items-center gap-2">
                       <span>{d.weather?.icon || '🌤️'}</span>
@@ -135,6 +146,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                   )}
                 </div>
 
+                {/* Hoteles */}
                 {Array.isArray(d.hotelOptions) && d.hotelOptions.length > 0 && (
                   <div className="px-4 pb-3">
                     <div className="text-sm font-medium mb-2">Hoteles sugeridos</div>
@@ -153,6 +165,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                   </div>
                 )}
 
+                {/* Timeline */}
                 {tl.length > 0 && (
                   <div className="px-4 pb-4">
                     <div className="text-sm font-medium mb-2">Plan del día</div>
@@ -168,6 +181,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                           {item.optional ? <div className="text-xs text-neutral-600">Opcional</div> : null}
                           {item.notes && <div className="text-xs text-neutral-700 mt-1">{item.notes}</div>}
 
+                          {/* Opciones */}
                           {Array.isArray(item.options) && item.options.length > 0 && (
                             <ul className="mt-2 list-disc pl-5 text-sm">
                               {item.options.map((op, z) => (
@@ -180,6 +194,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                             </ul>
                           )}
 
+                          {/* Transporte */}
                           {item.category === 'transport' && item.transport && (
                             <div className="mt-2 text-xs text-neutral-700 space-y-0.5">
                               {item.transport.mode && <div>Modo: {item.transport.mode}</div>}
@@ -213,6 +228,16 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
         </div>
 
         {data?.notes && <div className="text-sm text-neutral-700">{data.notes}</div>}
+
+        {/* Marca de agua sutil (no invasiva) */}
+        <div className="pointer-events-none absolute -bottom-2 -right-2 opacity-[0.06] select-none">
+          <img
+            src="/images/logo-coco-volare.png"
+            alt=""
+            className="h-24 md:h-28 w-auto"
+            draggable={false}
+          />
+        </div>
       </div>
     </div>
   );
