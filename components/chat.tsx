@@ -21,10 +21,20 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // Altura real del composer (dinámica, depende de viewport/teclado)
+  // Altura real del composer (dinámica con ResizeObserver)
   const [composerH, setComposerH] = useState<number>(84);
 
-  // Observa cambios de altura del composer
+  // ¿Estamos cerca del fondo? (para no forzar scroll cuando el user sube)
+  const [stickToBottom, setStickToBottom] = useState(true);
+  const NEAR_BOTTOM_PX = 120;
+
+  const isNearBottom = () => {
+    const el = listRef.current;
+    if (!el) return true;
+    const dist = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    return dist <= NEAR_BOTTOM_PX;
+  };
+
   useEffect(() => {
     if (!composerRef.current) return;
     const ro = new ResizeObserver((entries) => {
@@ -35,20 +45,32 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // Soporte teclado móvil (iOS/Android): cuando el viewport cambia, bajamos
+  // Track manual scroll del usuario para habilitar/inhabilitar autoscroll
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const near = isNearBottom();
+      if (near !== stickToBottom) setStickToBottom(near);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [stickToBottom]);
+
+  // Soporte teclado móvil
   useEffect(() => {
     const vv = (window as any).visualViewport as VisualViewport | undefined;
     if (!vv) return;
-    const handler = () => scrollToBottom('smooth');
+    const handler = () => stickToBottom && scrollToBottom('smooth');
     vv.addEventListener('resize', handler);
     vv.addEventListener('scroll', handler);
     return () => {
       vv.removeEventListener('resize', handler);
       vv.removeEventListener('scroll', handler);
     };
-  }, []);
+  }, [stickToBottom]);
 
-  // Restaurar thread si existía
+  // Restaurar thread
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -62,23 +84,23 @@ export default function Chat() {
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     const scroller = listRef.current;
     if (!scroller) return;
-    // scrollIntoView + ajuste directo por compatibilidad
     endRef.current?.scrollIntoView({ behavior, block: 'end' });
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // Auto-scroll en cambios de mensajes, primer token y cuando cambia altura del composer
+  // Autoscroll solo si el usuario está cerca del fondo
   useEffect(() => {
-    // dos cuadros garantizan layout aplicado antes del scroll
-    requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('auto')));
-  }, [messages, hasFirstDelta, composerH]);
+    if (stickToBottom) {
+      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('auto')));
+    }
+  }, [messages, hasFirstDelta, composerH, stickToBottom]);
 
-  // También cuando la ventana cambia (rotación, split view, etc.)
+  // También en cambios de ventana
   useEffect(() => {
-    const handler = () => scrollToBottom('smooth');
+    const handler = () => stickToBottom && scrollToBottom('smooth');
     window.addEventListener('resize', handler);
     return () => window.removeEventListener('resize', handler);
-  }, []);
+  }, [stickToBottom]);
 
   async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
@@ -112,7 +134,7 @@ export default function Chat() {
           }
           return next;
         });
-        requestAnimationFrame(() => scrollToBottom('auto'));
+        if (stickToBottom) requestAnimationFrame(() => scrollToBottom('auto'));
       };
 
       while (true) {
@@ -153,7 +175,7 @@ export default function Chat() {
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
-            requestAnimationFrame(() => scrollToBottom('smooth'));
+            if (stickToBottom) requestAnimationFrame(() => scrollToBottom('smooth'));
           }
         }
       }
@@ -195,6 +217,7 @@ export default function Chat() {
 
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
+    // Envío = quiero ver el final
     requestAnimationFrame(() => scrollToBottom('smooth'));
     await handleStream(text, assistantId);
   };
@@ -203,7 +226,7 @@ export default function Chat() {
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
-      {/* Scroll area con padding dinámico para no tapar el último mensaje */}
+      {/* Scroll area con padding dinámico */}
       <div
         ref={listRef}
         className="relative flex-1 overflow-y-auto"
@@ -234,11 +257,10 @@ export default function Chat() {
 
         {/* Spacer fantasma del alto del composer para garantizar visibilidad */}
         <div style={{ height: composerH }} />
-        {/* Ancla para scrollIntoView */}
         <div ref={endRef} />
       </div>
 
-      {/* Composer cristal, medido por ResizeObserver */}
+      {/* Composer */}
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
@@ -249,7 +271,7 @@ export default function Chat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onFocus={() => requestAnimationFrame(() => scrollToBottom('smooth'))}
+            onFocus={() => requestAnimationFrame(() => stickToBottom && scrollToBottom('smooth'))}
             placeholder="Escribe tu mensaje…"
             className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
           />

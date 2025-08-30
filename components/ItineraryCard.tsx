@@ -48,7 +48,7 @@ type Day = {
 };
 
 type Itinerary = {
-  lang?: string;
+  lang?: 'es' | 'en' | string;
   tripTitle?: string;
   title?: string; // compat
   clientBooksLongHaulFlights?: boolean;
@@ -126,7 +126,7 @@ function DaySection({ d, index }: { d: Day; index: number }) {
         </div>
       )}
 
-      {tl.length > 0 && (
+      {Array.isArray(d.timeline) && d.timeline.length > 0 && (
         <div className="px-4 pb-4">
           <div className="text-sm font-medium mb-2">Plan del día</div>
           <ul className="space-y-2">
@@ -187,17 +187,25 @@ function DaySection({ d, index }: { d: Day; index: number }) {
 export default function ItineraryCard({ data }: { data: Itinerary }) {
   const title = data?.tripTitle || data?.title || 'Itinerario';
   const days = Array.isArray(data?.days) ? data.days : [];
-  const [showAll, setShowAll] = useState(false);
+  const [dayIdx, setDayIdx] = useState(0);
 
-  const VISIBLE = 3; // días visibles por defecto para mantener corto el chat
-  const visibleDays = showAll ? days : days.slice(0, VISIBLE);
+  const lang = (data?.lang === 'en' ? 'en' : 'es') as 'es' | 'en';
+  const t = {
+    prev: lang === 'en' ? 'Previous day' : 'Día anterior',
+    next: lang === 'en' ? 'Next day' : 'Siguiente día',
+    of:   lang === 'en' ? 'of' : 'de',
+  };
 
-  ulog('render.simple', { title, days: days.length, showAll });
+  const prev = () => setDayIdx((i) => Math.max(0, i - 1));
+  const next = () => setDayIdx((i) => Math.min(days.length - 1, i + 1));
+
+  ulog('render.simple-nav', { title, days: days.length, dayIdx, lang });
 
   return (
     <div className="w-full flex justify-start">
       {/* Sin bordes, con sombra y logo */}
       <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
+        {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <h3 className="text-lg md:text-xl font-semibold leading-tight truncate">{title}</h3>
@@ -221,26 +229,43 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
           </div>
         </div>
 
-        {/* Días (compacto) */}
-        <div className="space-y-3">
-          {visibleDays.map((d, i) => (
-            <DaySection key={i} d={d} index={i} />
-          ))}
-        </div>
-
-        {/* Toggle mostrar todo / menos */}
-        {days.length > VISIBLE && (
-          <div className="pt-1">
+        {/* Navegación simple por días */}
+        {days.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowAll((v) => !v)}
-              className="px-4 py-2 rounded-full bg-neutral-100 text-neutral-800 shadow text-sm"
-            >
-              {showAll ? 'Ver menos' : `Ver todos (${days.length})`}
-            </button>
+              onClick={prev}
+              disabled={dayIdx === 0}
+              className="rounded-full h-9 px-3 bg-black/80 text-white shadow disabled:opacity-30"
+              aria-label={t.prev}
+            >‹ {t.prev}</button>
+
+            <div className="mx-auto text-sm text-neutral-600">
+              {lang === 'en' ? `Day ${dayIdx + 1} ${t.of} ${days.length}` : `Día ${dayIdx + 1} ${t.of} ${days.length}`}
+            </div>
+
+            <button
+              onClick={next}
+              disabled={dayIdx === days.length - 1}
+              className="rounded-full h-9 px-3 bg-black/80 text-white shadow disabled:opacity-30"
+              aria-label={t.next}
+            >{t.next} ›</button>
           </div>
         )}
 
+        {/* Contenido del día seleccionado */}
+        {days[dayIdx] && <DaySection d={days[dayIdx]} index={dayIdx} />}
+
         {data?.notes && <div className="text-sm text-neutral-700">{data.notes}</div>}
+
+        {/* Marca de agua sutil */}
+        <div className="pointer-events-none absolute -bottom-2 -right-2 opacity-[0.06] select-none">
+          <img
+            src="/images/logo-coco-volare.png"
+            alt=""
+            className="h-24 md:h-28 w-auto"
+            draggable={false}
+          />
+        </div>
       </div>
     </div>
   );
