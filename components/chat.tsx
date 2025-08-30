@@ -14,72 +14,26 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [hasFirstDelta, setHasFirstDelta] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // Altura dinámica del composer
+  // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
-  // Autoscroll inteligente
-  // - nearBottom: margen pequeño para considerar "estoy al fondo"
-  // - lockMargin: cuánto me alejo para bloquear el autoscroll
-  const NEAR_BOTTOM_PX = 12;
-  const LOCK_MARGIN_PX = 48;
-  const [stickToBottom, setStickToBottom] = useState(true);
+  // detectar “nuevo mensaje” para auto-scroll SOLO una vez
+  const lastMsgIdRef = useRef<string | null>(null);
 
-  const distanceToBottom = () => {
-    const el = listRef.current;
-    if (!el) return 0;
-    return el.scrollHeight - (el.scrollTop + el.clientHeight);
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const scroller = listRef.current;
+    if (!scroller) return;
+    endRef.current?.scrollIntoView({ behavior, block: 'end' });
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  const isNearBottom = () => distanceToBottom() <= NEAR_BOTTOM_PX;
-
-  useEffect(() => {
-    if (!composerRef.current) return;
-    const ro = new ResizeObserver((entries) => {
-      const h = Math.ceil(entries[0].contentRect.height);
-      if (h && h !== composerH) setComposerH(h);
-    });
-    ro.observe(composerRef.current);
-    return () => ro.disconnect();
-  }, [composerH]);
-
-  // Bloqueo/desbloqueo de autoscroll según scroll manual del usuario
-  useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-
-    const onScroll = () => {
-      const dist = distanceToBottom();
-      // Si me alejo más de LOCK_MARGIN_PX, bloqueo autoscroll
-      if (dist > LOCK_MARGIN_PX && stickToBottom) setStickToBottom(false);
-      // Si vuelvo a estar prácticamente al fondo, re-activo autoscroll
-      if (dist <= NEAR_BOTTOM_PX && !stickToBottom) setStickToBottom(true);
-    };
-
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
-  }, [stickToBottom]);
-
-  // Apoyo para teclado móvil
-  useEffect(() => {
-    const vv = (window as any).visualViewport as VisualViewport | undefined;
-    if (!vv) return;
-    const handler = () => stickToBottom && scrollToBottom('smooth');
-    vv.addEventListener('resize', handler);
-    vv.addEventListener('scroll', handler);
-    return () => {
-      vv.removeEventListener('resize', handler);
-      vv.removeEventListener('scroll', handler);
-    };
-  }, [stickToBottom]);
-
-  // Restaurar thread
+  // restaurar thread
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -90,32 +44,30 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
-    const scroller = listRef.current;
-    if (!scroller) return;
-    endRef.current?.scrollIntoView({ behavior, block: 'end' });
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
-  };
-
-  // Autoscroll SOLO si estás al fondo
+  // observar altura real del composer (evita que tape el último mensaje)
   useEffect(() => {
-    if (!stickToBottom) return;
-    // dos frames para asegurar layout aplicado
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => scrollToBottom('auto')),
-    );
-  }, [messages, hasFirstDelta, composerH, stickToBottom]);
+    if (!composerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = Math.ceil(entries[0].contentRect.height);
+      if (h && h !== composerH) setComposerH(h);
+    });
+    ro.observe(composerRef.current);
+    return () => ro.disconnect();
+  }, [composerH]);
 
-  // También en resize, pero respetando el lock
+  // auto-scroll SOLO cuando hay un mensaje NUEVO (id distinto)
   useEffect(() => {
-    const handler = () => stickToBottom && scrollToBottom('smooth');
-    window.addEventListener('resize', handler);
-    return () => window.removeEventListener('resize', handler);
-  }, [stickToBottom]);
+    const last = messages[messages.length - 1]?.id;
+    if (!last) return;
+    if (lastMsgIdRef.current !== last) {
+      lastMsgIdRef.current = last;
+      // desplazamiento único para que el nuevo mensaje ya visible quede arriba del input
+      requestAnimationFrame(() => scrollToBottom('smooth'));
+    }
+  }, [messages]);
 
   async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
-    setHasFirstDelta(false);
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -133,6 +85,7 @@ export default function Chat() {
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
 
+      // NOTA: durante el streaming NO forzamos scroll; ya hicimos el ajuste al crear el placeholder
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
@@ -145,7 +98,6 @@ export default function Chat() {
           }
           return next;
         });
-        if (stickToBottom) requestAnimationFrame(() => scrollToBottom('auto'));
       };
 
       while (true) {
@@ -173,10 +125,7 @@ export default function Chat() {
           } else if (event === 'delta') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.value === 'string' && data.value.length) {
-                if (!hasFirstDelta) setHasFirstDelta(true);
-                applyText(data.value);
-              }
+              if (typeof data?.value === 'string' && data.value.length) applyText(data.value);
             } catch {}
           } else if (event === 'final') {
             try {
@@ -185,7 +134,6 @@ export default function Chat() {
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
-            if (stickToBottom) requestAnimationFrame(() => scrollToBottom('smooth'));
           }
         }
       }
@@ -225,11 +173,10 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any;
 
+    // agregar ambos y limpiar input
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    // Envío: me pego al final (el usuario espera ver su mensaje y la respuesta)
-    setStickToBottom(true);
-    requestAnimationFrame(() => scrollToBottom('smooth'));
+    // el efecto de "nuevo id" hará el auto-scroll una sola vez
     await handleStream(text, assistantId);
   };
 
@@ -237,7 +184,7 @@ export default function Chat() {
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
-      {/* Área scrolleable */}
+      {/* lista scrolleable */}
       <div
         ref={listRef}
         className="relative flex-1 overflow-y-auto"
@@ -259,7 +206,7 @@ export default function Chat() {
 
         <Messages
           messages={messages}
-          isLoading={isLoading && !hasFirstDelta}
+          isLoading={isLoading}
           setMessages={({ messages }) => setMessages(messages)}
           regenerate={async () => {}}
           isReadonly={false}
@@ -267,25 +214,12 @@ export default function Chat() {
           votes={[]}
         />
 
-        {/* Spacer = altura del composer, garantiza que el último mensaje no quede tapado */}
+        {/* spacer para que el último mensaje no quede oculto por el composer */}
         <div style={{ height: composerH }} />
         <div ref={endRef} />
-
-        {/* Botón "Ir al último" cuando autoscroll está bloqueado */}
-        {!stickToBottom && (
-          <div className="sticky bottom-[calc(12px+var(--safe,0px))] w-full grid place-items-center pointer-events-none" style={{ ['--safe' as any]: 'env(safe-area-inset-bottom)' }}>
-            <button
-              onClick={() => { setStickToBottom(true); scrollToBottom('smooth'); }}
-              className="pointer-events-auto px-3 py-2 rounded-full bg-black/80 text-white shadow"
-              aria-label="Ir al último"
-            >
-              Ir al último
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* Composer */}
+      {/* composer */}
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
@@ -296,7 +230,6 @@ export default function Chat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onFocus={() => stickToBottom && requestAnimationFrame(() => scrollToBottom('smooth'))}
             placeholder="Escribe tu mensaje…"
             className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
           />
@@ -309,7 +242,6 @@ export default function Chat() {
           </button>
         </div>
       </form>
-      
     </div>
   );
 }

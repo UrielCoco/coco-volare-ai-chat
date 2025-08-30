@@ -126,7 +126,7 @@ function DaySection({ d, index }: { d: Day; index: number }) {
         </div>
       )}
 
-      {Array.isArray(d.timeline) && d.timeline.length > 0 && (
+      {tl.length > 0 && (
         <div className="px-4 pb-4">
           <div className="text-sm font-medium mb-2">Plan del día</div>
           <ul className="space-y-2">
@@ -203,7 +203,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
 
   return (
     <div className="w-full flex justify-start">
-      {/* Sin bordes, con sombra y logo */}
+      {/* Sin bordes, con sombra y logo más visible */}
       <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -216,14 +216,15 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
 
           <div className="flex items-start gap-3 shrink-0">
             {data?.price != null && (
-              <div className="text-sm font-medium whitespace-nowrap mt-1">
+              <div className="text-sm font-medium whitespace-nowrap mt-2">
                 {data.price} {data.currency || ''}
               </div>
             )}
+            {/* LOGO MÁS GRANDE + ligera sombra */}
             <img
               src="/images/logo-coco-volare.png"
               alt="Coco Volare"
-              className="h-7 md:h-8 w-auto select-none"
+              className="h-12 md:h-14 lg:h-16 w-auto select-none drop-shadow-sm"
               draggable={false}
             />
           </div>
@@ -246,7 +247,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
             <button
               onClick={next}
               disabled={dayIdx === days.length - 1}
-              className="rounded-full h-9 px-3 bg-black/80 text-white shadow disabled:opacity-30"
+              className="rounded-full h-9 px-3 bg.black/80 text-white shadow disabled:opacity-30"
               aria-label={t.next}
             >{t.next} ›</button>
           </div>
