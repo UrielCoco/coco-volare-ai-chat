@@ -14,32 +14,30 @@ function log(level: "info" | "error", msg: string, meta: any = {}) {
   try { console.log(JSON.stringify({ level, tag: "[CV][ast]", msg, meta })); } catch {}
 }
 
-/* ------------ helpers compatibles (SDK nuevo/antiguo) ------------- */
-async function createThread(metadata?: Record<string, any>) {
+/** --------- Helpers tolerantes a cambios menores del SDK ---------- */
+async function createThread(metadata: any) {
   try { return await (client.beta.threads as any).create({ metadata }); }
-  catch { return await (client.beta.threads as any).create(); }
+  catch { return await (client.beta.threads as any).create({ metadata }); }
 }
 async function messagesCreate(threadId: string, body: any) {
-  try { return await (client.beta.threads.messages as any).create({ thread_id: threadId, ...body }); }
-  catch { return await (client.beta.threads.messages as any).create(threadId, body); }
+  try { return await (client.beta.threads.messages as any).create(threadId, body); }
+  catch { return await (client.beta.threads.messages as any).create({ thread_id: threadId, ...body }); }
 }
 async function runsCreate(threadId: string, body: any) {
-  try { return await (client.beta.threads.runs as any).create({ thread_id: threadId, ...body }); }
-  catch { return await (client.beta.threads.runs as any).create(threadId, body); }
+  try { return await (client.beta.threads.runs as any).create(threadId, body); }
+  catch { return await (client.beta.threads.runs as any).create({ thread_id: threadId, ...body }); }
 }
-async function runsRetrieve(threadId: string, runId: string) {
-  try { return await (client.beta.threads.runs as any).retrieve(runId, { thread_id: threadId }); }
-  catch { return await (client.beta.threads.runs as any).retrieve(threadId, runId); }
+async function runsRetrieve(runId: string, params: any) {
+  try { return await (client.beta.threads.runs as any).retrieve(runId, params); }
+  catch { return await (client.beta.threads.runs as any).retrieve({ run_id: runId, ...params }); }
 }
-async function runsSubmitToolOutputs(threadId: string, runId: string, tool_outputs: any[]) {
-  // nuevo
-  try { return await (client.beta.threads.runs as any).submitToolOutputs(runId, { thread_id: threadId, tool_outputs }); }
-  // viejo
-  catch { return await (client.beta.threads.runs as any).submitToolOutputs(threadId, runId, { tool_outputs }); }
+async function runsCancel(runId: string, params: any) {
+  try { return await (client.beta.threads.runs as any).cancel(runId, params); }
+  catch { return await (client.beta.threads.runs as any).cancel({ run_id: runId, ...params }); }
 }
 async function messagesList(threadId: string, params: any) {
-  try { return await (client.beta.threads.messages as any).list({ thread_id: threadId, ...params }); }
-  catch { return await (client.beta.threads.messages as any).list(threadId, params); }
+  try { return await (client.beta.threads.messages as any).list(threadId, params); }
+  catch { return await (client.beta.threads.messages as any).list({ thread_id: threadId, ...params }); }
 }
 /* ------------------------------------------------------------------ */
 
@@ -50,7 +48,9 @@ export async function runAssistantOnce({
 }: RunOnceParams): Promise<{ reply: string; threadId: string }> {
   if (!ASSISTANT_ID) throw new Error("OPENAI_ASSISTANT_ID is not set");
 
-  // Garantiza threadId
+  const start = Date.now();
+
+  // Garantiza thread
   let ensuredThreadId: string;
   if (threadId && typeof threadId === "string" && threadId.trim()) {
     ensuredThreadId = threadId;
@@ -64,51 +64,25 @@ export async function runAssistantOnce({
   await messagesCreate(ensuredThreadId, { role: "user", content: input });
   log("info", "message.user.appended", { preview: input.slice(0, 140) });
 
-  // Run
-  let run = await runsCreate(ensuredThreadId, { assistant_id: ASSISTANT_ID });
-  log("info", "run.created", { runId: run.id, status: run.status });
+  // Run (sin instrucciones: no forzamos itinerario)
+  let run = await runsCreate(ensuredThreadId, { assistant_id: ASSISTANT_ID, metadata });
+  let status = run.status;
 
-  const start = Date.now();
-  const DEADLINE = 90_000;
+  const POLL_MS = 300;
+  const MAX_WAIT_MS = 120_000;
+  const ACTIVE = new Set(["queued","in_progress","requires_action","cancelling"]);
 
-  while (true) {
-    if (Date.now() - start > DEADLINE) {
-      log("error", "run.timeout", { runId: run.id });
-      throw new Error("Run timeout");
+  // Poll simple
+  const t0 = Date.now();
+  while (ACTIVE.has(status as any)) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    run = await runsRetrieve(String(run.id), { thread_id: ensuredThreadId });
+    status = run.status;
+    if (Date.now() - t0 > MAX_WAIT_MS) {
+      try { await runsCancel(String(run.id), { thread_id: ensuredThreadId }); } catch {}
+      log("error", "run.timeout.cancelled", { threadId: ensuredThreadId });
+      break;
     }
-
-    const cur = await runsRetrieve(ensuredThreadId, run.id);
-
-    // 🔧 Si el Assistant aún trae herramientas → responder tool_calls con NO-OP
-    if (cur.status === "requires_action" && (cur as any)?.required_action?.submit_tool_outputs?.tool_calls) {
-      const calls: any[] = (cur as any).required_action.submit_tool_outputs.tool_calls;
-      log("info", "run.requires_action", { runId: run.id, toolCalls: calls.map(c => c.function?.name) });
-
-      const tool_outputs = calls.map((c: any) => ({
-        tool_call_id: c.id,
-        // devolvemos un output universal para “saltar” la herramienta
-        output: JSON.stringify({
-          ok: true,
-          skipped: true,
-          note: "Tool disabled in this deployment. Continue the conversation and render itinerary with cv:itinerary."
-        }),
-      }));
-
-      await runsSubmitToolOutputs(ensuredThreadId, run.id, tool_outputs);
-      // seguimos el loop hasta “completed”
-      await new Promise(r => setTimeout(r, 600));
-      continue;
-    }
-
-    if (cur.status === "completed") break;
-
-    if (["failed","expired","cancelled","incomplete"].includes(cur.status as string)) {
-      log("error", "run.failed", { status: cur.status, last_error: (cur as any)?.last_error });
-      throw new Error(`Run status: ${cur.status}`);
-    }
-
-    log("info", "run.poll", { status: cur.status });
-    await new Promise(r => setTimeout(r, 900));
   }
 
   // Mensaje del assistant
@@ -125,7 +99,7 @@ export async function runAssistantOnce({
   log("info", "reply.ready", {
     ms: Date.now() - start,
     replyPreview: reply.slice(0, 160),
-    threadId: ensuredThreadId,
+    status,
   });
 
   return { reply, threadId: ensuredThreadId };

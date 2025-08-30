@@ -1,24 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server'
 import OpenAI from 'openai'
 
+/**
+ * Coco Volare · Chat Stream (LIGHT)
+ * - Conversación fluida con Assistants
+ * - SSE real con keepalive + watchdog
+ * - SIN forzar itinerario (solo si el usuario lo pide o ya hay contexto)
+ * - Logs útiles para Vercel (latencias, tamaños, estados)
+ */
+
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!
 
-const POLL_MS = 200
-const MAX_WAIT_MS = 120000
-const ACTIVE_STATUSES = new Set(['queued','in_progress','requires_action','cancelling'])
-const IDLE_FALLBACK_MS = 25000 // si no hay tokens en 25s, cerramos digno
+// Tiempos
+const POLL_MS = 250                  // polling runs (fallback JSON)
+const MAX_WAIT_MS = 120_000          // tope duro de una respuesta
+const IDLE_FALLBACK_MS = 25_000      // si no llegan tokens, se cierra con dignidad
+const PING_MS = 12_000               // SSE keepalive: evita timeouts intermedios
+
+const ACTIVE = new Set(['queued','in_progress','requires_action','cancelling'])
 
 type UiPart = { type: 'text'; text: string }
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-const now = () => Date.now()
 
-function log(obj: any) {
-  try { console.log('[CV][server]', JSON.stringify(obj)) }
-  catch { console.log('[CV][server]', obj) }
+const now = () => Date.now()
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+const rid = () => `cv_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`
+
+function jlog(event: string, meta: any = {}) {
+  try { console.log(JSON.stringify({ tag: '[CV][server]', event, ...meta })) } catch { console.log('[CV][server]', event, meta) }
 }
 
 async function waitForNoActiveRun(threadId: string) {
@@ -27,9 +39,9 @@ async function waitForNoActiveRun(threadId: string) {
     try {
       const runs = await client.beta.threads.runs.list(threadId, { order: 'desc', limit: 1 })
       const last = runs.data[0]
-      if (!last || !ACTIVE_STATUSES.has(last.status as any)) return
+      if (!last || !ACTIVE.has(last.status as any)) return
     } catch (e) {
-      console.warn('[CV][server] runs.list failed, proceeding:', (e as any)?.message || e)
+      jlog('runs.list.error', { message: (e as any)?.message || String(e) })
       return
     }
     await sleep(POLL_MS)
@@ -37,14 +49,11 @@ async function waitForNoActiveRun(threadId: string) {
   }
 }
 
-// Petición explícita de itinerario
-function askedForItinerary(prompt: string) {
-  return /\b(itinerar(?:io|y)|itinerary|cv:itinerary|dame.*itinerario|itinerario detallado)\b/i.test(prompt || '')
+function askedForItinerary(s: string) {
+  return /\b(itinerar(?:io|y)|itinerary|cv:itinerary|dame\s+.*itinerario|itinerario\s+detallado)\b/i.test(s || '')
 }
-
-// Confirmación corta típica para “haz el itinerario”
-function isConfirmation(prompt: string) {
-  return /\b(s[ií]|dale|hazlo|va|ok|okay|de acuerdo|perfecto|procede|continu(?:a|emos)|armal(?:o|a)|listo|sí adelante|si adelante|haz el itinerario)\b/i.test(prompt || '')
+function isConfirmation(s: string) {
+  return /\b(s[ií]|va|ok|okay|de acuerdo|perfecto|claro|hazlo|adelante|proced[e|e]|arm[a|e]lo|haz el itinerario)\b/i.test(s || '')
 }
 
 function extractAssistantText(messages: any[]) {
@@ -58,126 +67,112 @@ function extractAssistantText(messages: any[]) {
 }
 
 /* =========================
-   SSE (respuesta inmediata)
+   SSE (recomendado)
    ========================= */
 async function handleStream(req: NextRequest) {
+  const traceId = req.headers.get('x-trace-id') || rid()
   const encoder = new TextEncoder()
   const t0 = now()
 
-  const body = await req.json()
+  const body = await req.json().catch(() => ({}))
   const incoming = body?.message as { role: 'user' | 'assistant'; parts: UiPart[] } | undefined
   let threadId: string | undefined = body?.threadId
-  const userText = incoming?.parts?.[0]?.text?.trim()
-  if (!userText) return new Response('empty message', { status: 400 })
+  const userText = incoming?.parts?.[0]?.text?.trim() || ''
+
+  if (!userText) {
+    jlog('skip.empty', { traceId })
+    return new Response('', { status: 204 })
+  }
 
   const stream = new ReadableStream({
     start: async (controller) => {
       const send = (event: string, data: any) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       }
+      const ping = () => controller.enqueue(encoder.encode(`: ping\n\n`))
 
       try {
-        log({ step: 'incoming', threadId, preview: userText.slice(0, 160) })
+        jlog('recv', { traceId, preview: userText.slice(0, 140) })
 
+        // Asegura thread
         if (!threadId) {
-          const created = await client.beta.threads.create({ metadata: { channel: 'web-embed' } })
-          threadId = created.id
-          log({ step: 'thread.created', threadId })
+          const t = await client.beta.threads.create({ metadata: { channel: 'web-embed' } })
+          threadId = t.id
         }
         send('meta', { threadId })
+        jlog('thread.ready', { traceId, threadId })
 
+        // Evita 400 "Can't add messages ... while a run is active"
         await waitForNoActiveRun(threadId!)
 
+        // Agrega mensaje de usuario
         await client.beta.threads.messages.create(threadId!, { role: 'user', content: userText })
-        log({ step: 'message.appended' })
+        jlog('message.appended', { traceId })
 
-        const forceItinerary = askedForItinerary(userText) || isConfirmation(userText)
-        const instructions = forceItinerary
+        // Decide si "sugerir" (no forzar) instructions de itinerario
+        const forceItin = askedForItinerary(userText) || isConfirmation(userText)
+        const instructions = forceItin
           ? [
-              'Responde SOLO con un bloque:',
+              'Si el usuario pide el itinerario explícitamente y ya hay datos suficientes, responde EXCLUSIVAMENTE con:',
               '```cv:itinerary',
-              '{ JSON válido según el esquema del sistema }',
+              '{ JSON válido y completo según el esquema del sistema }',
               '```',
+              'Si aún faltan datos, pregunta puntualmente y conversa normal.',
             ].join('\n')
-          : [
-              'Responde de inmediato y claro.',
-              'Si el cliente pide un itinerario explícitamente, usa SOLO:',
-              '```cv:itinerary',
-              '{ JSON válido según el esquema del sistema }',
-              '```',
-              'Si no, conversa normalmente.',
-            ].join('\n')
+          : undefined
 
-        // ——— STREAM ———
-        // @ts-ignore tipado laxo del emitter del SDK
+        // Stream de OpenAI Assistants
+        // @ts-ignore: sdk stream emitter sin tipado detallado
         const runStream: any = await client.beta.threads.runs.stream(threadId!, {
           assistant_id: ASSISTANT_ID,
           instructions,
           metadata: { channel: 'web-embed' },
         })
 
-        let runId: string | undefined
+        let lastTokenAt = now()
         let firstDeltaMs: number | null = null
-        let lastTokenAt = Date.now()
 
-        log({ step: 'stream.open' })
-
-        // Watchdog: si no hay tokens en X segundos, cancelamos y devolvemos último mensaje
-        const watchdog = setInterval(async () => {
-          if (Date.now() - lastTokenAt > IDLE_FALLBACK_MS) {
-            log({ step: 'watchdog.trigger', idleForMs: Date.now() - lastTokenAt })
-            try { if (runId) await client.beta.threads.runs.cancel(runId, { thread_id: threadId! }) } catch {}
+        const watchdog = setInterval(() => {
+          if (now() - lastTokenAt > IDLE_FALLBACK_MS) {
+            jlog('idle.fallback', { traceId, idle_ms: now() - lastTokenAt })
             clearInterval(watchdog)
-            try {
-              const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 })
-              const text = extractAssistantText(msgs.data)
-              const final_has_itinerary = /```(?:\s*)cv:itinerary/i.test(text)
-              log({
-                step: 'watchdog.final',
-                size: text.length,
-                final_has_itinerary,
-                preview: text.slice(0, 160)
-              })
-              send('final', { text })
-            } catch (e: any) {
-              send('error', { message: String(e?.message || e) })
-            } finally {
-              send('done', {
-                ms: now() - t0,
-                first_delta_ms: firstDeltaMs,
-                idleFallback: true,
-              })
-              controller.close()
-            }
+            keepAlive?.()
+            controller.close()
+          } else {
+            ping()
           }
-        }, 1200)
+        }, PING_MS)
+
+        const keepAlive = () => clearInterval(watchdog)
 
         runStream
-          .on('runCreated', (event: any) => {
-            runId = event?.data?.id
-            log({ step: 'run.created', runId, t_run_created_ms: now() - t0 })
-          })
           .on('textDelta', (delta: any) => {
-            if (delta?.value) {
-              if (firstDeltaMs == null) {
-                firstDeltaMs = now() - t0
-                log({ step: 'first.delta', first_delta_ms: firstDeltaMs })
-              }
-              lastTokenAt = Date.now()
-              send('delta', { value: delta.value })
+            if (firstDeltaMs == null) {
+              firstDeltaMs = now() - t0
+              jlog('first.delta', { traceId, ms: firstDeltaMs })
             }
+            lastTokenAt = now()
+            send('delta', { value: delta.value })
+          })
+          .on('messageCompleted', () => {
+            // no-op; el cierre se hace en 'end'
+          })
+          .on('runStepCreated', (e: any) => jlog('run.step.created', { traceId, type: e?.type }))
+          .on('error', (err: any) => {
+            jlog('stream.error', { traceId, err: String(err?.message || err) })
+            send('error', { message: String(err?.message || err) })
           })
           .on('end', async () => {
-            clearInterval(watchdog)
+            keepAlive()
             try {
               const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 })
               const finalText = extractAssistantText(msgs.data)
-              const final_has_itinerary = /```(?:\s*)cv:itinerary/i.test(finalText)
-              log({
-                step: 'stream.end.snapshot',
-                final_has_itinerary,
+              const hasItin = /```(?:\s*)cv:itinerary/i.test(finalText)
+              jlog('stream.end.snapshot', {
+                traceId,
+                hasItinerary: hasItin,
                 size: finalText.length,
-                preview: finalText.slice(0, 160)
+                preview: finalText.slice(0, 160),
               })
               send('final', { text: finalText })
             } catch (e: any) {
@@ -191,23 +186,22 @@ async function handleStream(req: NextRequest) {
               controller.close()
             }
           })
-          .on('error', (err: any) => {
-            clearInterval(watchdog)
-            log({ step: 'stream.error', message: String(err?.message || err) })
-            send('error', { message: String(err?.message || err) })
-            controller.close()
-          })
-
-      } catch (err: any) {
-        log({ step: 'stream.exception', message: String(err?.message || err) })
+      } catch (e: any) {
+        jlog('exception', { traceId, err: String(e?.message || e) })
+        send('error', { message: String(e?.message || e) })
+        send('done', { ms: now() - t0, first_delta_ms: null, idleFallback: false })
         controller.close()
       }
+    },
+    cancel() {
+      jlog('client.cancel')
     },
   })
 
   return new Response(stream, {
+    status: 200,
     headers: {
-      'Content-Type': 'text/event-stream',
+      'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
@@ -215,39 +209,43 @@ async function handleStream(req: NextRequest) {
   })
 }
 
-/* ===== Fallback JSON (compatibilidad sin stream) ===== */
+/* =========================
+   JSON (fallback no-stream)
+   ========================= */
 async function handleJson(req: NextRequest) {
   const t0 = now()
+  const body = await req.json().catch(() => ({}))
+  const incoming = body?.message as { role: 'user' | 'assistant'; parts: UiPart[] } | undefined
+  let threadId: string | undefined = body?.threadId
+  const userText = incoming?.parts?.[0]?.text?.trim() || ''
+
+  if (!userText) return NextResponse.json({ ok: true, skipped: 'empty' }, { status: 200 })
+
   try {
-    const body = await req.json()
-    const incoming = body?.message as { role: 'user' | 'assistant'; parts: UiPart[] } | undefined
-    let threadId: string | undefined = body?.threadId
-    const userText = incoming?.parts?.[0]?.text?.trim()
-    if (!userText) return NextResponse.json({ error: 'empty message' }, { status: 400 })
-
-    log({ step: 'incoming', threadId, preview: userText.slice(0, 160) })
-
     if (!threadId) {
-      const created = await client.beta.threads.create({ metadata: { channel: 'web-embed' } })
-      threadId = created.id
-      log({ step: 'thread.created', threadId })
+      const t = await client.beta.threads.create({ metadata: { channel: 'web-embed' } })
+      threadId = t.id
     }
 
     await waitForNoActiveRun(threadId!)
     await client.beta.threads.messages.create(threadId!, { role: 'user', content: userText })
-    log({ step: 'message.appended' })
 
-    const forceItinerary = askedForItinerary(userText) || isConfirmation(userText)
-    const instructions = forceItinerary
-      ? ['```cv:itinerary', '{ JSON válido según el esquema del sistema }', '```'].join('\n')
-      : 'Responde de inmediato y claro.'
+    const forceItin = askedForItinerary(userText) || isConfirmation(userText)
+    const instructions = forceItin
+      ? [
+          'Si el usuario pide el itinerario y ya hay datos suficientes, responde EXCLUSIVAMENTE con el bloque:',
+          '```cv:itinerary',
+          '{ JSON válido y completo según el esquema del sistema }',
+          '```',
+          'Si aún faltan datos, pregunta puntualmente.',
+        ].join('\n')
+      : undefined
 
     const run = await client.beta.threads.runs.create(threadId!, {
       assistant_id: ASSISTANT_ID,
       instructions,
       metadata: { channel: 'web-embed' },
     })
-    log({ step: 'run.created', runId: run.id, t_run_created_ms: now() - t0 })
 
     let status = run.status
     const tStart = now()
@@ -255,12 +253,12 @@ async function handleJson(req: NextRequest) {
       const poll = await client.beta.threads.runs.retrieve(run.id, { thread_id: threadId! })
       if (status !== poll.status) {
         status = poll.status
-        log({ step: 'run.status', status })
+        jlog('run.status', { status })
       }
       if (['completed','failed','expired','cancelled'].includes(status)) break
       if (now() - tStart > MAX_WAIT_MS) {
         try { await client.beta.threads.runs.cancel(run.id, { thread_id: threadId! }) } catch {}
-        log({ step: 'run.timeout.cancelled' })
+        jlog('run.timeout.cancelled')
         break
       }
       await sleep(POLL_MS)
@@ -268,18 +266,16 @@ async function handleJson(req: NextRequest) {
 
     const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 12 })
     const reply = extractAssistantText(msgs.data)
-    const final_has_itinerary = /```(?:\s*)cv:itinerary/i.test(reply)
-
-    log({
-      step: 'reply.ready',
+    const hasItin = /```(?:\s*)cv:itinerary/i.test(reply)
+    jlog('reply.ready', {
       ms: now() - t0,
-      final_has_itinerary,
+      hasItinerary: hasItin,
       size: reply.length,
       preview: reply.slice(0, 160),
     })
     return NextResponse.json({ threadId, reply, runStatus: status })
   } catch (err: any) {
-    console.error('[CV][server] exception', err)
+    jlog('exception', { err: String(err?.message || err) })
     return NextResponse.json({ error: String(err?.message || err) }, { status: 500 })
   }
 }
