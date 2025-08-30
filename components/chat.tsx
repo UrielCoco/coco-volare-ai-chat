@@ -309,6 +309,7 @@ export default function Chat() {
           </button>
         </div>
       </form>
+      
     </div>
   );
 }
