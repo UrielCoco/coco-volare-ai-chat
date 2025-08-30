@@ -50,7 +50,7 @@ function extractBalancedJsonFrom(text: string, startBraceIndex: number): any | n
   return null;
 }
 
-/** Heurística: ¿se ve como objeto de itinerario? */
+/** Heurística para reconocer que el objeto parece un itinerario */
 function isItineraryObject(o: any): boolean {
   if (!o || typeof o !== 'object') return false;
   if (Array.isArray(o.days) && o.days.length >= 1) return true;
@@ -63,22 +63,18 @@ function isItineraryObject(o: any): boolean {
  * - 2 o 3 backticks: `` o ```
  * - espacios opcionales: ``` cv:itinerary / ```cv : itinerary
  */
-function findFenceTagIndex(s: string): number {
-  const re = /`{2,3}\s*cv\s*:\s*itinerary/i;
-  const m = s.match(re);
-  return m && typeof m.index === 'number' ? m.index : -1;
+function containsFenceTag(s: string): boolean {
+  return /`{2,3}\s*cv\s*:\s*itinerary/i.test(s);
 }
 
 /** Variante sin fences, al inicio de línea o tras salto */
-function findPlainTagIndex(s: string): number {
-  const re = /(^|\n)\s*cv\s*:\s*itinerary/i;
-  const m = s.match(re);
-  return m && typeof m.index === 'number' ? m.index : -1;
+function containsPlainTag(s: string): boolean {
+  return /(^|\n)\s*cv\s*:\s*itinerary/i.test(s);
 }
 
 /**
  * Parser robusto que cubre:
- * 1) ```cv:itinerary (3 o 2 backticks, espacios opcionales)
+ * 1) ```cv:itinerary (2/3 backticks, espacios opcionales)
  * 2) cv:itinerary ... { ... } (sin fences)
  * 3) ```json ... ```
  * 4) JSON toplevel puro (empieza directamente con { ... })
@@ -87,34 +83,26 @@ function extractItinerary(rawText: string): any | null {
   if (!rawText) return null;
   const s = normalizeSmartQuotes(rawText);
 
-  // 1) Fence tolerante: ``cv:itinerary o ``` cv:itinerary o ```cv : itinerary
-  {
-    const idx = findFenceTagIndex(s);
-    if (idx !== -1) {
-      const after = idx + 1; // da igual exacto; buscamos la primera '{' después
-      const sj = s.indexOf('{', after);
-      if (sj !== -1) {
-        const obj = extractBalancedJsonFrom(s, sj);
-        if (obj && isItineraryObject(obj)) {
-          ulog('itinerary.detect.fence.tolerant', { len: JSON.stringify(obj).length });
-          return obj;
-        }
+  // 1) Fence tolerante
+  if (containsFenceTag(s)) {
+    const sj = s.indexOf('{', s.search(/`{2,3}\s*cv\s*:\s*itinerary/i));
+    if (sj !== -1) {
+      const obj = extractBalancedJsonFrom(s, sj);
+      if (obj && isItineraryObject(obj)) {
+        ulog('itinerary.detect.fence', { len: JSON.stringify(obj).length });
+        return obj;
       }
     }
   }
 
-  // 2) Plano: cv:itinerary ... { ... } (sin fences, inicio de línea o tras salto)
-  {
-    const idx = findPlainTagIndex(s);
-    if (idx !== -1) {
-      const after = idx + 1;
-      const sj = s.indexOf('{', after);
-      if (sj !== -1) {
-        const obj = extractBalancedJsonFrom(s, sj);
-        if (obj && isItineraryObject(obj)) {
-          ulog('itinerary.detect.plain', { len: JSON.stringify(obj).length });
-          return obj;
-        }
+  // 2) Plano: cv:itinerary ... { ... }
+  if (containsPlainTag(s)) {
+    const sj = s.indexOf('{', s.search(/(^|\n)\s*cv\s*:\s*itinerary/i));
+    if (sj !== -1) {
+      const obj = extractBalancedJsonFrom(s, sj);
+      if (obj && isItineraryObject(obj)) {
+        ulog('itinerary.detect.plain', { len: JSON.stringify(obj).length });
+        return obj;
       }
     }
   }
@@ -189,7 +177,8 @@ export default function Messages({
     const out = messages.map((m) => {
       const text = getMessageText(m);
       const itin = extractItinerary(text);
-      return { msg: m, text, itin };
+      const hasTag = containsFenceTag(text) || containsPlainTag(text);
+      return { msg: m, text, itin, hasTag };
     });
     ulog('render.batch', { count: out.length });
     return out;
@@ -197,14 +186,31 @@ export default function Messages({
 
   return (
     <div className="mx-auto w-full max-w-3xl px-3 py-6 space-y-3">
-      {items.map(({ msg, text, itin }) =>
-        itin ? (
-          <ItineraryCard key={msg.id} data={itin} />
-        ) : (
-          <Message key={msg.id} role={normalizeRole((msg as any)?.role)} text={text} />
-        )
-      )}
+      {items.map(({ msg, text, itin, hasTag }) => {
+        const role = normalizeRole((msg as any)?.role);
 
+        // 1) Si es respuesta del assistant y estamos streameando cv:itinerary pero
+        // aún NO hay JSON válido, mostramos loader (no el JSON crudo).
+        if (role === 'assistant' && hasTag && !itin) {
+          return (
+            <div key={msg.id} className="w-full flex justify-start">
+              <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow">
+                <span className="opacity-80">preparando itinerario…</span>
+              </div>
+            </div>
+          );
+        }
+
+        // 2) Si ya tenemos JSON válido, renderiza la tarjeta
+        if (itin) {
+          return <ItineraryCard key={msg.id} data={itin} />;
+        }
+
+        // 3) Mensaje normal
+        return <Message key={msg.id} role={role} text={text} />;
+      })}
+
+      {/* Loader genérico solo cuando no hay cv:itinerary en curso */}
       {isLoading && (
         <div className="w-full flex justify-start">
           <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow">
