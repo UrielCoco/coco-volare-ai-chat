@@ -1,4 +1,3 @@
-// components/messages.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -15,7 +14,7 @@ type Props = {
   votes?: any[];
 };
 
-// --- Helpers mínimos ---------------------------------------------------------
+// --- Helpers ---------------------------------------------------------
 
 const getText = (m: any): string => {
   if (!m) return '';
@@ -36,13 +35,9 @@ const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
   return 'es';
 };
 
-/** Busca un JSON balanceado a partir de la primera `{` y lo devuelve si cierra. */
+/** JSON balanceado desde el primer { a partir de startIdx */
 function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false;
-  let escape = false;
-  let depth = 0;
-  let first = -1;
-
+  let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
     const ch = src[i];
     if (inString) {
@@ -53,48 +48,32 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
     }
     if (ch === '"') { inString = true; continue; }
     if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') {
-      depth--;
-      if (depth === 0 && first >= 0) {
-        return src.slice(first, i + 1);
-      }
-    }
+    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
   }
   return null;
 }
 
-/** Intenta extraer y parsear cv:itinerary, permitiendo bloque con o sin backticks. */
+/** Extrae cv:itinerary (fenced o directo) y valida si está completo */
 function extractItineraryFromText(text: string): { found: boolean; complete: boolean; data?: any } {
   const lower = text.toLowerCase();
-  const label = 'cv:itinerary';
-  const labelIdx = lower.indexOf(label);
+  const labelIdx = lower.indexOf('cv:itinerary');
   if (labelIdx === -1) return { found: false, complete: false };
 
-  // 1) Caso con backticks ```cv:itinerary ... ```
   const fenced = text.match(/```[\s]*cv:itinerary\s*([\s\S]*?)```/i);
   if (fenced) {
-    try {
-      const data = JSON.parse(fenced[1]);
-      return { found: true, complete: true, data };
-    } catch {
-      return { found: true, complete: false };
-    }
+    try { return { found: true, complete: true, data: JSON.parse(fenced[1]) }; }
+    catch { return { found: true, complete: false }; }
   }
 
-  // 2) Caso SIN backticks: tomar JSON balanceado a partir del primer `{` tras la etiqueta
   const braceIdx = text.indexOf('{', labelIdx);
   if (braceIdx === -1) return { found: true, complete: false };
   const jsonSlice = extractBalancedJson(text, braceIdx);
   if (!jsonSlice) return { found: true, complete: false };
-  try {
-    const data = JSON.parse(jsonSlice);
-    return { found: true, complete: true, data };
-  } catch {
-    return { found: true, complete: false };
-  }
+  try { return { found: true, complete: true, data: JSON.parse(jsonSlice) }; }
+  catch { return { found: true, complete: false }; }
 }
 
-// --- Burbujas & Loader -------------------------------------------------------
+// --- UI bits ---------------------------------------------------------
 
 function UserBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -136,13 +115,13 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   );
 }
 
-// --- Componente principal ----------------------------------------------------
+// --- Componente -------------------------------------------------------
 
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
 
-  // Loader con fade in/out sin tocar tu flujo
+  // Loader con fade in/out
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
 
@@ -160,25 +139,30 @@ export default function Messages(props: Props) {
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
       {messages.map((m, i) => {
-        const text = getText(m);
         const role = (m as any).role as 'user' | 'assistant' | 'system';
-        const stopped = (m as any)?.stopped === true; // opcional, no rompe si no existe
+        const raw = getText(m) ?? '';
+        // 🔒 Regla anti-doble-burbuja:
+        // si el asistente aún no ha emitido tokens y el texto está vacío,
+        // NO renderizamos la burbuja (el loader será lo único visible).
+        const trimmed = raw.replace(/\u200B/g, '').trim();
 
         if (role === 'user') {
           return (
             <UserBubble key={(m as any).id || i}>
-              <div className="whitespace-pre-wrap break-words">{text}</div>
+              <div className="whitespace-pre-wrap break-words">{raw}</div>
             </UserBubble>
           );
         }
 
         if (role === 'assistant') {
-          // 1) Si detectamos cv:itinerary, solo mostramos la tarjeta cuando el JSON esté COMPLETO
-          const it = extractItineraryFromText(text);
-          if (it.found && !it.complete) {
-            // Ocultamos el texto (para no ver JSON) y dejamos que el loader sea lo único visible
+          // Oculta burbujas vacías (evita el “globo negro” mini)
+          if (!trimmed) {
             return null;
           }
+
+          // Itinerary: solo muestra tarjeta cuando el JSON esté completo
+          const it = extractItineraryFromText(trimmed);
+          if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
@@ -187,11 +171,10 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 2) Si no hay cv:itinerary, render normal
           return (
             <AssistantBubble key={(m as any).id || i}>
-              <div className="whitespace-pre-wrap break-words">{text}</div>
-              {stopped && (
+              <div className="whitespace-pre-wrap break-words">{trimmed}</div>
+              {(m as any)?.stopped === true && (
                 <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>
               )}
             </AssistantBubble>
@@ -201,10 +184,9 @@ export default function Messages(props: Props) {
         return null;
       })}
 
-      {/* Loader con fade-in/out */}
+      {/* Loader */}
       {showLoader && <Loader lang={lang} phase={phase} />}
 
-      {/* Animaciones globales (solo apariencia) */}
       <style jsx global>{`
         @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
         @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
