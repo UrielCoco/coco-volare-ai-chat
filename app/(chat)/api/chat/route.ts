@@ -4,29 +4,16 @@ import OpenAI from 'openai'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// --- OpenAI client ---
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
-
-// Assistant configuration (set this in your env)
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!
 
-// Tuning
-const POLL_MS = 300        // faster polling for snappier replies
-const MAX_WAIT_MS = 120000 // 2 minutes hard cap
+const POLL_MS = 200
+const MAX_WAIT_MS = 120000
+const ACTIVE_STATUSES = new Set(['queued','in_progress','requires_action','cancelling'])
 
 type UiPart = { type: 'text'; text: string }
-
-// Small helpers
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const now = () => Date.now()
-
-// Some statuses mean the run is still "active" and you should not add new messages
-const ACTIVE_STATUSES = new Set([
-  'queued',
-  'in_progress',
-  'requires_action',
-  'cancelling',
-])
 
 async function waitForNoActiveRun(threadId: string) {
   let waited = 0
@@ -36,7 +23,6 @@ async function waitForNoActiveRun(threadId: string) {
       const last = runs.data[0]
       if (!last || !ACTIVE_STATUSES.has(last.status as any)) return
     } catch (e) {
-      // If list fails, break out to avoid blocking
       console.warn('[CV][server] runs.list failed, proceeding:', (e as any)?.message || e)
       return
     }
@@ -46,11 +32,8 @@ async function waitForNoActiveRun(threadId: string) {
 }
 
 function log(obj: any) {
-  try {
-    console.log('[CV][server]', JSON.stringify(obj))
-  } catch {
-    console.log('[CV][server]', obj)
-  }
+  try { console.log('[CV][server]', JSON.stringify(obj)) }
+  catch { console.log('[CV][server]', obj) }
 }
 
 export async function POST(req: NextRequest) {
@@ -61,46 +44,35 @@ export async function POST(req: NextRequest) {
     let threadId: string | undefined = body?.threadId
 
     const text = incoming?.parts?.[0]?.text?.trim()
-    if (!text) {
-      return NextResponse.json({ error: 'empty message' }, { status: 400 })
-    }
+    if (!text) return NextResponse.json({ error: 'empty message' }, { status: 400 })
 
     log({ step: 'incoming', threadId, preview: text.slice(0, 160) })
 
-    // 1) Thread reuse/create
     if (!threadId) {
       const created = await client.beta.threads.create({ metadata: { channel: 'web-embed' } })
       threadId = created.id
       log({ step: 'thread.created', threadId })
     }
 
-    // 2) Ensure no active run is in progress to avoid 400 error
     await waitForNoActiveRun(threadId!)
 
-    // 3) Append user message
-    await client.beta.threads.messages.create(threadId!, {
-      role: 'user',
-      content: text,
-    })
+    await client.beta.threads.messages.create(threadId!, { role: 'user', content: text })
     log({ step: 'message.appended' })
 
-    // 4) Launch run
     const run = await client.beta.threads.runs.create(threadId!, {
       assistant_id: ASSISTANT_ID,
-      instructions:
-        [
-          'Responde de inmediato; evita frases como "un momento" o "te preparo algo y te aviso".',
-          'Si ya hay destino + fechas/duración + nº de personas, entrega el itinerario en un bloque:',
-          '```cv:itinerary',
-          '{ JSON válido según el esquema del sistema }',
-          '```',
-          'Si falta un dato crítico, haz UNA pregunta de avance.',
-        ].join('\n'),
+      instructions: [
+        'Responde de inmediato; evita frases como "un momento" o "te aviso".',
+        'Si ya hay destino + fechas/duración + nº de personas, entrega el itinerario en bloque:',
+        '```cv:itinerary',
+        '{ JSON válido según el esquema del sistema }',
+        '```',
+        'Si falta un dato crítico, haz UNA pregunta de avance.',
+      ].join('\n'),
       metadata: { channel: 'web-embed' },
     })
     log({ step: 'run.created', runId: run.id })
 
-    // 5) Poll until finished (fast polling)
     let status = run.status
     const tStart = now()
     while (true) {
@@ -109,12 +81,7 @@ export async function POST(req: NextRequest) {
         status = poll.status
         log({ step: 'run.status', status })
       }
-      if (
-        status === 'completed' ||
-        status === 'failed' ||
-        status === 'expired' ||
-        status === 'cancelled'
-      ) break
+      if (['completed','failed','expired','cancelled'].includes(status)) break
       if (now() - tStart > MAX_WAIT_MS) {
         try { await client.beta.threads.runs.cancel(run.id, { thread_id: threadId! }) } catch {}
         log({ step: 'run.timeout.cancelled' })
@@ -123,7 +90,6 @@ export async function POST(req: NextRequest) {
       await sleep(POLL_MS)
     }
 
-    // 6) Grab latest assistant message text
     const msgs = await client.beta.threads.messages.list(threadId!, { order: 'desc', limit: 10 })
     const firstAssistant = msgs.data.find((m) => m.role === 'assistant')
     const reply =
@@ -132,7 +98,8 @@ export async function POST(req: NextRequest) {
         .map((c: any) => c.text.value as string)
         .join('\n') ?? ''
 
-    log({ step: 'reply.ready', ms: now() - t0, size: reply.length })
+    const hasItin = /```(?:\s*)cv:itinerary/i.test(reply)
+    log({ step: 'reply.ready', hasItineraryBlock: hasItin, size: reply.length, ms: now() - t0 })
 
     return NextResponse.json({ threadId, reply, runStatus: status })
   } catch (err: any) {

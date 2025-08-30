@@ -1,83 +1,73 @@
 'use client';
 
-import type { ChatMessage } from '@/lib/types';
-import ItineraryCard from './itinerary-card';
+import React from 'react';
+import ItineraryCard from './ItineraryCard';
 
-export function PreviewMessage({ message }: { message: ChatMessage }) {
+// Acepta tu ChatMessage, pero sin exigir el shape exacto de parts.
+// Así evitamos incompatibilidades con UIMessagePart / UITextPart, etc.
+type AnyMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  parts?: any[];
+};
+
+function extractTextFromParts(parts?: any[]): string {
+  if (!Array.isArray(parts)) return '';
+  // Busca un part tipo texto en estructuras comunes
+  for (const p of parts) {
+    // casos típicos: { type:'text', text: '...' }
+    if (p?.type === 'text' && typeof p?.text === 'string') return p.text;
+    // algunos kits: { type:'outputText', text:'...' }
+    if ((p?.type === 'outputText' || p?.type === 'uiText') && typeof p?.text === 'string') return p.text;
+    // OpenAI SDK (a veces): { type:'output_text', content:{ text: '...' } }
+    if (p?.type === 'output_text' && typeof p?.content?.text === 'string') return p.content.text;
+    // fallback: primera string que encontremos
+    if (typeof p === 'string') return p;
+  }
+  return '';
+}
+
+function extractItineraryBlock(raw: string) {
+  // Captura ```cv:itinerary ... ``` tolerante a espacios/formatos
+  const re = /```(?:\s*)cv:itinerary\s*([\s\S]*?)```/i;
+  const m = re.exec(raw);
+  if (!m) return null;
+  const body = m[1]?.trim() ?? '';
+  // Intenta parsear; si viene sin cerrar, corta hasta el último }
+  try { return JSON.parse(body); } catch {}
+  const lastBrace = body.lastIndexOf('}');
+  if (lastBrace > 0) {
+    try { return JSON.parse(body.slice(0, lastBrace + 1)); } catch {}
+  }
+  return null;
+}
+
+export function PreviewMessage({ message }: { message: AnyMessage }) {
+  const text = extractTextFromParts(message?.parts) ?? '';
+
+  if (message.role === 'assistant') {
+    const itin = extractItineraryBlock(text);
+    if (itin) {
+      return (
+        <div className="w-full max-w-4xl mx-auto">
+          <ItineraryCard data={itin} />
+        </div>
+      );
+    }
+  }
+
+  // Burbuja por defecto (negra asistente / dorada usuario)
   const isUser = message.role === 'user';
-
-  const bubbleWidth = 'inline-block max-w-[92%] xl:max-w-[980px]';
-  const isOnlyItinerary =
-    Array.isArray(message.parts) &&
-    message.parts.length === 1 &&
-    message.parts[0]?.type === 'itinerary';
-
-  const userSkin =
-    'bg-[#d8c69a] text-black shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]';
-  const assistantSkin =
-    'bg-black text-white shadow-[0_14px_32px_-14px_rgba(0,0,0,0.6)]';
-
-  const bubbleSkin = isOnlyItinerary
-    ? 'bg-transparent shadow-none px-4 py-0'
-    : (isUser ? `${userSkin} px-4 py-3` : `${assistantSkin} px-4 py-3`);
-
-  const bubbleBase = `${bubbleWidth} rounded-[18px]`;
-  const row = 'w-full mx-auto max-w-4xl px-4';
-  const rowInner = isUser ? 'w-full flex justify-end' : 'w-full flex justify-start';
-
   return (
-    <div className={row}>
-      <div className={rowInner}>
-        <div className={`${bubbleBase} ${bubbleSkin}`}>
-          {message.parts.map((part: any, idx: number) => {
-            // texto normal
-            if (part?.type === 'text') {
-              // detectar itinerario inline
-              if (part.text.includes('```cv:itinerary')) {
-                try {
-                  const jsonStr = part.text.split('```cv:itinerary')[1].split('```')[0].trim();
-                  const itinerary = JSON.parse(jsonStr);
-                  return (
-                    <div key={idx} className="my-2 mb-8">
-                      <ItineraryCard data={itinerary} />
-                    </div>
-                  );
-                } catch (err) {
-                  console.error('Itinerary parse failed', err);
-                  return (
-                    <div key={idx} className="text-yellow-500">⚠️ Itinerary JSON inválido.</div>
-                  );
-                }
-              }
-              return (
-                <div
-                  key={idx}
-                  className={
-                    (isUser
-                      ? 'text-[15px] leading-relaxed text-black'
-                      : 'text-[15px] leading-relaxed text-white') +
-                    ' whitespace-pre-wrap break-words'
-                  }
-                >
-                  {part.text}
-                </div>
-              );
-            }
-
-            if (part?.type === 'itinerary' && part?.itinerary) {
-              return (
-                <div key={idx} className="my-2 mb-8">
-                  <ItineraryCard data={part.itinerary} />
-                </div>
-              );
-            }
-
-            return null;
-          })}
+    <div className={`w-full max-w-4xl mx-auto ${isUser ? 'text-black' : 'text-white'}`}>
+      <div
+        className={`inline-block rounded-2xl px-4 py-3 shadow
+          ${isUser ? 'bg-[#bba36d] text-black' : 'bg-[#111111] text-white'}`}
+      >
+        <div className="prose prose-invert max-w-none whitespace-pre-wrap">
+          {text}
         </div>
       </div>
     </div>
   );
 }
-
-export default PreviewMessage;
