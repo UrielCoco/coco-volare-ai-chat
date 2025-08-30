@@ -14,7 +14,7 @@ type Props = {
   votes?: any[];
 };
 
-// Utilidades mínimas (sin cambiar tu lógica)
+// Helpers mínimos
 const getText = (m: any): string => {
   if (!m) return '';
   if (typeof m.text === 'string') return m.text;
@@ -77,7 +77,7 @@ export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
 
-  // Mostrar loader con fade-in/-out sin afectar tu lógica
+  // Loader con fade in/out (sin tocar tu lógica)
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
 
@@ -87,7 +87,7 @@ export default function Messages(props: Props) {
       setPhase('in');
     } else if (showLoader) {
       setPhase('out');
-      const t = setTimeout(() => setShowLoader(false), 180); // dura lo mismo que la animación
+      const t = setTimeout(() => setShowLoader(false), 180);
       return () => clearTimeout(t);
     }
   }, [isLoading, showLoader]);
@@ -107,7 +107,14 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // Si el assistant incluye un bloque completo cv:itinerary => renderiza tarjeta
+          // 1) Si el assistant está “abriendo” un bloque pero aún NO lo cierra, NO lo mostramos (evita JSON parcial)
+          const hasStart = /```cv:(itinerary|quote)/i.test(text);
+          const hasComplete = /```cv:(itinerary|quote)[\s\S]*?```/i.test(text);
+          if (hasStart && !hasComplete) {
+            return null; // el loader global se encarga del estado de “pensando…”
+          }
+
+          // 2) Si hay bloque completo de itinerary -> card
           const itMatch = text.match(/```cv:itinerary\s*([\s\S]*?)```/i);
           if (itMatch) {
             try {
@@ -118,10 +125,11 @@ export default function Messages(props: Props) {
                 </div>
               );
             } catch {
-              // Si no parsea, muestra texto normal (nos mantenemos fieles a tu versión previa)
+              // Si no parsea, seguimos con texto normal
             }
           }
 
+          // 3) Texto normal del assistant
           return (
             <AssistantBubble key={m.id || i}>
               <div className="whitespace-pre-wrap break-words">{text}</div>
@@ -135,7 +143,7 @@ export default function Messages(props: Props) {
       {/* Loader con fade-in/out */}
       {showLoader && <Loader lang={lang} phase={phase} />}
 
-      {/* Animaciones globales (sólo apariencia, no tocan tu lógica) */}
+      {/* Animaciones globales */}
       <style jsx global>{`
         @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
         @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
