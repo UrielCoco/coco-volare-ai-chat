@@ -11,29 +11,24 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Controla spinner/loader del primer token
+  const [hasFirstDelta, setHasFirstDelta] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
 
+  // Recupera threadId de la sesión para mantener contexto de OpenAI
   useEffect(() => {
-    const ss = typeof window !== 'undefined' ? window.sessionStorage.getItem(THREAD_KEY) : null;
-    if (ss) threadIdRef.current = ss;
+    try {
+      const ss = typeof window !== 'undefined' ? window.sessionStorage.getItem(THREAD_KEY) : null;
+      if (ss) threadIdRef.current = ss;
+    } catch {
+      // no-op
+    }
   }, []);
 
-  const setLastTurn = (userMsg: ChatMessage, assistantMsg?: ChatMessage) => {
-    setMessages(assistantMsg ? [userMsg, assistantMsg] : [userMsg]);
-  };
-
-  async function handleStream(userText: string) {
+  async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
-
-    const aid = `a_${Date.now()}`;
-    // placeholder del assistant (siempre exactamente 1)
-    const assistantPlaceholder: ChatMessage = {
-      id: aid,
-      role: 'assistant',
-      parts: [{ type: 'text', text: '' } as any],
-      createdAt: new Date().toISOString(),
-    } as any;
+    setHasFirstDelta(false);
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -44,28 +39,26 @@ export default function Chat() {
           threadId: threadIdRef.current,
         }),
       });
-      if (!res.body) throw new Error('Stream not supported');
 
-      // aseguramos en UI: [user, assistant]
-      setMessages((prev) => {
-        const user = prev[0] && prev[0].role === 'user' ? prev[0] : null;
-        if (user) return [user, assistantPlaceholder];
-        return prev;
-      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      if (!res.body) {
+        throw new Error('Stream not supported by browser.');
+      }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let receivedAny = false;
 
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
-          const idx = next.findIndex((m) => m.id === aid);
+          const idx = next.findIndex((m) => m.id === assistantId);
           if (idx >= 0) {
             const curr = next[idx] as any;
             const before = curr.parts?.[0]?.text ?? '';
-            curr.parts[0].text = replace ? chunk : before + chunk;
+            curr.parts = [{ type: 'text', text: replace ? chunk : before + chunk }];
             next[idx] = curr;
           }
           return next;
@@ -75,8 +68,8 @@ export default function Chat() {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
 
+        buffer += decoder.decode(value, { stream: true });
         const events = buffer.split('\n\n');
         buffer = events.pop() || '';
 
@@ -84,21 +77,24 @@ export default function Chat() {
           const lines = ev.split('\n');
           const event = (lines.find((l) => l.startsWith('event:')) || '').replace('event:', '').trim();
           const dataLine = (lines.find((l) => l.startsWith('data:')) || '').replace('data:', '').trim();
+
           if (!event) continue;
 
           if (event === 'meta') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (data?.threadId) {
-                threadIdRef.current = data.threadId;
-                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
+                threadIdRef.current = data.threadId as string;
+                try {
+                  window.sessionStorage.setItem(THREAD_KEY, data.threadId);
+                } catch {}
               }
             } catch {}
           } else if (event === 'delta') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
-                receivedAny = true;
+                if (!hasFirstDelta) setHasFirstDelta(true);
                 applyText(data.value);
               }
             } catch {}
@@ -106,28 +102,26 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                receivedAny = true;
                 applyText(data.text, true);
               }
             } catch {}
           } else if (event === 'done') {
             setIsLoading(false);
           } else if (event === 'error') {
+            // Server-side error surfaced via SSE
             setIsLoading(false);
+          } else {
+            // ping u otros eventos -> ignore
           }
         }
       }
-
-      if (!receivedAny) {
-        applyText('⚠️ Hubo un problema obteniendo la respuesta. Intenta de nuevo.', true);
-      }
     } catch (err) {
-      console.error(err);
+      console.error('[CV][chat] stream error:', err);
       setIsLoading(false);
-      // Reemplaza el placeholder con error
+      // Pintamos error en el placeholder
       setMessages((prev) => {
         const next = [...prev];
-        const idx = next.findIndex((m) => m.id === aid);
+        const idx = next.findIndex((m) => m.id === assistantId);
         if (idx >= 0) {
           (next[idx] as any).parts = [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }];
         }
@@ -138,40 +132,51 @@ export default function Chat() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
-
     const text = input.trim();
+    if (!text || isLoading) return;
 
-    // SIEMPRE un turno visible: user + assistant
+    const userId = `u_${Date.now()}`;
+    const assistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    // 1) Empuja mensaje del usuario (se conserva historial)
     const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
+      id: userId,
       role: 'user',
       parts: [{ type: 'text', text }] as any,
       createdAt: new Date().toISOString(),
     } as any;
 
-    setLastTurn(userMsg); // limpia y coloca solo el user
+    // 2) Placeholder del asistente (una sola burbuja por turno)
+    const assistantPlaceholder: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      parts: [{ type: 'text', text: '' }] as any,
+      createdAt: new Date().toISOString(),
+    } as any;
+
+    setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    await handleStream(text);
+
+    await handleStream(text, assistantId);
   };
 
   return (
     <div className="relative flex flex-col w-full h-full" style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}>
+      {/* 
+        NOTA: Messages controla colores de burbujas, GIF de fondo y detección de bloques (p.ej. ```cv:itinerary ...```).
+        Pasamos las props exactas que espera para no romper UI.
+      */}
       <Messages
-  messages={messages}
-  isLoading={isLoading}
-  // Messages espera un setter con { messages: ChatMessage[] }
-  setMessages={({ messages }) => setMessages(messages)}
-  // Puede ser noop, pero debe devolver void | Promise<void>
-  regenerate={async () => {}}
-  // Estos dos SON REQUERIDOS por Messages.tsx
-  isReadonly={false}
-  chatId="main"
-  // Opcional, pero lo dejamos explícito
-  votes={[]}
-/>
+        messages={messages}
+        isLoading={isLoading && !hasFirstDelta}
+        setMessages={({ messages }) => setMessages(messages)}
+        regenerate={async () => {}}
+        isReadonly={false}
+        chatId="main"
+        votes={[]}
+      />
 
-
+      {/* Composer pegado al fondo, respeta tu estilo previo */}
       <form onSubmit={handleSubmit} className="sticky bottom-0 left-0 right-0 w-full bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="mx-auto max-w-3xl flex items-center gap-2 p-3">
           <input
