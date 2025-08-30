@@ -70,8 +70,13 @@ export default function Messages({
           <div className="flex-1 flex items-center justify-center">
             <img
               src="/images/Intelligence.gif"
-              alt="Coco Volare"
+              alt="Coco Volare Intelligence"
               className="opacity-70 max-h-[40dvh]"
+            />
+            <img
+              src="/images/Texts.gif"
+              alt="Coco Volare"
+              className="opacity-70 max-h-[60dvh]"
             />
           </div>
         )}
@@ -102,12 +107,12 @@ export default function Messages({
               transition={{ duration: 0.2 }}
               className="w-full mx-auto max-w-4xl px-4"
             >
-              <div className="inline-block rounded-2xl bg-[#131313] text-white px-4 py-3 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
-                <div className="flex items-center gap-2">
-                  <span className="opacity-70">Pensando</span>
+              <div className="inline-flex items-center gap-3 rounded-2xl bg-[#131313] px-5 py-4">
+                <img src="/images/Intelligence.gif" alt="..." className="h-6 w-6" />
+                <div className="flex gap-1">
                   <span className="animate-bounce">•</span>
-                  <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>•</span>
-                  <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>•</span>
+                  <span className="animate-bounce delay-100">•</span>
+                  <span className="animate-bounce delay-200">•</span>
                 </div>
               </div>
             </motion.div>
