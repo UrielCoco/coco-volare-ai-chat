@@ -18,13 +18,10 @@ export default function Chat() {
   const [hasFirstDelta, setHasFirstDelta] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
-    // preferir el ancla para que no se corte por padding del composer
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') =>
     endRef.current?.scrollIntoView({ behavior, block: 'end' });
-  };
 
   useEffect(() => {
     try {
@@ -36,16 +33,11 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  // Auto-scroll cuando cambian mensajes o llega el primer token
-  useEffect(() => {
-    scrollToBottom('auto');
-  }, [messages, hasFirstDelta]);
+  useEffect(() => { scrollToBottom('auto'); }, [messages, hasFirstDelta]);
 
-  // También cuando el usuario enfoca el input (mobile/desktop)
   useEffect(() => {
     const handler = () => scrollToBottom('smooth');
-    const el = listRef.current;
-    window.addEventListener('resize', handler); // teclado móvil
+    window.addEventListener('resize', handler);
     return () => window.removeEventListener('resize', handler);
   }, []);
 
@@ -81,7 +73,6 @@ export default function Chat() {
           }
           return next;
         });
-        // cada delta mantiene el fondo abajo
         requestAnimationFrame(() => scrollToBottom('auto'));
       };
 
@@ -105,7 +96,6 @@ export default function Chat() {
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
-                ulog('meta', { threadId: data.threadId });
               }
             } catch {}
           } else if (event === 'delta') {
@@ -119,15 +109,11 @@ export default function Chat() {
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.text === 'string') {
-                applyText(data.text, true);
-              }
+              if (typeof data?.text === 'string') applyText(data.text, true);
             } catch {}
-          } else if (event === 'done') {
+          } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
             requestAnimationFrame(() => scrollToBottom('smooth'));
-          } else if (event === 'error') {
-            setIsLoading(false);
           }
         }
       }
@@ -169,22 +155,32 @@ export default function Chat() {
 
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    // scrollea inmediato tras enviar
     requestAnimationFrame(() => scrollToBottom('smooth'));
     await handleStream(text, assistantId);
   };
+
+  const showEmpty = messages.length === 0;
 
   return (
     <div
       className="relative flex flex-col w-full min-h-[100dvh] bg-background"
       style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}
     >
-      {/* Lista scrolleable con padding inferior para no tapar el último mensaje */}
+      {/* Zona scroll con fondo inicial */}
       <div
-        ref={listRef}
-        className="flex-1 overflow-y-auto"
+        className="relative flex-1 overflow-y-auto"
         style={{ paddingBottom: `calc(var(--composer-h) + env(safe-area-inset-bottom))` }}
       >
+        {showEmpty && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <img
+              src="/images/Texts.gif"
+              alt="Coco Volare"
+              className="w-40 md:w-64 opacity-60"
+            />
+          </div>
+        )}
+
         <Messages
           messages={messages}
           isLoading={isLoading && !hasFirstDelta}
@@ -194,14 +190,14 @@ export default function Chat() {
           chatId="main"
           votes={[]}
         />
-        {/* Ancla de auto-scroll */}
+
         <div ref={endRef} />
       </div>
 
-      {/* Composer cristal, fijo abajo */}
+      {/* Composer */}
       <form
         onSubmit={handleSubmit}
-        className="sticky bottom-0 left-0 right-0 w-full border-t border-white/10 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+        className="sticky bottom-0 left-0 right-0 w-full bg-background/70 backdrop-blur"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div className="mx-auto max-w-3xl flex items-center gap-2 px-3 py-4">
@@ -210,7 +206,7 @@ export default function Chat() {
             onChange={(e) => setInput(e.target.value)}
             onFocus={() => requestAnimationFrame(() => scrollToBottom('smooth'))}
             placeholder="Escribe tu mensaje…"
-            className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground"
+            className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
           />
           <button
             type="submit"
