@@ -1,183 +1,166 @@
 'use client';
 
-import { useMemo, useEffect, useState } from 'react';
-import Message from './message';
 import ItineraryCard from './ItineraryCard';
 import type { ChatMessage } from '@/lib/types';
 
-type SetMessagesFn = (updater: { messages: ChatMessage[] }) => void;
+function ulog(event: string, meta: any = {}) {
+  try { console.debug('[CV][ui][messages]', event, meta); } catch {}
+}
 
-interface Props {
+type Props = {
   messages: ChatMessage[];
   isLoading: boolean;
-  setMessages: SetMessagesFn;
-  regenerate: () => Promise<void> | void;
-  isReadonly: boolean;
-  chatId: string;
+  setMessages: (p: { messages: ChatMessage[] }) => void;
+  regenerate: () => Promise<void>;
+  isReadonly?: boolean;
+  chatId?: string;
   votes?: any[];
-}
-
-function ulog(event: string, meta: any = {}) {
-  try { console.debug('[CV][ui][msg]', event, meta); } catch {}
-}
-
-/* --- Utils JSON/stream --- */
-const normalizeSmartQuotes = (s: string) => s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-const tryParseJson = (s: string) => { try { return JSON.parse(s); } catch {} try { return JSON.parse(normalizeSmartQuotes(s)); } catch {} return null; };
-function extractBalancedJsonFrom(text: string, startBraceIndex: number): any | null {
-  let depth = 0;
-  for (let i = startBraceIndex; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return tryParseJson(text.slice(startBraceIndex, i + 1));
-    }
-  }
-  return null;
-}
-const isItineraryObject = (o: any) =>
-  !!o && typeof o === 'object' && (Array.isArray(o.days) || o.tripTitle || o.title || o.lang);
-
-const containsFenceTag = (s: string) => /`{2,3}\s*cv\s*:\s*itinerary/i.test(s);
-const containsPlainTag = (s: string) => /(^|\n)\s*cv\s*:\s*itinerary/i.test(s);
-const guessLangFromPartial = (s: string): 'es' | 'en' => {
-  const m = normalizeSmartQuotes(s).match(/"lang"\s*:\s*"(es|en)"/i);
-  if (m?.[1]) return m[1].toLowerCase() as 'es' | 'en';
-  if (/\b(itinerario|día|llegada|hotel|ciudad|país)\b/i.test(s)) return 'es';
-  return 'en';
 };
 
-function extractItinerary(rawText: string): any | null {
-  if (!rawText) return null;
-  const s = normalizeSmartQuotes(rawText);
-
-  if (containsFenceTag(s)) {
-    const sj = s.indexOf('{', s.search(/`{2,3}\s*cv\s*:\s*itinerary/i));
-    if (sj !== -1) { const obj = extractBalancedJsonFrom(s, sj); if (obj && isItineraryObject(obj)) return obj; }
-  }
-  if (containsPlainTag(s)) {
-    const sj = s.indexOf('{', s.search(/(^|\n)\s*cv\s*:\s*itinerary/i));
-    if (sj !== -1) { const obj = extractBalancedJsonFrom(s, sj); if (obj && isItineraryObject(obj)) return obj; }
-  }
-  const m = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (m) {
-    const code = m[1].trim();
-    const sj = code.indexOf('{'); const ej = code.lastIndexOf('}');
-    const maybe = sj !== -1 && ej > sj ? code.slice(sj, ej + 1) : code;
-    const obj = tryParseJson(maybe); if (obj && isItineraryObject(obj)) return obj;
-  }
-  const trimmed = s.trimStart();
-  if (trimmed.startsWith('{')) {
-    const firstBrace = s.indexOf('{');
-    let obj: any = null;
-    if (firstBrace !== -1) obj = extractBalancedJsonFrom(s, firstBrace);
-    if (!obj) obj = tryParseJson(s) || tryParseJson(trimmed);
-    if (obj && isItineraryObject(obj)) return obj;
-  }
-  return null;
-}
-
-function normalizeRole(role: string | undefined): 'user' | 'assistant' {
-  return role === 'user' ? 'user' : 'assistant';
-}
-function getMessageText(m: any): string {
-  if (m?.parts && Array.isArray(m.parts)) {
-    const piece = m.parts[0]; if (piece && typeof piece.text === 'string') return piece.text;
-  }
-  if (typeof m?.content === 'string') return m.content;
+const getText = (m: any): string => {
+  if (!m) return '';
+  if (typeof m.text === 'string') return m.text;
+  if (Array.isArray(m.parts) && m.parts[0]?.text) return m.parts[0].text as string;
+  if (typeof m.content === 'string') return m.content;
   return '';
-}
+};
 
-/* FadeIn wrapper for loaders/cards from here too */
-function FadeIn({ children }: { children: React.ReactNode }) {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => { const t = requestAnimationFrame(() => setMounted(true)); return () => cancelAnimationFrame(t); }, []);
+const extractBlock = (txt: string) => {
+  // cv:itinerary
+  const itRegex = /```cv:itinerary\s*([\s\S]*?)```/i;
+  const itMatch = txt.match(itRegex);
+  if (itMatch) {
+    try {
+      const json = JSON.parse(itMatch[1]);
+      return { kind: 'itinerary' as const, data: json };
+    } catch (e) {
+      ulog('itinerary.parse.error', { e: String(e) });
+    }
+  }
+  // cv:quote (por si lo usas más adelante)
+  const qRegex = /```cv:quote\s*([\s\S]*?)```/i;
+  const qMatch = txt.match(qRegex);
+  if (qMatch) {
+    try {
+      const json = JSON.parse(qMatch[1]);
+      return { kind: 'quote' as const, data: json };
+    } catch (e) {
+      ulog('quote.parse.error', { e: String(e) });
+    }
+  }
+  return { kind: 'text' as const, data: txt };
+};
+
+const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
+  // 1) Si ya hubo un cv:itinerary antes, usa su lang
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const t = getText(msgs[i]);
+    const b = extractBlock(t);
+    if (b.kind === 'itinerary' && b.data?.lang) {
+      return b.data.lang === 'en' ? 'en' : 'es';
+    }
+  }
+  // 2) Si no, mira el último mensaje del usuario
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if ((msgs[i] as any).role === 'user') {
+      const t = getText(msgs[i]).toLowerCase();
+      const looksEn = /\b(the|and|to|please|when|how|where|days?)\b/.test(t) && !/[áéíóúñ¿¡]/.test(t);
+      return looksEn ? 'en' : 'es';
+    }
+  }
+  return 'es';
+};
+
+function UserBubble({ children }: { children: React.ReactNode }) {
   return (
-    <div className={`transition-all duration-300 ease-out ${mounted ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[.98]'}`}>
-      {children}
+    <div className="w-full flex justify-end my-2">
+      <div className="max-w-[80%] rounded-2xl bg-[#bba36d] text-black px-4 py-3 shadow">
+        {children}
+      </div>
     </div>
   );
 }
 
-export default function Messages({
-  messages,
-  isLoading,
-}: Props) {
-  const items = useMemo(() => {
-    const out = messages.map((m) => {
-      const text = getMessageText(m);
-      const itin = extractItinerary(text);
-      const hasTag = containsFenceTag(text) || containsPlainTag(text);
-      const pendingLang = hasTag && !itin ? guessLangFromPartial(text) : undefined;
-      return { msg: m, text, itin, hasTag, pendingLang };
-    });
-    ulog('render.batch', { count: out.length });
-    return out;
-  }, [messages]);
-
-  const hasPendingItin = items.some(
-    ({ msg, hasTag, itin }) => normalizeRole((msg as any)?.role) === 'assistant' && hasTag && !itin
+function AssistantBubble({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="w-full flex justify-start my-2">
+      <div className="max-w-[80%] rounded-2xl bg-neutral-900 text-white px-4 py-3 shadow">
+        {children}
+      </div>
+    </div>
   );
+}
+
+function LoaderBubble({ lang }: { lang: 'es' | 'en' }) {
+  const label = lang === 'en' ? 'thinking' : 'pensando';
+  return (
+    <div className="w-full flex items-center gap-2 my-3">
+      <img
+        src="/images/Intelligence.gif"
+        alt="Coco Volare thinking"
+        className="h-8 w-auto rounded-md shadow select-none"
+        draggable={false}
+      />
+      <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
+        <span className="opacity-90">{label}</span>
+        <span className="w-1.5 h-1.5 rounded-full bg-white/80 animate-bounce" style={{ animationDelay: '0ms' }} />
+        <span className="w-1.5 h-1.5 rounded-full bg-white/60 animate-bounce" style={{ animationDelay: '150ms' }} />
+        <span className="w-1.5 h-1.5 rounded-full bg-white/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+      </div>
+    </div>
+  );
+}
+
+export default function Messages(props: Props) {
+  const { messages, isLoading } = props;
+
+  const lang = guessLang(messages);
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-3 py-6 space-y-3">
-      {items.map(({ msg, text, itin, hasTag, pendingLang }) => {
-        const role = normalizeRole((msg as any)?.role);
+    <div className="mx-auto max-w-3xl w-full px-4 py-6">
+      {/* Render de mensajes */}
+      {messages.map((m, i) => {
+        const text = getText(m);
+        const role = (m as any).role as 'user' | 'assistant' | 'system';
 
-        if (role === 'assistant' && hasTag && !itin) {
-          const lang = pendingLang || 'es';
-          const waitText = lang === 'en' ? 'preparing itinerary…' : 'preparando itinerario…';
+        // Evita burbujas vacías del assistant (placeholder durante streaming)
+        if (role === 'assistant' && (!text || !text.trim())) {
+          return null;
+        }
+
+        if (role === 'user') {
           return (
-            <FadeIn key={msg.id}>
-              <div className="space-y-2">
-                <div className="w-full flex justify-start">
-                  <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow flex items-center gap-3">
-                    <img
-                      src="/images/Intelligence.gif"
-                      alt={lang === 'en' ? 'Preparing' : 'Preparando'}
-                      className="h-6 w-6 rounded"
-                    />
-                    <div className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-white/80 animate-pulse" style={{ animationDelay: '0ms' }} />
-                      <span className="w-2 h-2 rounded-full bg-white/80 animate-pulse" style={{ animationDelay: '150ms' }} />
-                      <span className="w-2 h-2 rounded-full bg-white/80 animate-pulse" style={{ animationDelay: '300ms' }} />
-                    </div>
-                  </div>
-                </div>
-                <div className="w-full flex justify-start">
-                  <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow">
-                    <span className="opacity-80">{waitText}</span>
-                  </div>
-                </div>
+            <UserBubble key={m.id || i}>
+              <div className="whitespace-pre-wrap break-words">{text}</div>
+            </UserBubble>
+          );
+        }
+
+        if (role === 'assistant') {
+          const block = extractBlock(text);
+
+          if (block.kind === 'itinerary') {
+            return (
+              <div key={m.id || i} className="w-full flex justify-start my-3">
+                <ItineraryCard data={block.data} />
               </div>
-            </FadeIn>
-          );
-        }
+            );
+          }
 
-        if (itin) {
+          // (Opcional) Si más adelante manejas 'quote', aquí iría su card
           return (
-            <FadeIn key={msg.id}>
-              <ItineraryCard data={itin} />
-            </FadeIn>
+            <AssistantBubble key={m.id || i}>
+              <div className="whitespace-pre-wrap break-words">{text}</div>
+            </AssistantBubble>
           );
         }
 
-        return (
-          <Message key={msg.id} role={role} text={text} />
-        );
+        // Ignora 'system', sólo por seguridad
+        return null;
       })}
 
-      {/* Loader genérico solo si no hay un itinerario pendiente */}
-      {isLoading && !hasPendingItin && (
-        <FadeIn>
-          <div className="w-full flex justify-start">
-            <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow">
-              <span className="opacity-80">pensando…</span>
-            </div>
-          </div>
-        </FadeIn>
-      )}
+      {/* Loader único (gif + 3 puntos) mientras llega el primer delta */}
+      {isLoading && <LoaderBubble lang={lang} />}
     </div>
   );
 }
