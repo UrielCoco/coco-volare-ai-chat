@@ -21,10 +21,19 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui][msg]', event, meta); } catch {}
 }
 
+/** Normaliza comillas “ ” ‘ ’ a ASCII para que JSON.parse no truene */
 function normalizeSmartQuotes(s: string) {
   return s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
 }
 
+/** Intenta parsear JSON (con y sin smart quotes) */
+function tryParseJson(s: string): any | null {
+  try { return JSON.parse(s); } catch {}
+  try { return JSON.parse(normalizeSmartQuotes(s)); } catch {}
+  return null;
+}
+
+/** Extrae objeto JSON balanceando llaves { ... } desde un índice dado */
 function extractBalancedJsonFrom(text: string, startBraceIndex: number): any | null {
   let depth = 0;
   for (let i = startBraceIndex; i < text.length; i++) {
@@ -34,64 +43,131 @@ function extractBalancedJsonFrom(text: string, startBraceIndex: number): any | n
       depth--;
       if (depth === 0) {
         const raw = text.slice(startBraceIndex, i + 1);
-        try { return JSON.parse(raw); } catch {}
-        try { return JSON.parse(normalizeSmartQuotes(raw)); } catch { return null; }
+        return tryParseJson(raw);
       }
     }
   }
   return null;
 }
 
-/** Detecta:
- * - ```cv:itinerary ... ```
- * - cv:itinerary ... { ... } (sin fences)
- * - fallback: primer ```json ... ```
+/** Heurística: ¿se ve como objeto de itinerario? */
+function isItineraryObject(o: any): boolean {
+  if (!o || typeof o !== 'object') return false;
+  if (Array.isArray(o.days) && o.days.length >= 1) return true;
+  if (o.tripTitle || o.title) return true;
+  if (o.lang && (o.clientBooksLongHaulFlights !== undefined || o.disclaimer)) return true;
+  return false;
+}
+
+/** Encuentra índice del tag con tolerancia:
+ * - 2 o 3 backticks: `` o ```
+ * - espacios opcionales: ``` cv:itinerary / ```cv : itinerary
+ */
+function findFenceTagIndex(s: string): number {
+  const re = /`{2,3}\s*cv\s*:\s*itinerary/i;
+  const m = s.match(re);
+  return m && typeof m.index === 'number' ? m.index : -1;
+}
+
+/** Variante sin fences, al inicio de línea o tras salto */
+function findPlainTagIndex(s: string): number {
+  const re = /(^|\n)\s*cv\s*:\s*itinerary/i;
+  const m = s.match(re);
+  return m && typeof m.index === 'number' ? m.index : -1;
+}
+
+/**
+ * Parser robusto que cubre:
+ * 1) ```cv:itinerary (3 o 2 backticks, espacios opcionales)
+ * 2) cv:itinerary ... { ... } (sin fences)
+ * 3) ```json ... ```
+ * 4) JSON toplevel puro (empieza directamente con { ... })
  */
 function extractItinerary(rawText: string): any | null {
   if (!rawText) return null;
   const s = normalizeSmartQuotes(rawText);
-  try {
-    const fenceTag = '```cv:itinerary';
-    const fIdx = s.toLowerCase().indexOf(fenceTag);
-    if (fIdx !== -1) {
-      const after = fIdx + fenceTag.length;
+
+  // 1) Fence tolerante: ``cv:itinerary o ``` cv:itinerary o ```cv : itinerary
+  {
+    const idx = findFenceTagIndex(s);
+    if (idx !== -1) {
+      const after = idx + 1; // da igual exacto; buscamos la primera '{' después
       const sj = s.indexOf('{', after);
       if (sj !== -1) {
         const obj = extractBalancedJsonFrom(s, sj);
-        if (obj) { ulog('itinerary.detect.fenced', { len: JSON.stringify(obj).length }); return obj; }
+        if (obj && isItineraryObject(obj)) {
+          ulog('itinerary.detect.fence.tolerant', { len: JSON.stringify(obj).length });
+          return obj;
+        }
       }
     }
-    const plainTag = 'cv:itinerary';
-    const pIdx = s.toLowerCase().indexOf(plainTag);
-    if (pIdx !== -1) {
-      const after = pIdx + plainTag.length;
+  }
+
+  // 2) Plano: cv:itinerary ... { ... } (sin fences, inicio de línea o tras salto)
+  {
+    const idx = findPlainTagIndex(s);
+    if (idx !== -1) {
+      const after = idx + 1;
       const sj = s.indexOf('{', after);
       if (sj !== -1) {
         const obj = extractBalancedJsonFrom(s, sj);
-        if (obj) { ulog('itinerary.detect.plain', { len: JSON.stringify(obj).length }); return obj; }
+        if (obj && isItineraryObject(obj)) {
+          ulog('itinerary.detect.plain', { len: JSON.stringify(obj).length });
+          return obj;
+        }
       }
     }
-    const codeBlock = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (codeBlock) {
-      const code = codeBlock[1].trim();
+  }
+
+  // 3) Bloque ```json ... ```
+  {
+    const m = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (m) {
+      const code = m[1].trim();
       const sj = code.indexOf('{');
       const ej = code.lastIndexOf('}');
       if (sj !== -1 && ej > sj) {
         const maybe = code.slice(sj, ej + 1);
-        try { const o = JSON.parse(maybe); ulog('itinerary.detect.jsonblock', { len: JSON.stringify(o).length }); return o; } catch {}
-        try { const o2 = JSON.parse(normalizeSmartQuotes(maybe)); ulog('itinerary.detect.jsonblock-smart', { len: JSON.stringify(o2).length }); return o2; } catch {}
+        const obj = tryParseJson(maybe);
+        if (obj && isItineraryObject(obj)) {
+          ulog('itinerary.detect.jsonblock', { len: JSON.stringify(obj).length });
+          return obj;
+        }
+      } else {
+        const obj = tryParseJson(code);
+        if (obj && isItineraryObject(obj)) {
+          ulog('itinerary.detect.jsonblock.raw', { len: JSON.stringify(obj).length });
+          return obj;
+        }
       }
     }
-  } catch (e) {
-    ulog('itinerary.parse.exception', { e });
   }
+
+  // 4) JSON toplevel puro
+  {
+    const trimmed = s.trimStart();
+    if (trimmed.startsWith('{')) {
+      const firstBrace = s.indexOf('{');
+      let obj: any = null;
+      if (firstBrace !== -1) obj = extractBalancedJsonFrom(s, firstBrace);
+      if (!obj) obj = tryParseJson(s);
+      if (!obj) obj = tryParseJson(trimmed);
+      if (obj && isItineraryObject(obj)) {
+        ulog('itinerary.detect.toplevel', { len: JSON.stringify(obj).length });
+        return obj;
+      }
+    }
+  }
+
   return null;
 }
 
 function normalizeRole(role: string | undefined): 'user' | 'assistant' {
+  // Cualquier rol que no sea 'user' lo mostramos como 'assistant'
   return role === 'user' ? 'user' : 'assistant';
 }
 
+/** Obtiene texto de ChatMessage (une parts si hace falta) */
 function getMessageText(m: any): string {
   if (m?.parts && Array.isArray(m.parts)) {
     const piece = m.parts[0];
