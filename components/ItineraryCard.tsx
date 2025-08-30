@@ -71,6 +71,7 @@ function DaySection({ d, index }: { d: Day; index: number }) {
       d.weather.humidity != null ||
       d.weather.icon ||
       d.weather.summary);
+
   const showDate = isISODate(d.date);
 
   return (
@@ -192,8 +193,8 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
   const lang = (data?.lang === 'en' ? 'en' : 'es') as 'es' | 'en';
   const t = {
     prev: lang === 'en' ? 'Previous day' : 'Día anterior',
-    next: lang === 'en' ? 'Next day' : 'Siguiente día',
-    of:   lang === 'en' ? 'of' : 'de',
+    next: lang === 'en' ? 'Next day'     : 'Siguiente día',
+    of:   lang === 'en' ? 'of'           : 'de',
   };
 
   const prev = () => setDayIdx((i) => Math.max(0, i - 1));
@@ -201,9 +202,17 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
 
   ulog('render.simple-nav', { title, days: days.length, dayIdx, lang });
 
+  const baseBtn =
+    'rounded-full h-9 px-3 shadow transition-all duration-200 ' +
+    'hover:-translate-y-0.5 hover:shadow-md active:scale-95 focus:outline-none ' +
+    'focus:ring-2 focus:ring-[#bba36d] focus:ring-offset-2';
+
+  const btnEnabled = 'bg-black text-white';
+  const btnDisabled = 'bg-neutral-300 text-neutral-600 cursor-not-allowed';
+
   return (
     <div className="w-full flex justify-start">
-      {/* Sin bordes, con sombra y logo más visible */}
+      {/* Sin bordes, con sombra y logo visible */}
       <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -220,7 +229,6 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
                 {data.price} {data.currency || ''}
               </div>
             )}
-            {/* LOGO MÁS GRANDE + ligera sombra */}
             <img
               src="/images/logo-coco-volare.png"
               alt="Coco Volare"
@@ -236,20 +244,28 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
             <button
               onClick={prev}
               disabled={dayIdx === 0}
-              className="rounded-full h-9 px-3 bg-black/80 text-white shadow disabled:opacity-30"
+              aria-disabled={dayIdx === 0}
+              className={`${baseBtn} ${dayIdx === 0 ? btnDisabled : btnEnabled}`}
               aria-label={t.prev}
-            >‹ {t.prev}</button>
+            >
+              ‹ {t.prev}
+            </button>
 
             <div className="mx-auto text-sm text-neutral-600">
-              {lang === 'en' ? `Day ${dayIdx + 1} ${t.of} ${days.length}` : `Día ${dayIdx + 1} ${t.of} ${days.length}`}
+              {lang === 'en'
+                ? `Day ${dayIdx + 1} ${t.of} ${days.length}`
+                : `Día ${dayIdx + 1} ${t.of} ${days.length}`}
             </div>
 
             <button
               onClick={next}
               disabled={dayIdx === days.length - 1}
-              className="rounded-full h-9 px-3 bg.black/80 text-white shadow disabled:opacity-30"
+              aria-disabled={dayIdx === days.length - 1}
+              className={`${baseBtn} ${dayIdx === days.length - 1 ? btnDisabled : btnEnabled}`}
               aria-label={t.next}
-            >{t.next} ›</button>
+            >
+              {t.next} ›
+            </button>
           </div>
         )}
 
