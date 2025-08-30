@@ -19,12 +19,10 @@ interface Props {
 
 function extractItinerary(text: string): any | null {
   if (!text) return null;
-  // Busca bloque: ```cv:itinerary\n{...}\n```
   const match = text.match(/```cv:itinerary\s*([\s\S]*?)```/i);
   if (!match) return null;
   try {
     const raw = match[1].trim();
-    // Si viene con fences internas, intenta recortar
     const jsonStart = raw.indexOf('{');
     const jsonEnd = raw.lastIndexOf('}');
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
@@ -37,6 +35,10 @@ function extractItinerary(text: string): any | null {
   }
 }
 
+function normalizeRole(role: string | undefined): 'user' | 'assistant' {
+  return role === 'user' ? 'user' : 'assistant'; // "system", "tool", etc. => assistant
+}
+
 export default function Messages({
   messages,
   isLoading,
@@ -47,20 +49,22 @@ export default function Messages({
 }: Props) {
   const items = useMemo(() => {
     return messages.map((m) => {
-      const text = (m as any)?.parts?.[0]?.text || '';
-      const itin = m.role === 'assistant' ? extractItinerary(text) : null;
-      return { msg: m, text, itin };
+      const text: string =
+        (m as any)?.parts?.[0]?.text ??
+        (m as any)?.content ??
+        '';
+      const itin = m.role === 'assistant' ? extractItinerary(text) : extractItinerary(text); // por si llega como "system"
+      return { msg: m, text: String(text || ''), itin };
     });
   }, [messages]);
 
   return (
     <div className="mx-auto w-full max-w-3xl px-3 py-6 space-y-3">
-      {/* Fondo/hero antes de iniciar podría estar en tu layout global; aquí solo mensajes */}
       {items.map(({ msg, text, itin }) =>
         itin ? (
           <ItineraryCard key={msg.id} data={itin} />
         ) : (
-          <Message key={msg.id} role={msg.role} text={text} />
+          <Message key={msg.id} role={normalizeRole((msg as any)?.role)} text={text} />
         )
       )}
 
