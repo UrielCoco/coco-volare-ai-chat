@@ -21,19 +21,23 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // Altura real del composer (dinámica con ResizeObserver)
+  // Altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
-  // ¿Estamos cerca del fondo? (para no forzar scroll cuando el user sube)
+  // Autoscroll inteligente
+  // - nearBottom: margen pequeño para considerar "estoy al fondo"
+  // - lockMargin: cuánto me alejo para bloquear el autoscroll
+  const NEAR_BOTTOM_PX = 12;
+  const LOCK_MARGIN_PX = 48;
   const [stickToBottom, setStickToBottom] = useState(true);
-  const NEAR_BOTTOM_PX = 120;
 
-  const isNearBottom = () => {
+  const distanceToBottom = () => {
     const el = listRef.current;
-    if (!el) return true;
-    const dist = el.scrollHeight - (el.scrollTop + el.clientHeight);
-    return dist <= NEAR_BOTTOM_PX;
+    if (!el) return 0;
+    return el.scrollHeight - (el.scrollTop + el.clientHeight);
   };
+
+  const isNearBottom = () => distanceToBottom() <= NEAR_BOTTOM_PX;
 
   useEffect(() => {
     if (!composerRef.current) return;
@@ -45,19 +49,24 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // Track manual scroll del usuario para habilitar/inhabilitar autoscroll
+  // Bloqueo/desbloqueo de autoscroll según scroll manual del usuario
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
+
     const onScroll = () => {
-      const near = isNearBottom();
-      if (near !== stickToBottom) setStickToBottom(near);
+      const dist = distanceToBottom();
+      // Si me alejo más de LOCK_MARGIN_PX, bloqueo autoscroll
+      if (dist > LOCK_MARGIN_PX && stickToBottom) setStickToBottom(false);
+      // Si vuelvo a estar prácticamente al fondo, re-activo autoscroll
+      if (dist <= NEAR_BOTTOM_PX && !stickToBottom) setStickToBottom(true);
     };
+
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
   }, [stickToBottom]);
 
-  // Soporte teclado móvil
+  // Apoyo para teclado móvil
   useEffect(() => {
     const vv = (window as any).visualViewport as VisualViewport | undefined;
     if (!vv) return;
@@ -88,14 +97,16 @@ export default function Chat() {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // Autoscroll solo si el usuario está cerca del fondo
+  // Autoscroll SOLO si estás al fondo
   useEffect(() => {
-    if (stickToBottom) {
-      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom('auto')));
-    }
+    if (!stickToBottom) return;
+    // dos frames para asegurar layout aplicado
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => scrollToBottom('auto')),
+    );
   }, [messages, hasFirstDelta, composerH, stickToBottom]);
 
-  // También en cambios de ventana
+  // También en resize, pero respetando el lock
   useEffect(() => {
     const handler = () => stickToBottom && scrollToBottom('smooth');
     window.addEventListener('resize', handler);
@@ -157,7 +168,6 @@ export default function Chat() {
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
-                ulog('meta', { threadId: data.threadId });
               }
             } catch {}
           } else if (event === 'delta') {
@@ -217,7 +227,8 @@ export default function Chat() {
 
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    // Envío = quiero ver el final
+    // Envío: me pego al final (el usuario espera ver su mensaje y la respuesta)
+    setStickToBottom(true);
     requestAnimationFrame(() => scrollToBottom('smooth'));
     await handleStream(text, assistantId);
   };
@@ -226,13 +237,14 @@ export default function Chat() {
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
-      {/* Scroll area con padding dinámico */}
+      {/* Área scrolleable */}
       <div
         ref={listRef}
         className="relative flex-1 overflow-y-auto"
         style={{
           paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
           scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
+          overscrollBehaviorY: 'contain',
         }}
       >
         {showEmpty && (
@@ -255,9 +267,22 @@ export default function Chat() {
           votes={[]}
         />
 
-        {/* Spacer fantasma del alto del composer para garantizar visibilidad */}
+        {/* Spacer = altura del composer, garantiza que el último mensaje no quede tapado */}
         <div style={{ height: composerH }} />
         <div ref={endRef} />
+
+        {/* Botón "Ir al último" cuando autoscroll está bloqueado */}
+        {!stickToBottom && (
+          <div className="sticky bottom-[calc(12px+var(--safe,0px))] w-full grid place-items-center pointer-events-none" style={{ ['--safe' as any]: 'env(safe-area-inset-bottom)' }}>
+            <button
+              onClick={() => { setStickToBottom(true); scrollToBottom('smooth'); }}
+              className="pointer-events-auto px-3 py-2 rounded-full bg-black/80 text-white shadow"
+              aria-label="Ir al último"
+            >
+              Ir al último
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Composer */}
@@ -271,7 +296,7 @@ export default function Chat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onFocus={() => requestAnimationFrame(() => stickToBottom && scrollToBottom('smooth'))}
+            onFocus={() => stickToBottom && requestAnimationFrame(() => scrollToBottom('smooth'))}
             placeholder="Escribe tu mensaje…"
             className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
           />
