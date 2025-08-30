@@ -188,6 +188,7 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
   const title = data?.tripTitle || data?.title || 'Itinerario';
   const days = Array.isArray(data?.days) ? data.days : [];
   const [dayIdx, setDayIdx] = useState(0);
+  const [animDir, setAnimDir] = useState<'next' | 'prev'>('next'); // dirección para la animación
 
   const lang = (data?.lang === 'en' ? 'en' : 'es') as 'es' | 'en';
   const t = {
@@ -196,8 +197,8 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
     of:   lang === 'en' ? 'of'           : 'de',
   };
 
-  const prev = () => setDayIdx((i) => Math.max(0, i - 1));
-  const next = () => setDayIdx((i) => Math.min(days.length - 1, i + 1));
+  const prev = () => { setAnimDir('prev'); setDayIdx((i) => Math.max(0, i - 1)); };
+  const next = () => { setAnimDir('next'); setDayIdx((i) => Math.min(days.length - 1, i + 1)); };
 
   ulog('render.simple-nav', { title, days: days.length, dayIdx, lang });
 
@@ -205,13 +206,14 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
     'rounded-full h-9 px-3 shadow transition-all duration-200 ' +
     'hover:-translate-y-0.5 hover:shadow-md active:scale-95 focus:outline-none ' +
     'focus:ring-2 focus:ring-[#bba36d] focus:ring-offset-2';
-
   const btnEnabled = 'bg-black text-white';
   const btnDisabled = 'bg-neutral-300 text-neutral-600 cursor-not-allowed';
 
+  // clase dinámica para el slide segun dirección
+  const slideClass = animDir === 'next' ? 'cv-slide-next' : 'cv-slide-prev';
+
   return (
     <div className="w-full flex justify-start">
-      {/* Sin bordes, con sombra y LOGO MÁS GRANDE */}
       <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -268,8 +270,12 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
           </div>
         )}
 
-        {/* Contenido del día seleccionado */}
-        {days[dayIdx] && <DaySection d={days[dayIdx]} index={dayIdx} />}
+        {/* Contenido del día seleccionado con animación */}
+        {days[dayIdx] && (
+          <div key={dayIdx} className={`will-change-transform ${slideClass}`}>
+            <DaySection d={days[dayIdx]} index={dayIdx} />
+          </div>
+        )}
 
         {data?.notes && <div className="text-sm text-neutral-700">{data.notes}</div>}
 
@@ -282,6 +288,28 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
             draggable={false}
           />
         </div>
+
+        {/* Keyframes de la animación */}
+        <style jsx global>{`
+          @keyframes cvSlideNext {
+            from { opacity: 0; transform: translateX(16px); }
+            to   { opacity: 1; transform: translateX(0); }
+          }
+          @keyframes cvSlidePrev {
+            from { opacity: 0; transform: translateX(-16px); }
+            to   { opacity: 1; transform: translateX(0); }
+          }
+          @keyframes cvFade {
+            from { opacity: 0; } to { opacity: 1; }
+          }
+          .cv-slide-next { animation: cvSlideNext .22s ease-out both; }
+          .cv-slide-prev { animation: cvSlidePrev .22s ease-out both; }
+
+          /* Accesibilidad: si el usuario prefiere menos movimiento, solo fade */
+          @media (prefers-reduced-motion: reduce) {
+            .cv-slide-next, .cv-slide-prev { animation: cvFade .18s ease-out both; }
+          }
+        `}</style>
       </div>
     </div>
   );
