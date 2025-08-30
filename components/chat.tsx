@@ -4,27 +4,36 @@ import { useEffect, useRef, useState } from 'react';
 import Messages from './messages';
 import type { ChatMessage } from '@/lib/types';
 
-const THREAD_KEY = 'cv_thread_id_session'; // sessionStorage
-const COMPOSER_H = 72;
+const THREAD_KEY = 'cv_thread_id_session';
+const COMPOSER_H = 84; // alto real del composer
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  // Controla spinner/loader del primer token
   const [hasFirstDelta, setHasFirstDelta] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
-  // Recupera threadId de la sesión para mantener contexto de OpenAI
+  // Mantén threadId (memoria de conversación)
   useEffect(() => {
     try {
-      const ss = typeof window !== 'undefined' ? window.sessionStorage.getItem(THREAD_KEY) : null;
+      const ss = window.sessionStorage.getItem(THREAD_KEY);
       if (ss) threadIdRef.current = ss;
-    } catch {
-      // no-op
-    }
+    } catch {}
   }, []);
+
+  // Auto-scroll al final cuando cambian mensajes o llega primer token
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    // pequeño timeout para esperar layout
+    const t = setTimeout(() => {
+      el.scrollTop = el.scrollHeight;
+    }, 0);
+    return () => clearTimeout(t);
+  }, [messages, hasFirstDelta]);
 
   async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
@@ -39,13 +48,8 @@ export default function Chat() {
           threadId: threadIdRef.current,
         }),
       });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      if (!res.body) {
-        throw new Error('Stream not supported by browser.');
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.body) throw new Error('Stream no soportado.');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
@@ -78,16 +82,12 @@ export default function Chat() {
           const event = (lines.find((l) => l.startsWith('event:')) || '').replace('event:', '').trim();
           const dataLine = (lines.find((l) => l.startsWith('data:')) || '').replace('data:', '').trim();
 
-          if (!event) continue;
-
           if (event === 'meta') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (data?.threadId) {
-                threadIdRef.current = data.threadId as string;
-                try {
-                  window.sessionStorage.setItem(THREAD_KEY, data.threadId);
-                } catch {}
+                threadIdRef.current = data.threadId;
+                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
               }
             } catch {}
           } else if (event === 'delta') {
@@ -108,17 +108,14 @@ export default function Chat() {
           } else if (event === 'done') {
             setIsLoading(false);
           } else if (event === 'error') {
-            // Server-side error surfaced via SSE
             setIsLoading(false);
-          } else {
-            // ping u otros eventos -> ignore
           }
         }
       }
     } catch (err) {
       console.error('[CV][chat] stream error:', err);
       setIsLoading(false);
-      // Pintamos error en el placeholder
+      // Pinta error en placeholder
       setMessages((prev) => {
         const next = [...prev];
         const idx = next.findIndex((m) => m.id === assistantId);
@@ -138,7 +135,6 @@ export default function Chat() {
     const userId = `u_${Date.now()}`;
     const assistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-    // 1) Empuja mensaje del usuario (se conserva historial)
     const userMsg: ChatMessage = {
       id: userId,
       role: 'user',
@@ -146,7 +142,6 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any;
 
-    // 2) Placeholder del asistente (una sola burbuja por turno)
     const assistantPlaceholder: ChatMessage = {
       id: assistantId,
       role: 'assistant',
@@ -154,31 +149,41 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any;
 
+    // Mantén historial (no lo borres)
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-
     await handleStream(text, assistantId);
   };
 
   return (
-    <div className="relative flex flex-col w-full h-full" style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}>
-      {/* 
-        NOTA: Messages controla colores de burbujas, GIF de fondo y detección de bloques (p.ej. ```cv:itinerary ...```).
-        Pasamos las props exactas que espera para no romper UI.
-      */}
-      <Messages
-        messages={messages}
-        isLoading={isLoading && !hasFirstDelta}
-        setMessages={({ messages }) => setMessages(messages)}
-        regenerate={async () => {}}
-        isReadonly={false}
-        chatId="main"
-        votes={[]}
-      />
+    <div
+      className="relative flex flex-col w-full min-h-[100dvh] bg-background"
+      style={{ ['--composer-h' as any]: `${COMPOSER_H}px` }}
+    >
+      {/* Lista de mensajes scrolleable. Deja espacio al final para el composer */}
+      <div
+        ref={listRef}
+        className="flex-1 overflow-y-auto"
+        style={{ paddingBottom: `calc(var(--composer-h) + env(safe-area-inset-bottom))` }}
+      >
+        <Messages
+          messages={messages}
+          isLoading={isLoading && !hasFirstDelta}
+          setMessages={({ messages }) => setMessages(messages)}
+          regenerate={async () => {}}
+          isReadonly={false}
+          chatId="main"
+          votes={[]}
+        />
+      </div>
 
-      {/* Composer pegado al fondo, respeta tu estilo previo */}
-      <form onSubmit={handleSubmit} className="sticky bottom-0 left-0 right-0 w-full bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="mx-auto max-w-3xl flex items-center gap-2 p-3">
+      {/* Composer sticky con efecto cristal que no “sube” al escribir */}
+      <form
+        onSubmit={handleSubmit}
+        className="sticky bottom-0 left-0 right-0 w-full border-t border-white/10 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
+        <div className="mx-auto max-w-3xl flex items-center gap-2 px-3 py-4">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -187,7 +192,7 @@ export default function Chat() {
           />
           <button
             type="submit"
-            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black"
+            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
             aria-label="Enviar"
           >
             ➤

@@ -1,125 +1,76 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { PreviewMessage } from './message';
+import Message from './message';
+import ItineraryCard from './ItineraryCard';
 import type { ChatMessage } from '@/lib/types';
+import { useMemo } from 'react';
 
 type SetMessagesFn = (updater: { messages: ChatMessage[] }) => void;
-type RegenerateFn = () => Promise<void> | void;
 
 interface Props {
   messages: ChatMessage[];
   isLoading: boolean;
-  votes?: any[];
   setMessages: SetMessagesFn;
-  regenerate: RegenerateFn;
+  regenerate: () => Promise<void> | void;
   isReadonly: boolean;
   chatId: string;
+  votes?: any[];
+}
+
+function extractItinerary(text: string): any | null {
+  if (!text) return null;
+  // Busca bloque: ```cv:itinerary\n{...}\n```
+  const match = text.match(/```cv:itinerary\s*([\s\S]*?)```/i);
+  if (!match) return null;
+  try {
+    const raw = match[1].trim();
+    // Si viene con fences internas, intenta recortar
+    const jsonStart = raw.indexOf('{');
+    const jsonEnd = raw.lastIndexOf('}');
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      const jsonStr = raw.slice(jsonStart, jsonEnd + 1);
+      return JSON.parse(jsonStr);
+    }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 export default function Messages({
   messages,
   isLoading,
-  votes = [],
   setMessages,
   regenerate,
   isReadonly,
   chatId,
 }: Props) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<HTMLDivElement>(null);
-
-  const SPACER = 'calc(var(--composer-h) + env(safe-area-inset-bottom) + 20px)';
-
-  const toBottom = () => {
-    const anchor = anchorRef.current;
-    const el = scrollRef.current;
-    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    if (el) el.scrollTop = el.scrollHeight;
-  };
-
-  useLayoutEffect(() => {
-    const id = requestAnimationFrame(() => setTimeout(toBottom, 0));
-    return () => cancelAnimationFrame(id);
-  }, [messages.length, isLoading]);
-
-  useEffect(() => {
-    const root = scrollRef.current;
-    if (!root || typeof MutationObserver === 'undefined') return;
-    let raf: number | null = null;
-    const mo = new MutationObserver(() => {
-      if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(toBottom);
+  const items = useMemo(() => {
+    return messages.map((m) => {
+      const text = (m as any)?.parts?.[0]?.text || '';
+      const itin = m.role === 'assistant' ? extractItinerary(text) : null;
+      return { msg: m, text, itin };
     });
-    mo.observe(root, { childList: true, subtree: true, characterData: true });
-    return () => {
-      mo.disconnect();
-      if (raf) cancelAnimationFrame(raf);
-    };
-  }, []);
+  }, [messages]);
 
   return (
-    <div className="relative flex-1 min-h-0">
-      <div
-        ref={scrollRef}
-        className="relative flex flex-col px-4 pt-4 w-full h-full overflow-y-auto gap-3 md:gap-4"
-        style={{ paddingBottom: SPACER, scrollPaddingBottom: SPACER }}
-      >
-        {messages.length === 0 && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-4">
-            <img src="/images/Intelligence.gif" alt="Coco Volare Intelligence" className="opacity-80 max-h-[25dvh]" />
-            <img src="/images/Texts.gif" alt="Coco Volare" className="opacity-70 max-h-[40dvh]" />
+    <div className="mx-auto w-full max-w-3xl px-3 py-6 space-y-3">
+      {/* Fondo/hero antes de iniciar podría estar en tu layout global; aquí solo mensajes */}
+      {items.map(({ msg, text, itin }) =>
+        itin ? (
+          <ItineraryCard key={msg.id} data={itin} />
+        ) : (
+          <Message key={msg.id} role={msg.role} text={text} />
+        )
+      )}
+
+      {isLoading && (
+        <div className="w-full flex justify-start">
+          <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-black/80 text-white shadow">
+            <span className="opacity-80">pensando…</span>
           </div>
-        )}
-
-        <AnimatePresence mode="popLayout">
-          {messages.map((message) => (
-            <motion.div
-              key={(message as any).id}
-              className="chat-message"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              transition={{ duration: 0.25 }}
-              style={{ scrollMarginBottom: SPACER }}
-            >
-              <PreviewMessage message={message as any} />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-
-
-        {/* ÚNICA burbuja de “pensando” alineada como el assistant */}
-        <AnimatePresence>
-          {isLoading && messages.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="chat-message"
-              style={{ scrollMarginBottom: SPACER }}
-            >
-              <div className="w-full max-w-4xl mx-auto flex justify-start">
-                <div className="inline-flex items-center gap-3 rounded-2xl bg-[#131313] px-5 py-4 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
-                  <img src="/images/Intelligence.gif" alt="pensando" className="h-6 w-6" />
-                  <div className="flex items-center gap-1">
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '120ms' }} />
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '240ms' }} />
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-
-
-        <div style={{ height: SPACER }} />
-        <div ref={anchorRef} style={{ height: 1 }} />
-      </div>
+        </div>
+      )}
     </div>
   );
 }
