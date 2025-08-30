@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import Messages from './messages';
 import type { ChatMessage } from '@/lib/types';
 
-const THREAD_KEY = 'cv_thread_id';
-const COMPOSER_H = 72; // px
+const THREAD_KEY = 'cv_thread_id_session'; // ← SOLO sessionStorage
+const COMPOSER_H = 72;
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -15,23 +15,12 @@ export default function Chat() {
 
   const threadIdRef = useRef<string | null>(null);
 
-  // ThreadId desde storage
   useEffect(() => {
-    const ls = typeof window !== 'undefined' ? window.localStorage.getItem(THREAD_KEY) : null;
     const ss = typeof window !== 'undefined' ? window.sessionStorage.getItem(THREAD_KEY) : null;
-    const existing = ss || ls || (typeof window !== 'undefined' ? (window as any).cvThreadId : null);
-    if (existing) {
-      threadIdRef.current = existing;
-      try {
-        window.localStorage.setItem(THREAD_KEY, existing);
-        window.sessionStorage.setItem(THREAD_KEY, existing);
-      } catch {}
-    }
+    if (ss) threadIdRef.current = ss;
   }, []);
 
-  const addMessage = (m: ChatMessage) => {
-    setMessages((prev) => [...prev, m]);
-  };
+  const addMessage = (m: ChatMessage) => setMessages((prev) => [...prev, m]);
 
   async function handleStream(userText: string) {
     setIsLoading(true);
@@ -55,21 +44,21 @@ export default function Chat() {
           threadId: threadIdRef.current,
         }),
       });
-
       if (!res.body) throw new Error('Stream not supported');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      let receivedAny = false;
 
-      const applyDelta = (chunk: string) => {
+      const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
           const idx = next.findIndex((m) => m.id === aid);
           if (idx >= 0) {
             const curr = next[idx] as any;
             const before = curr.parts?.[0]?.text ?? '';
-            curr.parts[0].text = before + chunk;
+            curr.parts[0].text = replace ? chunk : before + chunk;
             next[idx] = curr;
           }
           return next;
@@ -95,11 +84,7 @@ export default function Chat() {
               const data = JSON.parse(dataLine || '{}');
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
-                try {
-                  window.sessionStorage.setItem(THREAD_KEY, data.threadId);
-                  window.localStorage.setItem(THREAD_KEY, data.threadId);
-                  (window as any).cvThreadId = data.threadId;
-                } catch {}
+                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
               }
             } catch {}
           } else if (event === 'delta') {
@@ -107,7 +92,18 @@ export default function Chat() {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
                 if (!hasFirstDelta) setHasFirstDelta(true);
-                applyDelta(data.value);
+                receivedAny = true;
+                applyText(data.value);
+              }
+            } catch {}
+          } else if (event === 'final') {
+            // Rellena si no hubo deltas o completa el bloque para el ItineraryCard
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              if (typeof data?.text === 'string') {
+                if (!hasFirstDelta) setHasFirstDelta(true);
+                receivedAny = true;
+                applyText(data.text, true);
               }
             } catch {}
           } else if (event === 'done') {
@@ -117,9 +113,21 @@ export default function Chat() {
           }
         }
       }
+
+      if (!receivedAny) {
+        // Seguridad extra: mensaje de error amable
+        applyText('⚠️ Hubo un problema obteniendo la respuesta. Intenta de nuevo.', true);
+      }
     } catch (err) {
       console.error(err);
       setIsLoading(false);
+      // Fallback UI
+      addMessage({
+        id: `e_${Date.now()}`,
+        role: 'assistant',
+        parts: [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }] as any,
+        createdAt: new Date().toISOString(),
+      } as any);
     }
   }
 
@@ -128,8 +136,6 @@ export default function Chat() {
     if (!input.trim() || isLoading) return;
 
     const text = input.trim();
-
-    // pinta mensaje del usuario
     addMessage({
       id: `u_${Date.now()}`,
       role: 'user',
@@ -137,12 +143,9 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any);
     setInput('');
-
-    // streaming inmediato
     await handleStream(text);
   };
 
-  // Mantenemos tu layout y colores
   return (
     <div
       className="flex flex-col min-h-[100dvh] bg-background text-foreground"
@@ -151,7 +154,7 @@ export default function Chat() {
       <div className="flex-1 min-h-0">
         <Messages
           messages={messages}
-          isLoading={isLoading && !hasFirstDelta /* oculta “pensando” al primer token */}
+          isLoading={isLoading && !hasFirstDelta} // oculta “pensando” en el primer token o final
           setMessages={({ messages }) => setMessages(messages)}
           regenerate={async () => {}}
           isReadonly={false}

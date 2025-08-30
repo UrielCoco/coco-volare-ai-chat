@@ -68,18 +68,8 @@ export default function Messages({
       >
         {messages.length === 0 && (
           <div className="flex-1 flex flex-col items-center justify-center gap-4">
-            {/* Intelligence arriba */}
-            <img
-              src="/images/Intelligence.gif"
-              alt="Coco Volare Intelligence"
-              className="opacity-80 max-h-[25dvh]"
-            />
-            {/* Texts debajo */}
-            <img
-              src="/images/Texts.gif"
-              alt="Coco Volare"
-              className="opacity-70 max-h-[40dvh]"
-            />
+            <img src="/images/Intelligence.gif" alt="Coco Volare Intelligence" className="opacity-80 max-h-[25dvh]" />
+            <img src="/images/Texts.gif" alt="Coco Volare" className="opacity-70 max-h-[40dvh]" />
           </div>
         )}
 
@@ -94,13 +84,12 @@ export default function Messages({
               transition={{ duration: 0.25 }}
               style={{ scrollMarginBottom: SPACER }}
             >
-              {/* Tipado laxo interno para evitar choque con UIMessagePart */}
               <PreviewMessage message={message as any} />
             </motion.div>
           ))}
         </AnimatePresence>
 
-        {/* typing bubble */}
+        {/* typing bubble (ÚNICA) */}
         <AnimatePresence>
           {isLoading && messages.length > 0 && (
             <motion.div
@@ -111,8 +100,7 @@ export default function Messages({
               className="w-full mx-auto max-w-4xl px-4"
             >
               <div className="inline-flex items-center gap-3 rounded-2xl bg-[#131313] px-5 py-4 shadow-[0_14px_32px_-14px_rgba(0,0,0,0.55)]">
-                <img src="/images/Intelligence.gif" alt="..." className="h-6 w-6" />
-                {/* Tres puntos visibles SIEMPRE (blancos, animados) */}
+                <img src="/images/Intelligence.gif" alt="pensando" className="h-6 w-6" />
                 <div className="flex items-center gap-1">
                   <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '0ms' }} />
                   <span className="inline-block h-1.5 w-1.5 rounded-full bg-white animate-bounce" style={{ animationDelay: '120ms' }} />
