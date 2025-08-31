@@ -1,3 +1,8 @@
+// Fuerza runtime Node y evita caché/edge
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
@@ -129,7 +134,6 @@ async function runNoStreamAndEmit(args: {
   // Tomar último mensaje del assistant
   const msgs = await openai.beta.threads.messages.list(threadId, { limit: 10 } as any);
   const arr = (msgs?.data || []) as any[];
-  // elegir el más reciente del assistant
   const lastAssistant = arr
     .filter((m) => m.role === 'assistant')
     .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
