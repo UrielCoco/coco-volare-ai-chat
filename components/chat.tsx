@@ -74,10 +74,14 @@ export default function Chat() {
   // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
 
+  // manejar múltiples mensajes del assistant en un mismo run
+  const runFinalsCountRef = useRef<number>(0);
+  const activeAssistantIdRef = useRef<string | null>(null); // placeholder actual
+
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
-  // auto-scroll: sólo en NUEVO mensaje
+  // auto-scroll: solo en NUEVO mensaje
   const lastMsgIdRef = useRef<string | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -132,8 +136,23 @@ export default function Chat() {
     }).catch(() => {});
   }
 
-  async function handleStream(userText: string, assistantId: string) {
+  // crea/actualiza el mensaje placeholder con “…” (typing)
+  function ensureTypingPlaceholder(): string {
+    const id = `a_typing_${Date.now()}`;
+    const placeholder: ChatMessage = {
+      id,
+      role: 'assistant',
+      parts: [{ type: 'text', text: '…' }] as any,
+      createdAt: new Date().toISOString(),
+    } as any;
+    setMessages((prev) => [...prev, placeholder]);
+    return id;
+  }
+
+  async function handleStream(userText: string) {
     setIsLoading(true);
+    runFinalsCountRef.current = 0;
+    activeAssistantIdRef.current = null;
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -150,12 +169,18 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let fullText = ''; // acumulado de ESTA respuesta
+      let fullText = ''; // acumulado del mensaje "en curso" (para respaldo/kommo)
 
+      // Creamos un typing placeholder desde el arranque del stream
+      let typingId = ensureTypingPlaceholder();
+      activeAssistantIdRef.current = typingId;
+
+      // helpers para escribir en el mensaje ACTIVO (placeholder o el último)
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
-          const idx = next.findIndex((m) => m.id === assistantId);
+          const aid = activeAssistantIdRef.current;
+          const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
           if (idx >= 0) {
             const curr = next[idx] as any;
             const before = curr.parts?.[0]?.text ?? '';
@@ -166,6 +191,7 @@ export default function Chat() {
         });
       };
 
+      // intenta despachar Kommo si ya llegó un bloque completo (en delta/final)
       const maybeDispatchKommo = () => {
         const blocks = extractKommoBlocksFromText(fullText);
         for (const b of blocks) {
@@ -204,7 +230,7 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
-              ulog('sse.kommo', { count: ops.length }); // log UI
+              ulog('sse.kommo', { count: ops.length });
               if (ops.length) {
                 const rawKey = JSON.stringify(ops).slice(0, 40);
                 dispatchKommoOps(ops, rawKey);
@@ -216,20 +242,52 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
+                // si recibimos deltas, vamos reemplazando el "…" por streaming real
+                if (fullText.length === 0) {
+                  // primer delta: limpia el "…"
+                  applyText('', true);
+                }
                 fullText += data.value;
                 applyText(data.value);
                 maybeDispatchKommo();
               }
             } catch {}
+
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                fullText = data.text;
-                applyText(fullText, true);
-                maybeDispatchKommo();
+                const text = data.text;
+                fullText = ''; // reinicia el buffer para el siguiente mensaje potencial
+                // ¿Es el primer 'final' del run o uno adicional?
+                if (runFinalsCountRef.current === 0) {
+                  // Reemplaza el typing por el texto final del 1er mensaje
+                  applyText(text, true);
+                } else {
+                  // Agrega un NUEVO mensaje del assistant (segundo o más en el mismo run)
+                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                  const newMsg: ChatMessage = {
+                    id,
+                    role: 'assistant',
+                    parts: [{ type: 'text', text }] as any,
+                    createdAt: new Date().toISOString(),
+                  } as any;
+                  setMessages((prev) => [...prev, newMsg]);
+                  activeAssistantIdRef.current = id;
+                }
+                runFinalsCountRef.current += 1;
+                // por si en el texto vino un bloque cv:kommo
+                const blocks = extractKommoBlocksFromText(text);
+                for (const b of blocks) {
+                  try {
+                    if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
+                      dispatchKommoOps(b.json.ops, b.raw);
+                    }
+                  } catch {}
+                }
               }
             } catch {}
+
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
           }
@@ -237,9 +295,10 @@ export default function Chat() {
       }
     } catch (err) {
       console.error('[CV][chat] stream error', err);
+      setIsLoading(false);
       setMessages((prev) => {
         const next = [...prev];
-        const idx = next.findIndex((m) => (m as any).role === 'assistant' && (m as any).parts?.[0]?.text === '');
+        const idx = next.findIndex((m) => (m as any).role === 'assistant' && (m as any).parts?.[0]?.text === '…');
         if (idx >= 0) {
           (next[idx] as any).parts = [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }];
         }
@@ -254,7 +313,6 @@ export default function Chat() {
     if (!text || isLoading) return;
 
     const userId = `u_${Date.now()}`;
-    const assistantId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
     const userMsg: ChatMessage = {
       id: userId,
@@ -263,19 +321,10 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any;
 
-    const assistantPlaceholder: ChatMessage = {
-      id: assistantId,
-      role: 'assistant',
-      parts: [{ type: 'text', text: '' }] as any,
-      createdAt: new Date().toISOString(),
-    } as any;
-
-    setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
+    setMessages((prev) => [...prev, userMsg]);
     setInput('');
-    await handleStream(text, assistantId);
+    await handleStream(text);
   };
-
-  const showEmpty = messages.length === 0;
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
