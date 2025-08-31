@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.CV_ASSISTANT_ID!;
 
-// ---------- Utils ----------
+// ---------- Utils básicos ----------
 function sseLine(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
@@ -12,7 +12,7 @@ function hasVisibleBlock(text: string): boolean {
   return /```cv:(itinerary|quote)\b/.test(text || '');
 }
 
-// Señales “dame un momento / estoy preparándolo” en varios idiomas
+// Señales “dame un momento / estoy preparándolo” (multi-idioma)
 const WAIT_PATTERNS = [
   // ES
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i, /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
@@ -41,7 +41,7 @@ function isJustQuestion(text: string): boolean {
   return qm || endsQ;
 }
 
-// Extraer cv:kommo desde texto (por si viene embebido)
+// Extraer cv:kommo desde texto (por si llega embebido)
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -99,10 +99,18 @@ async function runAndStreamOnce(args: {
   controller: ReadableStreamDefaultController<Uint8Array>;
   encoder: TextEncoder;
   tag: string;
+  isClosedRef: { v: boolean };
 }) {
-  const { threadId, controller, encoder, tag } = args;
+  const { threadId, controller, encoder, tag, isClosedRef } = args;
 
-  // OJO: sin max_output_tokens para evitar TS error en tu SDK
+  const safeEnqueue = (chunk: Uint8Array) => {
+    if (isClosedRef.v) return;
+    try { controller.enqueue(chunk); } catch { /* noop */ }
+  };
+  const safeEmit = (event: string, data: any) => {
+    safeEnqueue(encoder.encode(sseLine(event, data)));
+  };
+
   const stream: any = await openai.beta.threads.runs.stream(threadId, {
     assistant_id: ASSISTANT_ID,
     // temperature: 0.3,
@@ -113,17 +121,17 @@ async function runAndStreamOnce(args: {
 
   stream
     .on('run.created', (e: any) => {
-      controller.enqueue(encoder.encode(sseLine('run.created', { runId: e.id })));
+      safeEmit('run.created', { runId: e.id });
       console.log(JSON.stringify({ tag, event: 'run.created', runId: e.id, threadId }));
     })
     .on('text.delta', (d: any) => {
       if (d?.value) {
         fullText += d.value;
-        controller.enqueue(encoder.encode(sseLine('delta', { value: d.value })));
+        safeEmit('delta', { value: d.value });
         const blocks = extractKommoBlocksFromText(fullText);
         if (blocks.length) {
           for (const b of blocks) {
-            controller.enqueue(encoder.encode(sseLine('kommo', { ops: b.json.ops })));
+            safeEmit('kommo', { ops: b.json.ops });
             kommoSent += b.json.ops?.length || 0;
           }
         }
@@ -134,33 +142,35 @@ async function runAndStreamOnce(args: {
         .filter((p: any) => p.type === 'output_text' || p.type === 'text')
         .map((p: any) => p.text?.value || p.text || '')
         .join('');
-
       if (txt) {
         fullText += txt;
-        controller.enqueue(encoder.encode(sseLine('final', { text: txt })));
+        safeEmit('final', { text: txt });
         const blocks = extractKommoBlocksFromText(txt);
         if (blocks.length) {
           for (const b of blocks) {
-            controller.enqueue(encoder.encode(sseLine('kommo', { ops: b.json.ops })));
+            safeEmit('kommo', { ops: b.json.ops });
             kommoSent += b.json.ops?.length || 0;
           }
         }
       }
-
       console.log(JSON.stringify({
         tag, event: 'message.completed', fullLen: fullText.length,
         kommoOps: kommoSent, threadId, runId: stream?.current?.id,
       }));
     })
     .on('end', () => {
-      controller.enqueue(encoder.encode(sseLine('stream.end', { deltaChars: fullText.length, sawText: !!fullText })));
+      safeEmit('stream.end', { deltaChars: fullText.length, sawText: !!fullText });
     })
     .on('error', (e: any) => {
-      controller.enqueue(encoder.encode(sseLine('error', { message: e?.message || 'stream error' })));
-      controller.close();
+      safeEmit('error', { message: e?.message || 'stream error' });
     });
 
-  await stream.done();
+  try {
+    await stream.done();
+  } catch (e: any) {
+    safeEmit('error', { message: e?.message || 'stream.done error' });
+  }
+
   return { fullText, kommoSent };
 }
 
@@ -180,7 +190,7 @@ export async function POST(req: NextRequest) {
     const userText: string = body?.message?.parts?.[0]?.text ?? '';
     console.log(JSON.stringify({ tag, event: 'request.in', hasThreadId: !!body?.threadId, userTextLen: userText.length }));
 
-    // Asegurar threadId como string (evita union types)
+    // Garantizar threadId string
     let threadId: string;
     if (body?.threadId && body.threadId.length > 0) {
       threadId = body.threadId;
@@ -192,16 +202,32 @@ export async function POST(req: NextRequest) {
     }
 
     const encoder = new TextEncoder();
+
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        controller.enqueue(encoder.encode(sseLine('meta', { threadId })));
+        let isClosedRef = { v: false };
+        const safeEnqueue = (chunk: Uint8Array) => {
+          if (isClosedRef.v) return;
+          try { controller.enqueue(chunk); } catch { /* noop */ }
+        };
+        const safeEmit = (event: string, data: any) => {
+          safeEnqueue(encoder.encode(sseLine(event, data)));
+        };
+        const safeClose = () => {
+          if (isClosedRef.v) return;
+          isClosedRef.v = true;
+          try { controller.close(); } catch { /* noop */ }
+        };
+
+        // meta para que el cliente guarde el threadId
+        safeEmit('meta', { threadId });
 
         // 1) Guardar mensaje del usuario
         await appendUserMessage(threadId, userText);
         console.log(JSON.stringify({ tag, event: 'message.append.ok', threadId }));
 
         // 2) Primer run
-        const r1 = await runAndStreamOnce({ threadId, controller, encoder, tag });
+        const r1 = await runAndStreamOnce({ threadId, controller, encoder, tag, isClosedRef });
 
         const r1HasBlock = hasVisibleBlock(r1.fullText);
         const r1IsQuestion = isJustQuestion(r1.fullText);
@@ -211,11 +237,8 @@ export async function POST(req: NextRequest) {
         const shouldReprompt = !r1HasBlock && !r1IsQuestion && r1HasWait;
 
         if (!shouldReprompt) {
-          controller.enqueue(encoder.encode(sseLine('done', {
-            reason: 'ended-first-run',
-            r1HasBlock, r1IsQuestion, r1HasWait
-          })));
-          controller.close();
+          safeEmit('done', { reason: 'ended-first-run', r1HasBlock, r1IsQuestion, r1HasWait });
+          safeClose();
           return;
         }
 
@@ -223,13 +246,16 @@ export async function POST(req: NextRequest) {
         await continueWithQuestion(threadId);
         console.log(JSON.stringify({ tag, event: 'message.append.ok', info: 'auto-reprompt-?', threadId }));
 
-        const r2 = await runAndStreamOnce({ threadId, controller, encoder, tag });
+        const r2 = await runAndStreamOnce({ threadId, controller, encoder, tag, isClosedRef });
 
-        controller.enqueue(encoder.encode(sseLine('done', {
+        safeEmit('done', {
           reason: 'after-reprompt-?',
           appendedChars: (r1.fullText.length + r2.fullText.length),
-        })));
-        controller.close();
+        });
+        safeClose();
+      },
+      cancel() {
+        // Si el cliente corta la conexión, simplemente dejamos de emitir.
       },
     });
 
