@@ -54,7 +54,7 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-// ---------- Detección “dame un momento” ----------
+// ---------- Detección de disparador “te lo preparo / un momento” ----------
 const WAIT_PATTERNS = [
   // ES
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
@@ -89,56 +89,59 @@ function extractKommoOps(text: string): Array<any> {
     try {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {}
+    } catch {
+      // ignorar bloque malformado
+    }
   }
   return ops;
 }
 
-// ---------- Sanitizador de fences visibles (keep-last por duplicados) ----------
-const VISIBLE_FENCE_RX = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
-function quickHash(raw: string) {
-  let h = 0;
-  for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-  return h.toString(16);
-}
-function sanitizeVisibleBlocksKeepLast(text: string) {
-  const matches = [...text.matchAll(VISIBLE_FENCE_RX)];
-  if (matches.length === 0) {
-    return {
-      sanitized: text,
-      stats: { total: 0, unique: 0, removed: 0, keptTypes: [] as string[], keptHashes: [] as string[] },
-    };
+// ---------- Dedupe de fences visibles (conserva el ÚLTIMO idéntico) ----------
+function dedupeVisibleFencesKeepLast(text: string): string {
+  if (!text) return text;
+  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
+  const matches: Array<{ start: number; end: number; raw: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(text))) {
+    matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
   }
+  if (matches.length <= 1) return text;
 
-  // Map hash -> último match
-  const byHash: Record<string, { raw: string; type: string; index: number; hash: string }> = {};
-  for (const m of matches) {
-    const raw = m[0];
-    const type = m[1];
-    const index = m.index ?? 0;
-    const hash = quickHash(raw);
-    // siempre se queda con el ÚLTIMO índice para ese hash
-    byHash[hash] = { raw, type, index, hash };
+  const groups = new Map<string, number[]>();
+  matches.forEach((mm, i) => {
+    const arr = groups.get(mm.raw) || [];
+    arr.push(i);
+    groups.set(mm.raw, arr);
+  });
+
+  const toDrop = new Set<number>();
+  for (const [, idxs] of groups) {
+    if (idxs.length > 1) idxs.slice(0, -1).forEach((i) => toDrop.add(i));
   }
+  if (!toDrop.size) return text;
 
-  // Orden por posición original del ÚLTIMO occurrence
-  const kept = Object.values(byHash).sort((a, b) => a.index - b.index);
+  let out = '';
+  let cursor = 0;
+  matches.forEach((mm, i) => {
+    if (toDrop.has(i)) {
+      out += text.slice(cursor, mm.start);
+      cursor = mm.end;
+    }
+  });
+  out += text.slice(cursor);
 
-  const sanitized = kept.map(k => k.raw).join('\n\n');
-  const stats = {
+  slog('diag.fence.dedup', {
     total: matches.length,
-    unique: kept.length,
-    removed: matches.length - kept.length,
-    keptTypes: kept.map(k => k.type),
-    keptHashes: kept.map(k => k.hash),
-  };
-  return { sanitized, stats };
+    dropped: toDrop.size,
+    kept: matches.length - toDrop.size,
+  });
+
+  return out;
 }
 
 /**
  * Ejecuta UN run con createAndStream y resuelve cuando termina.
- * Emite los mismos eventos que ya consume tu UI.
- * Devuelve el texto completo recibido en ese run.
+ * Si no llega 'thread.message.completed' pero hubo deltas, sintetiza un 'final'.
  */
 async function runOnceWithStream(
   tid: string,
@@ -148,12 +151,12 @@ async function runOnceWithStream(
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
-  function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
+  const emitDiag = (phase: 'final' | 'delta' | 'final.synth', extra: Record<string, any> = {}) =>
     send('diag', { phase, threadId: tid, ...extra });
-  }
 
   let fullText = '';
   let runId: string | null = null;
+  let finalEmitted = false;
 
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
@@ -178,8 +181,9 @@ async function runOnceWithStream(
 
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
-          emitDiag('delta', { fenceSeenInDelta: true });
+          emitDiag('delta', { fenceSeenInDelta: true, runId });
         }
+
         if (saw.deltaChars % 300 === 0) {
           slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
@@ -193,49 +197,78 @@ async function runOnceWithStream(
         saw.text = true;
         fullText += complete;
 
-        // DIAG: conteo original de fences
+        // conteo de fences + huellas
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
-        const fenceTypes = fences.map(m => m[1]);
-        const hashes = fences.map(m => quickHash(m[0]));
-        emitDiag('final', { fenceCount, fenceTypes, hashes, fenceSeenInDelta: saw.fenceSeenInDelta });
+        const fenceTypes = fences.map((m) => m[1]);
+        const hashes = fences.map((m) => {
+          const raw = m[0];
+          let h = 0;
+          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+          return h.toString(16);
+        });
 
-        // 1) Extraer y emitir KOMMO (antes de sanear lo visible)
-        const ops = extractKommoOps(complete);
-        if (ops.length) send('kommo', { ops });
+        emitDiag('final', {
+          runId,
+          fenceCount,
+          fenceTypes,
+          hashes,
+          unique: new Set(hashes).size,
+          fenceSeenInDelta: saw.fenceSeenInDelta,
+        });
 
-        // 2) Sanear visibles (dedupe keep-last)
-        const { sanitized, stats } = sanitizeVisibleBlocksKeepLast(complete);
-        if (stats.removed > 0) {
-          slog('output.sanitized', {
-            threadId: tid,
-            runId,
-            fencesTotal: stats.total,
-            unique: stats.unique,
-            removed: stats.removed,
-            keptTypes: stats.keptTypes,
-            keptHashes: stats.keptHashes,
-          });
-        }
-        if (stats.unique > 1) {
-          slog('output.multi_visible', {
-            threadId: tid,
-            runId,
-            unique: stats.unique,
-            keptTypes: stats.keptTypes,
-          });
-        }
+        const finalText = dedupeVisibleFencesKeepLast(complete);
+        send('final', { text: finalText });
 
-        // 3) Emitir final ya saneado
-        send('final', { text: stats.total ? sanitized : complete });
-
-        // Log clásico para métricas
+        const ops = extractKommoOps(finalText);
         slog('message.completed', {
-          fullLen: (stats.total ? sanitized : complete).length,
+          fullLen: finalText.length,
           kommoOps: ops.length,
           runId,
           threadId: tid,
         });
+        if (ops.length) send('kommo', { ops });
+
+        finalEmitted = true;
+      }
+      return;
+    }
+
+    if (type === 'thread.run.completed') {
+      // Por si el proveedor no envió 'thread.message.completed', cerramos nosotros
+      if (saw.text && !finalEmitted) {
+        const fences = [...fullText.matchAll(allFencesRx)];
+        const fenceCount = fences.length;
+        const fenceTypes = fences.map((m) => m[1]);
+        const hashes = fences.map((m) => {
+          const raw = m[0];
+          let h = 0;
+          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+          return h.toString(16);
+        });
+
+        emitDiag('final.synth', {
+          runId,
+          fenceCount,
+          fenceTypes,
+          hashes,
+          unique: new Set(hashes).size,
+          fenceSeenInDelta: saw.fenceSeenInDelta,
+        });
+
+        const finalText = dedupeVisibleFencesKeepLast(fullText);
+        send('final', { text: finalText });
+
+        const ops = extractKommoOps(finalText);
+        slog('message.completed', {
+          fullLen: finalText.length,
+          kommoOps: ops.length,
+          runId,
+          threadId: tid,
+        });
+        if (ops.length) send('kommo', { ops });
+
+        finalEmitted = true;
       }
       return;
     }
@@ -255,6 +288,38 @@ async function runOnceWithStream(
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
+      // Último salvavidas: si hubo texto pero no se emitió final,
+      // lo sintetizamos aquí antes de cerrar el stream.
+      if (saw.text && !finalEmitted) {
+        const fences = [...fullText.matchAll(/```cv:(itinerary|quote)\s*([\s\S]*?)```/g)];
+        const fenceCount = fences.length;
+        const fenceTypes = fences.map((m) => m[1]);
+        const hashes = fences.map((m) => {
+          const raw = m[0];
+          let h = 0;
+          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+          return h.toString(16);
+        });
+
+        slog('diag.fence.final.synth.end', {
+          runId,
+          threadId: tid,
+          fenceCount,
+          fenceTypes,
+          hashes,
+          unique: new Set(hashes).size,
+          fenceSeenInDelta: saw.fenceSeenInDelta,
+        });
+
+        const finalText = dedupeVisibleFencesKeepLast(fullText);
+        send('final', { text: finalText });
+
+        const ops = extractKommoOps(finalText);
+        if (ops.length) send('kommo', { ops });
+
+        finalEmitted = true;
+      }
+
       slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
       resolve();
     });
@@ -303,10 +368,14 @@ export async function POST(req: NextRequest) {
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
         const shouldReprompt =
-          !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
+          !!r1.fullText &&
+          !hasVisibleBlock(r1.fullText) &&
+          hasWaitPhrase(r1.fullText);
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
+
+          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
