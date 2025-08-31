@@ -94,6 +94,65 @@ async function appendUserMessage(threadId: string, text: string) {
   await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
 }
 
+// Compat para distintas versiones del SDK en runs.retrieve
+// - Firma A: runs.retrieve(threadId: string, runId: string)
+// - Firma B: runs.retrieve(threadId: string, params: { run_id: string })
+async function retrieveRunCompat(threadId: string, runId: string) {
+  const runs: any = (openai as any).beta.threads.runs;
+  try {
+    if (typeof runs.retrieve === 'function' && runs.retrieve.length === 2) {
+      return await runs.retrieve(threadId, runId);
+    }
+  } catch {
+    // fallthrough
+  }
+  return await runs.retrieve(threadId, { run_id: runId });
+}
+
+// Fallback sin streaming: 1 run normal + poll corto y emitir último mensaje del assistant
+async function runNoStreamAndEmit(args: {
+  threadId: string;
+  safeEmit: (event: string, data: any) => void;
+}) {
+  const { threadId, safeEmit } = args;
+
+  const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
+
+  // Poll corto (hasta ~12s)
+  for (let i = 0; i < 24; i++) {
+    const r = await retrieveRunCompat(threadId, run.id);
+    const st = String(r.status);
+    if (['completed', 'failed', 'cancelled', 'expired', 'incomplete'].includes(st)) break;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+
+  // Tomar último mensaje del assistant
+  const msgs = await openai.beta.threads.messages.list(threadId, { limit: 10 } as any);
+  const arr = (msgs?.data || []) as any[];
+  // elegir el más reciente del assistant
+  const lastAssistant = arr
+    .filter((m) => m.role === 'assistant')
+    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+
+  let txt = '';
+  const content = (lastAssistant?.content || []) as any[];
+  if (content.length) {
+    txt = content
+      .filter((p) => p.type === 'output_text' || p.type === 'text')
+      .map((p: any) => p.text?.value || p.text || '')
+      .join('');
+  }
+
+  if (txt) {
+    safeEmit('final', { text: txt });
+    const kommo = extractKommoBlocksFromText(txt);
+    for (const b of kommo) safeEmit('kommo', { ops: b.json.ops });
+  } else {
+    safeEmit('error', { message: 'No text returned on non-stream path.' });
+  }
+  return txt;
+}
+
 async function runAndStreamOnce(args: {
   threadId: string;
   controller: ReadableStreamDefaultController<Uint8Array>;
@@ -105,70 +164,78 @@ async function runAndStreamOnce(args: {
 
   const safeEnqueue = (chunk: Uint8Array) => {
     if (isClosedRef.v) return;
-    try { controller.enqueue(chunk); } catch { /* noop */ }
+    try { controller.enqueue(chunk); } catch {}
   };
   const safeEmit = (event: string, data: any) => {
     safeEnqueue(encoder.encode(sseLine(event, data)));
   };
 
-  const stream: any = await openai.beta.threads.runs.stream(threadId, {
-    assistant_id: ASSISTANT_ID,
-    // temperature: 0.3,
-  });
-
   let fullText = '';
   let kommoSent = 0;
 
-  stream
-    .on('run.created', (e: any) => {
-      safeEmit('run.created', { runId: e.id });
-      console.log(JSON.stringify({ tag, event: 'run.created', runId: e.id, threadId }));
-    })
-    .on('text.delta', (d: any) => {
-      if (d?.value) {
-        fullText += d.value;
-        safeEmit('delta', { value: d.value });
-        const blocks = extractKommoBlocksFromText(fullText);
-        if (blocks.length) {
-          for (const b of blocks) {
-            safeEmit('kommo', { ops: b.json.ops });
-            kommoSent += b.json.ops?.length || 0;
-          }
-        }
-      }
-    })
-    .on('message.completed', (msg: any) => {
-      const txt = (msg?.content || [])
-        .filter((p: any) => p.type === 'output_text' || p.type === 'text')
-        .map((p: any) => p.text?.value || p.text || '')
-        .join('');
-      if (txt) {
-        fullText += txt;
-        safeEmit('final', { text: txt });
-        const blocks = extractKommoBlocksFromText(txt);
-        if (blocks.length) {
-          for (const b of blocks) {
-            safeEmit('kommo', { ops: b.json.ops });
-            kommoSent += b.json.ops?.length || 0;
-          }
-        }
-      }
-      console.log(JSON.stringify({
-        tag, event: 'message.completed', fullLen: fullText.length,
-        kommoOps: kommoSent, threadId, runId: stream?.current?.id,
-      }));
-    })
-    .on('end', () => {
-      safeEmit('stream.end', { deltaChars: fullText.length, sawText: !!fullText });
-    })
-    .on('error', (e: any) => {
-      safeEmit('error', { message: e?.message || 'stream error' });
+  // 1) Intento con streaming
+  try {
+    const stream: any = await openai.beta.threads.runs.stream(threadId, {
+      assistant_id: ASSISTANT_ID,
+      // temperature: 0.3,
     });
 
-  try {
-    await stream.done();
-  } catch (e: any) {
-    safeEmit('error', { message: e?.message || 'stream.done error' });
+    stream
+      .on('run.created', (e: any) => {
+        safeEmit('run.created', { runId: e.id });
+        console.log(JSON.stringify({ tag, event: 'run.created', runId: e.id, threadId }));
+      })
+      .on('text.delta', (d: any) => {
+        if (d?.value) {
+          fullText += d.value;
+          safeEmit('delta', { value: d.value });
+          const blocks = extractKommoBlocksFromText(fullText);
+          if (blocks.length) {
+            for (const b of blocks) {
+              safeEmit('kommo', { ops: b.json.ops });
+              kommoSent += b.json.ops?.length || 0;
+            }
+          }
+        }
+      })
+      .on('message.completed', (msg: any) => {
+        const txt = (msg?.content || [])
+          .filter((p: any) => p.type === 'output_text' || p.type === 'text')
+          .map((p: any) => p.text?.value || p.text || '')
+          .join('');
+        if (txt) {
+          fullText += txt;
+          safeEmit('final', { text: txt });
+          const blocks = extractKommoBlocksFromText(txt);
+          if (blocks.length) {
+            for (const b of blocks) {
+              safeEmit('kommo', { ops: b.json.ops });
+              kommoSent += b.json.ops?.length || 0;
+            }
+          }
+        }
+        console.log(JSON.stringify({
+          tag, event: 'message.completed', fullLen: fullText.length,
+          kommoOps: kommoSent, threadId, runId: stream?.current?.id,
+        }));
+      })
+      .on('end', () => {
+        safeEmit('stream.end', { deltaChars: fullText.length, sawText: !!fullText });
+      })
+      .on('error', (e: any) => {
+        safeEmit('warn', { message: e?.message || 'stream error' });
+      });
+
+    try {
+      await stream.done();
+    } catch (e: any) {
+      safeEmit('warn', { message: e?.message || 'stream.done error' });
+    }
+  } catch (err: any) {
+    // 2) Fallback si el stream ni siquiera inicia
+    safeEmit('warn', { message: 'stream.create failed; falling back to non-stream run' });
+    const txt = await runNoStreamAndEmit({ threadId, safeEmit });
+    fullText += txt || '';
   }
 
   return { fullText, kommoSent };
@@ -208,7 +275,7 @@ export async function POST(req: NextRequest) {
         let isClosedRef = { v: false };
         const safeEnqueue = (chunk: Uint8Array) => {
           if (isClosedRef.v) return;
-          try { controller.enqueue(chunk); } catch { /* noop */ }
+          try { controller.enqueue(chunk); } catch {}
         };
         const safeEmit = (event: string, data: any) => {
           safeEnqueue(encoder.encode(sseLine(event, data)));
@@ -216,7 +283,7 @@ export async function POST(req: NextRequest) {
         const safeClose = () => {
           if (isClosedRef.v) return;
           isClosedRef.v = true;
-          try { controller.close(); } catch { /* noop */ }
+          try { controller.close(); } catch {}
         };
 
         // meta para que el cliente guarde el threadId
