@@ -93,7 +93,7 @@ function dedupeVisibleFencesKeepLast(text: string): string {
 
   // Marcar para eliminar todos menos el último de cada grupo con tamaño > 1
   const toDrop = new Set<number>();
-  Array.from(groups.entries()).forEach(([raw, idxs]) => {
+  Array.from(groups.entries()).forEach(([, idxs]) => {
     if (idxs.length > 1) {
       idxs.slice(0, -1).forEach((i) => toDrop.add(i));
     }
@@ -133,9 +133,9 @@ export default function Chat() {
   // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
 
-  // manejar múltiples mensajes del assistant en un mismo run
+  // controla finales dentro del MISMO stream (pueden ser varios runs: reprompt “?”)
   const runFinalsCountRef = useRef<number>(0);
-  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje "en curso"
+  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje “en curso”
 
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
@@ -316,18 +316,17 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                // ---- NUEVO: desduplicar fences visibles manteniendo el ÚLTIMO idéntico
+                // ---- desduplicar fences visibles manteniendo el ÚLTIMO idéntico
                 const textRaw = data.text;
                 const text = dedupeVisibleFencesKeepLast(textRaw);
 
-                // ¿incluye bloque visible?
                 const hasBlock = /```cv:(itinerary|quote)\b/.test(text);
 
                 // reinicia buffer para el siguiente mensaje potencial
                 fullText = '';
 
                 if (runFinalsCountRef.current === 0) {
-                  // Reemplaza el primer typing por el texto final corto
+                  // Primer final del stream → reemplaza el primer placeholder
                   applyText(text, true);
 
                   // Si NO hay bloque visible, dejamos un 2º placeholder “pensando…”
@@ -336,16 +335,10 @@ export default function Chat() {
                     activeAssistantIdRef.current = id2;
                   }
                 } else {
-                  // Final adicional → NUEVO mensaje
-                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                  const newMsg: ChatMessage = {
-                    id,
-                    role: 'assistant',
-                    parts: [{ type: 'text', text }] as any,
-                    createdAt: new Date().toISOString(),
-                  } as any;
-                  setMessages((prev) => [...prev, newMsg]);
-                  activeAssistantIdRef.current = id;
+                  // FINAL SUBSECUENTE (p.ej. tras reprompt "?"):
+                  // En lugar de crear un mensaje nuevo, REEMPLAZAMOS el placeholder activo
+                  // que ya venía siendo alimentado por los deltas del segundo run.
+                  applyText(text, true);
                 }
 
                 runFinalsCountRef.current += 1;
@@ -363,14 +356,12 @@ export default function Chat() {
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
-            // Limpia cualquier placeholder “…” sobrante
+            // Limpia TODOS los placeholders “…” sobrantes
             setMessages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex(
-                (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
+              const next = prev.filter(
+                (m: any) => !(m.role === 'assistant' && m.parts?.[0]?.text === '…')
               );
-              if (idx >= 0) next.splice(idx, 1);
-              return next;
+              return [...next];
             });
           }
         }
@@ -379,14 +370,16 @@ export default function Chat() {
       console.error('[CV][chat] stream error', err);
       setIsLoading(false);
       setMessages((prev) => {
+        // Si hay algún placeholder, muéstrale error
         const next = [...prev];
-        const idx = next.findIndex(
-          (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
-        );
-        if (idx >= 0) {
-          (next[idx] as any).parts = [
-            { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
-          ];
+        for (let i = next.length - 1; i >= 0; i--) {
+          const m: any = next[i];
+          if (m.role === 'assistant' && m.parts?.[0]?.text === '…') {
+            (next[i] as any).parts = [
+              { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
+            ];
+            break;
+          }
         }
         return next;
       });
