@@ -22,27 +22,30 @@ function sse(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
 
+// ---------- Logs server ----------
+function slog(event: string, meta: Record<string, any> = {}) {
+  try {
+    console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
+  } catch {}
+}
+
+// ---------- Helpers OpenAI ----------
 function flattenAssistantTextFromMessage(message: any): string {
-  // message: OpenAI.Beta.Threads.Messages.Message
   const out: string[] = [];
   if (!message?.content) return '';
   for (const c of message.content) {
-    // formatos posibles segun SDK
     if (c.type === 'text' && c.text?.value) out.push(c.text.value);
-    // algunos SDKs antiguos usan c.text?.annotations pero value sigue existiendo
   }
   return out.join('\n');
 }
 
 function extractDeltaTextFromEvent(e: any): string {
-  // Para eventos 'thread.message.delta' el texto suele venir en e.data.delta.content[*].text.value
   try {
     const content = e?.data?.delta?.content;
     if (Array.isArray(content)) {
       const parts: string[] = [];
       for (const item of content) {
         if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
-        // algunas variantes usan 'output_text'
         if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
       }
       return parts.join('');
@@ -51,7 +54,7 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-// --- Extrae ops de bloques ```cv:kommo ... ```
+// ---------- Extrae ops de bloques ```cv:kommo ...``` en texto ----------
 function extractKommoOps(text: string): Array<any> {
   const ops: any[] = [];
   if (!text) return ops;
@@ -62,7 +65,7 @@ function extractKommoOps(text: string): Array<any> {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
     } catch {
-      // ignora bloque malformado
+      // ignorar bloque malformado
     }
   }
   return ops;
@@ -70,44 +73,49 @@ function extractKommoOps(text: string): Array<any> {
 
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
+  const userText = asText(message);
+  slog('request.in', { hasThreadId: !!threadId, userTextLen: userText.length });
 
   // 1) Asegurar thread
   let tid = String(threadId || '');
   if (!tid) {
     const t = await client.beta.threads.create();
     tid = t.id;
+    slog('thread.created', { threadId: tid });
+  } else {
+    slog('thread.reuse', { threadId: tid });
   }
 
-  // 2) Adjuntar mensaje de usuario
-  const userText = asText(message);
+  // 2) Adjuntar mensaje del usuario
   await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
+  slog('message.append.ok', { threadId: tid });
 
-  // 3) SSE → Cliente
+  // 3) Abrir SSE
   const encoder = new TextEncoder();
-
   const rs = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: any) =>
         controller.enqueue(encoder.encode(sse(event, data)));
 
-      // meta con threadId
+      // meta con threadId (cliente lo guarda)
       send('meta', { threadId: tid });
 
       let sawText = false;
+      let deltaChars = 0;
       let runId: string | null = null;
 
       try {
-        // Usamos createAndStream para compatibilidad y tipeo seguro
+        // Stream robusto (compatible con distintas versiones del SDK)
         const stream = await client.beta.threads.runs.createAndStream(tid, {
           assistant_id: ASSISTANT_ID,
         });
 
-        // Escuchamos un solo canal "event" para cubrir todas las variantes de SDK
         stream.on('event', (e: any) => {
           const type = e?.event as string;
 
           if (type === 'thread.run.created') {
             runId = e?.data?.id ?? null;
+            slog('run.created', { runId, threadId: tid });
             return;
           }
 
@@ -115,51 +123,61 @@ export async function POST(req: NextRequest) {
             const deltaText = extractDeltaTextFromEvent(e);
             if (deltaText) {
               sawText = true;
+              deltaChars += deltaText.length;
               send('delta', { value: deltaText });
+              if (deltaChars % 300 === 0) {
+                slog('stream.delta.tick', { deltaChars, runId, threadId: tid });
+              }
             }
             return;
           }
 
           if (type === 'thread.message.completed') {
-            // mensaje completo del assistant
             const full = flattenAssistantTextFromMessage(e?.data);
             if (full) {
               sawText = true;
+              // 1) Texto completo para el cliente
               send('final', { text: full });
 
-              // si incluye bloque cv:kommo, avisamos explícitamente
+              // 2) Si viene cv:kommo, avisar explícitamente
               const ops = extractKommoOps(full);
+              slog('message.completed', {
+                fullLen: full.length,
+                kommoOps: ops.length,
+                runId,
+                threadId: tid,
+              });
               if (ops.length) send('kommo', { ops });
             }
             return;
           }
 
-          if (type === 'error') {
-            send('error', { error: String(e?.data || 'unknown') });
-            return;
-          }
-
           if (type === 'thread.run.failed') {
+            slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
             send('error', { error: 'run_failed' });
             return;
           }
 
-          if (type === 'done' || type === 'thread.run.completed') {
-            // no enviamos nada extra aquí; el cierre formal lo hace stream.on('end')
+          if (type === 'error') {
+            slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
+            send('error', { error: String(e?.data || 'unknown') });
             return;
           }
+
+          // Otros eventos se ignoran
         });
 
         stream.on('end', async () => {
+          slog('stream.end', { deltaChars, sawText, runId, threadId: tid });
+
+          // Si no hubo texto, cancelar run para no bloquear thread
           if (!sawText && runId) {
-            // Algunas versiones del SDK exigen objeto { thread_id, run_id }
             try {
-              // @ts-expect-error: distintas firmas segun versión
+              // @ts-expect-error firmas distintas segun SDK
               await client.beta.threads.runs.cancel({ thread_id: tid, run_id: runId });
             } catch {
               try {
-                // fallback a firma (threadId, runId) en SDKs más nuevos
-                // @ts-expect-error: firma alternativa
+                // @ts-expect-error firma alternativa
                 await client.beta.threads.runs.cancel(tid, runId);
               } catch {}
             }
@@ -169,13 +187,14 @@ export async function POST(req: NextRequest) {
         });
 
         stream.on('error', async (err: any) => {
+          slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
           if (runId) {
             try {
-              // @ts-expect-error: distintas firmas segun versión
+              // @ts-expect-error firmas distintas segun SDK
               await client.beta.threads.runs.cancel({ thread_id: tid, run_id: runId });
             } catch {
               try {
-                // @ts-expect-error
+                // @ts-expect-error firma alternativa
                 await client.beta.threads.runs.cancel(tid, runId);
               } catch {}
             }
@@ -184,6 +203,7 @@ export async function POST(req: NextRequest) {
           controller.close();
         });
       } catch (e: any) {
+        slog('exception.createStream', { error: String(e?.message || e) });
         send('error', { error: String(e?.message || e) });
         controller.close();
       }

@@ -44,7 +44,7 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   }
   if (blocks.length) return blocks;
 
-  // 2) Fallback: fence aún sin cerrar pero JSON balanceado
+  // 2) Fallback: fence sin cerrar pero JSON balanceado
   const at = text.toLowerCase().indexOf('```cv:kommo');
   if (at >= 0) {
     const openBrace = text.indexOf('{', at);
@@ -77,7 +77,7 @@ export default function Chat() {
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
-  // auto-scroll: solo al agregar NUEVO mensaje (id distinto)
+  // auto-scroll: sólo en NUEVO mensaje
   const lastMsgIdRef = useRef<string | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -150,9 +150,8 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let fullText = ''; // acumulado de ESTA respuesta del assistant
+      let fullText = ''; // acumulado de ESTA respuesta
 
-      // helpers para escribir en el placeholder
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
@@ -167,7 +166,6 @@ export default function Chat() {
         });
       };
 
-      // intenta despachar Kommo si ya llegó un bloque completo (en delta/final)
       const maybeDispatchKommo = () => {
         const blocks = extractKommoBlocksFromText(fullText);
         for (const b of blocks) {
@@ -202,11 +200,11 @@ export default function Chat() {
               }
             } catch {}
 
-          // 👇 NUEVO: caso explícito para eventos `kommo` enviados por el servidor
           } else if (event === 'kommo') {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
+              ulog('sse.kommo', { count: ops.length }); // log UI
               if (ops.length) {
                 const rawKey = JSON.stringify(ops).slice(0, 40);
                 dispatchKommoOps(ops, rawKey);
@@ -218,18 +216,18 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
-                fullText += data.value;           // acumula
-                applyText(data.value);            // pinta
-                maybeDispatchKommo();             // intenta disparar si ya está completo
+                fullText += data.value;
+                applyText(data.value);
+                maybeDispatchKommo();
               }
             } catch {}
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                fullText = data.text;             // reemplaza con el texto final
+                fullText = data.text;
                 applyText(fullText, true);
-                maybeDispatchKommo();             // por si vino hasta el final
+                maybeDispatchKommo();
               }
             } catch {}
           } else if (event === 'done' || event === 'error') {
@@ -239,7 +237,6 @@ export default function Chat() {
       }
     } catch (err) {
       console.error('[CV][chat] stream error', err);
-      // fallback: muestra error en el último placeholder
       setMessages((prev) => {
         const next = [...prev];
         const idx = next.findIndex((m) => (m as any).role === 'assistant' && (m as any).parts?.[0]?.text === '');
