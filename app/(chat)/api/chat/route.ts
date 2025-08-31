@@ -54,7 +54,7 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-// ---------- Detección de disparador “te lo preparo / un momento” ----------
+// ---------- Detección “dame un momento” ----------
 const WAIT_PATTERNS = [
   // ES
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
@@ -89,36 +89,67 @@ function extractKommoOps(text: string): Array<any> {
     try {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {
-      // ignorar bloque malformado
-    }
+    } catch {}
   }
   return ops;
+}
+
+// ---------- Sanitizador de fences visibles (keep-last por duplicados) ----------
+const VISIBLE_FENCE_RX = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+function quickHash(raw: string) {
+  let h = 0;
+  for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+function sanitizeVisibleBlocksKeepLast(text: string) {
+  const matches = [...text.matchAll(VISIBLE_FENCE_RX)];
+  if (matches.length === 0) {
+    return {
+      sanitized: text,
+      stats: { total: 0, unique: 0, removed: 0, keptTypes: [] as string[], keptHashes: [] as string[] },
+    };
+  }
+
+  // Map hash -> último match
+  const byHash: Record<string, { raw: string; type: string; index: number; hash: string }> = {};
+  for (const m of matches) {
+    const raw = m[0];
+    const type = m[1];
+    const index = m.index ?? 0;
+    const hash = quickHash(raw);
+    // siempre se queda con el ÚLTIMO índice para ese hash
+    byHash[hash] = { raw, type, index, hash };
+  }
+
+  // Orden por posición original del ÚLTIMO occurrence
+  const kept = Object.values(byHash).sort((a, b) => a.index - b.index);
+
+  const sanitized = kept.map(k => k.raw).join('\n\n');
+  const stats = {
+    total: matches.length,
+    unique: kept.length,
+    removed: matches.length - kept.length,
+    keptTypes: kept.map(k => k.type),
+    keptHashes: kept.map(k => k.hash),
+  };
+  return { sanitized, stats };
 }
 
 /**
  * Ejecuta UN run con createAndStream y resuelve cuando termina.
  * Emite los mismos eventos que ya consume tu UI.
  * Devuelve el texto completo recibido en ese run.
- * (AHORA con logs de diagnóstico de fences).
  */
 async function runOnceWithStream(
   tid: string,
   send: (event: string, data: any) => void,
 ): Promise<{ fullText: string; sawText: boolean }> {
-  // --- helpers locales de diagnóstico ---
   const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // SSE opcional para inspección en cliente
     send('diag', { phase, threadId: tid, ...extra });
-    // Log persistente en Vercel
-    slog(
-      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
-      { threadId: tid, ...extra },
-    );
   }
 
   let fullText = '';
@@ -145,16 +176,10 @@ async function runOnceWithStream(
         fullText += deltaText;
         send('delta', { value: deltaText });
 
-        // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
-          emitDiag('delta', {
-            runId,
-            fenceSeenInDelta: true,
-            sample: deltaText.slice(0, 160),
-          });
+          emitDiag('delta', { fenceSeenInDelta: true });
         }
-
         if (saw.deltaChars % 300 === 0) {
           slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
@@ -168,37 +193,49 @@ async function runOnceWithStream(
         saw.text = true;
         fullText += complete;
 
-        // DIAG final: contar fences y generar huellas
+        // DIAG: conteo original de fences
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
         const fenceTypes = fences.map(m => m[1]);
-        const hashes = fences.map(m => {
-          const raw = m[0]; // fence completo
-          let hash = 0;
-          for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
-          return hash.toString(16);
-        });
-        const unique = Array.from(new Set(hashes)).length;
-        emitDiag('final', {
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
+        const hashes = fences.map(m => quickHash(m[0]));
+        emitDiag('final', { fenceCount, fenceTypes, hashes, fenceSeenInDelta: saw.fenceSeenInDelta });
 
-        // Emitimos lo que ya usas
-        send('final', { text: complete });
-
+        // 1) Extraer y emitir KOMMO (antes de sanear lo visible)
         const ops = extractKommoOps(complete);
+        if (ops.length) send('kommo', { ops });
+
+        // 2) Sanear visibles (dedupe keep-last)
+        const { sanitized, stats } = sanitizeVisibleBlocksKeepLast(complete);
+        if (stats.removed > 0) {
+          slog('output.sanitized', {
+            threadId: tid,
+            runId,
+            fencesTotal: stats.total,
+            unique: stats.unique,
+            removed: stats.removed,
+            keptTypes: stats.keptTypes,
+            keptHashes: stats.keptHashes,
+          });
+        }
+        if (stats.unique > 1) {
+          slog('output.multi_visible', {
+            threadId: tid,
+            runId,
+            unique: stats.unique,
+            keptTypes: stats.keptTypes,
+          });
+        }
+
+        // 3) Emitir final ya saneado
+        send('final', { text: stats.total ? sanitized : complete });
+
+        // Log clásico para métricas
         slog('message.completed', {
-          fullLen: complete.length,
+          fullLen: (stats.total ? sanitized : complete).length,
           kommoOps: ops.length,
           runId,
           threadId: tid,
         });
-        if (ops.length) send('kommo', { ops });
       }
       return;
     }
@@ -266,13 +303,10 @@ export async function POST(req: NextRequest) {
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
         const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          hasWaitPhrase(r1.fullText);
+          !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
