@@ -20,6 +20,47 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
+  // evitar duplicados de Kommo por mensaje
+  const kommoHashesRef = useRef<Set<string>>(new Set());
+
+  // Extrae bloques cv:kommo como JSON
+  function extractKommoBlocks(text: string): Array<{ raw: string; json: any }> {
+    const blocks: Array<{ raw: string; json: any }> = [];
+    if (!text) return blocks;
+    const re = /```\\s*cv:kommo\\s*([\\s\\S]*?)```/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const raw = m[1]?.trim() || '';
+      try {
+        const json = JSON.parse(raw);
+        if (json && json.ops && Array.isArray(json.ops)) blocks.push({ raw, json });
+      } catch {
+        // ignore malformed
+      }
+    }
+    return blocks;
+  }
+
+  async function dispatchKommoFromText(text: string) {
+    try {
+      const blocks = extractKommoBlocks(text);
+      if (!blocks.length) return;
+      const threadId = threadIdRef.current;
+      for (const b of blocks) {
+        const key = 'k_' + (b.raw.length > 16 ? b.raw.slice(0, 16) : b.raw);
+        if (kommoHashesRef.current.has(key)) continue;
+        kommoHashesRef.current.add(key);
+        // fire-and-forget; no await para no bloquear la UI
+        fetch('/api/kommo/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ops: b.json.ops, threadId }),
+          keepalive: true,
+        }).catch(() => {});
+      }
+    } catch {}
+  }
+
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
@@ -44,7 +85,7 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  // observar altura real del composer (evita que tape el último mensaje)
+  // medir composer
   useEffect(() => {
     if (!composerRef.current) return;
     const ro = new ResizeObserver((entries) => {
@@ -130,7 +171,7 @@ export default function Chat() {
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.text === 'string') applyText(data.text, true);
+              if (typeof data?.text === 'string') { applyText(data.text, true); dispatchKommoFromText(data.text); }
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
@@ -138,11 +179,11 @@ export default function Chat() {
         }
       }
     } catch (err) {
-      console.error('[CV][chat] stream error:', err);
-      setIsLoading(false);
+      console.error('[CV][chat] stream error', err);
+      // fallback: muestra error en el último placeholder
       setMessages((prev) => {
         const next = [...prev];
-        const idx = next.findIndex((m) => m.id === assistantId);
+        const idx = next.findIndex((m) => (m as any).role === 'assistant' && (m as any).parts?.[0]?.text === '');
         if (idx >= 0) {
           (next[idx] as any).parts = [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }];
         }
@@ -187,36 +228,18 @@ export default function Chat() {
       {/* lista scrolleable */}
       <div
         ref={listRef}
-        className="relative flex-1 overflow-y-auto"
-        style={{
-          paddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
-          scrollPaddingBottom: `calc(${composerH}px + env(safe-area-inset-bottom))`,
-          overscrollBehaviorY: 'contain',
-        }}
+        className="flex-1 overflow-y-auto"
+        style={{ paddingBottom: `${composerH + 24}px` }}
       >
-        {showEmpty && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <img
-              src="/images/Texts.gif"
-              alt="Coco Volare"
-              className="w-40 md:w-64 opacity-60"
-            />
-          </div>
-        )}
-
-        <Messages
-          messages={messages}
-          isLoading={isLoading}
-          setMessages={({ messages }) => setMessages(messages)}
-          regenerate={async () => {}}
-          isReadonly={false}
-          chatId="main"
-          votes={[]}
-        />
-
-        {/* spacer para que el último mensaje no quede oculto por el composer */}
-        <div style={{ height: composerH }} />
-        <div ref={endRef} />
+        <div className="mx-auto max-w-3xl w-full px-4">
+          <Messages
+            messages={messages}
+            isLoading={isLoading}
+            setMessages={({ messages }) => setMessages(messages)}
+            regenerate={async () => {}}
+          />
+          <div ref={endRef} />
+        </div>
       </div>
 
       {/* composer */}

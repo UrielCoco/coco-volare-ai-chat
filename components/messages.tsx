@@ -16,15 +16,16 @@ type Props = {
   votes?: any[];
 };
 
-const getText = (m: any): string => {
-  if (!m) return '';
-  if (typeof m.text === 'string') return m.text;
-  if (Array.isArray(m.parts) && m.parts[0]?.text) return m.parts[0].text as string;
-  if (typeof m.content === 'string') return m.content;
-  return '';
-};
+function getText(m: any) {
+  try {
+    return (m?.parts || [{ type: 'text', text: '' }])
+      .filter((p: any) => p?.type === 'text')
+      .map((p: any) => p?.text || '')
+      .join('');
+  } catch { return ''; }
+}
 
-const guessLang = (msgs: ChatMessage[]): 'es' | 'en' => {
+function guessLang(msgs: ChatMessage[]): 'es' | 'en' {
   for (let i = msgs.length - 1; i >= 0; i--) {
     if ((msgs[i] as any).role === 'user') {
       const t = getText(msgs[i]).toLowerCase();
@@ -58,7 +59,7 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
   if (idx === -1) return { found: false, complete: false };
 
   // Fenced
-  const re = new RegExp("```\\s*" + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "\\s*([\\s\\S]*?)```", "i");
+  const re = new RegExp("```\\s*" + label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + "\\s*([\\s\\S]*?)```", "i");
   const fenced = text.match(re);
   if (fenced) {
     try { return { found: true, complete: true, data: JSON.parse(fenced[1]) }; }
@@ -129,7 +130,11 @@ export default function Messages(props: Props) {
         const role = (m as any).role as 'user' | 'assistant' | 'system';
         const raw = getText(m) ?? '';
         const trimmed = raw.replace(/\u200B/g, '').trim();
+        // Oculta bloques secretos cv:kommo del texto visible
+        const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         const stopped = (m as any)?.stopped === true;
+
+        if (role === 'system') return null;
 
         if (role === 'user') {
           return (
@@ -141,7 +146,7 @@ export default function Messages(props: Props) {
 
         if (role === 'assistant') {
           // Evita burbuja doble cuando aún no hay tokens
-          if (!trimmed) return null;
+          if (!visible) return null;
 
           // 1) Itinerario
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
@@ -165,10 +170,10 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 3) Texto normal
+          // 3) Texto normal (sin mostrar cv:kommo)
           return (
             <AssistantBubble key={(m as any).id || i}>
-              <div className="whitespace-pre-wrap break-words">{trimmed}</div>
+              <div className="whitespace-pre-wrap break-words">{visible}</div>
               {stopped && <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>}
             </AssistantBubble>
           );
