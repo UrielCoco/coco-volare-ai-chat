@@ -100,6 +100,7 @@ function extractKommoOps(text: string): Array<any> {
  * Ejecuta UN run con createAndStream y resuelve cuando termina.
  * Emite los mismos eventos que ya consume tu UI.
  * Devuelve el texto completo recibido en ese run.
+ * (AHORA con logs de diagnóstico de fences).
  */
 async function runOnceWithStream(
   tid: string,
@@ -111,8 +112,13 @@ async function runOnceWithStream(
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // La UI puede ignorar este evento
-    send('diag', { phase, runId, threadId: tid, ...extra });
+    // SSE opcional para inspección en cliente
+    send('diag', { phase, threadId: tid, ...extra });
+    // Log persistente en Vercel
+    slog(
+      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
+      { threadId: tid, ...extra },
+    );
   }
 
   let fullText = '';
@@ -142,7 +148,11 @@ async function runOnceWithStream(
         // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
-          emitDiag('delta', { fenceSeenInDelta: true });
+          emitDiag('delta', {
+            runId,
+            fenceSeenInDelta: true,
+            sample: deltaText.slice(0, 160),
+          });
         }
 
         if (saw.deltaChars % 300 === 0) {
@@ -162,14 +172,21 @@ async function runOnceWithStream(
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
         const fenceTypes = fences.map(m => m[1]);
-        // huella simple para ver si son idénticos (no importa el orden)
         const hashes = fences.map(m => {
           const raw = m[0]; // fence completo
           let hash = 0;
           for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
           return hash.toString(16);
         });
-        emitDiag('final', { fenceCount, fenceTypes, hashes, fenceSeenInDelta: saw.fenceSeenInDelta });
+        const unique = Array.from(new Set(hashes)).length;
+        emitDiag('final', {
+          runId,
+          fenceCount,
+          fenceTypes,
+          hashes,
+          unique,
+          fenceSeenInDelta: saw.fenceSeenInDelta,
+        });
 
         // Emitimos lo que ya usas
         send('final', { text: complete });
@@ -214,7 +231,6 @@ async function runOnceWithStream(
   return { fullText, sawText: saw.text };
 }
 
-
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
   const userText = asText(message);
@@ -256,7 +272,6 @@ export async function POST(req: NextRequest) {
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-
           // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
