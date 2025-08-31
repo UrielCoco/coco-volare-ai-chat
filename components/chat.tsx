@@ -10,6 +10,61 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
+// ---------- Helpers de extracción ----------
+function extractBalancedJson(src: string, startIdx: number): string | null {
+  let inString = false, escape = false, depth = 0, first = -1;
+  for (let i = startIdx; i < src.length; i++) {
+    const ch = src[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') { inString = false; continue; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
+    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
+  }
+  return null;
+}
+
+function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any; start: number; end: number }> {
+  const blocks: Array<{ raw: string; json: any; start: number; end: number }> = [];
+  if (!text) return blocks;
+
+  // 1) Busca fence abierta ```cv:kommo ... ``` (completa)
+  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = rxFence.exec(text))) {
+    const candidate = (m[1] || '').trim();
+    try {
+      const json = JSON.parse(candidate);
+      if (json && Array.isArray(json.ops)) {
+        blocks.push({ raw: candidate, json, start: m.index, end: rxFence.lastIndex });
+      }
+    } catch { /* ignore malformed */ }
+  }
+  if (blocks.length) return blocks;
+
+  // 2) Fallback: si aún no cerró la fence pero ya vemos "cv:kommo" y un JSON balanceado, también lo tomamos
+  const at = text.toLowerCase().indexOf('```cv:kommo');
+  if (at >= 0) {
+    const openBrace = text.indexOf('{', at);
+    if (openBrace >= 0) {
+      const jsonSlice = extractBalancedJson(text, openBrace);
+      if (jsonSlice) {
+        try {
+          const json = JSON.parse(jsonSlice);
+          if (json && Array.isArray(json.ops)) {
+            blocks.push({ raw: jsonSlice, json, start: openBrace, end: openBrace + jsonSlice.length });
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  return blocks;
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -20,51 +75,13 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // evitar duplicados de Kommo por mensaje
+  // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
-
-  // Extrae bloques cv:kommo como JSON
-  function extractKommoBlocks(text: string): Array<{ raw: string; json: any }> {
-    const blocks: Array<{ raw: string; json: any }> = [];
-    if (!text) return blocks;
-    const re = /```\\s*cv:kommo\\s*([\\s\\S]*?)```/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      const raw = m[1]?.trim() || '';
-      try {
-        const json = JSON.parse(raw);
-        if (json && json.ops && Array.isArray(json.ops)) blocks.push({ raw, json });
-      } catch {
-        // ignore malformed
-      }
-    }
-    return blocks;
-  }
-
-  async function dispatchKommoFromText(text: string) {
-    try {
-      const blocks = extractKommoBlocks(text);
-      if (!blocks.length) return;
-      const threadId = threadIdRef.current;
-      for (const b of blocks) {
-        const key = 'k_' + (b.raw.length > 16 ? b.raw.slice(0, 16) : b.raw);
-        if (kommoHashesRef.current.has(key)) continue;
-        kommoHashesRef.current.add(key);
-        // fire-and-forget; no await para no bloquear la UI
-        fetch('/api/kommo/dispatch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ops: b.json.ops, threadId }),
-          keepalive: true,
-        }).catch(() => {});
-      }
-    } catch {}
-  }
 
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
-  // detectar “nuevo mensaje” para auto-scroll SOLO una vez
+  // auto-scroll: solo al agregar NUEVO mensaje (id distinto)
   const lastMsgIdRef = useRef<string | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -96,16 +113,28 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // auto-scroll SOLO cuando hay un mensaje NUEVO (id distinto)
+  // auto-scroll en nuevo mensaje
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
     if (lastMsgIdRef.current !== last) {
       lastMsgIdRef.current = last;
-      // desplazamiento único para que el nuevo mensaje ya visible quede arriba del input
       requestAnimationFrame(() => scrollToBottom('smooth'));
     }
   }, [messages]);
+
+  // --- despacho a Kommo ---
+  function dispatchKommoOps(ops: any[], threadId: string | null, rawKey: string) {
+    const key = 'k_' + rawKey;
+    if (kommoHashesRef.current.has(key)) return;
+    kommoHashesRef.current.add(key);
+    fetch('/api/kommo/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ops, threadId }),
+      keepalive: true,
+    }).catch(() => {});
+  }
 
   async function handleStream(userText: string, assistantId: string) {
     setIsLoading(true);
@@ -125,8 +154,9 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      let fullText = ''; // acumulado de ESTA respuesta del assistant
 
-      // NOTA: durante el streaming NO forzamos scroll; ya hicimos el ajuste al crear el placeholder
+      // helpers para escribir en el placeholder
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
@@ -139,6 +169,21 @@ export default function Chat() {
           }
           return next;
         });
+      };
+
+      // detecta y dispara Kommo si ya llegó un bloque completo (durante delta o al final)
+      const maybeDispatchKommo = () => {
+        const blocks = extractKommoBlocksFromText(fullText);
+        if (!blocks.length) return;
+        const threadId = threadIdRef.current;
+        for (const b of blocks) {
+          const rawKey = b.raw.slice(0, 32);
+          try {
+            if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
+              dispatchKommoOps(b.json.ops, threadId, rawKey);
+            }
+          } catch { /* ignore */ }
+        }
       };
 
       while (true) {
@@ -166,12 +211,20 @@ export default function Chat() {
           } else if (event === 'delta') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.value === 'string' && data.value.length) applyText(data.value);
+              if (typeof data?.value === 'string' && data.value.length) {
+                fullText += data.value;           // acumula
+                applyText(data.value);            // pinta
+                maybeDispatchKommo();             // intenta disparar si ya está completo
+              }
             } catch {}
           } else if (event === 'final') {
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.text === 'string') { applyText(data.text, true); dispatchKommoFromText(data.text); }
+              if (typeof data?.text === 'string') {
+                fullText = data.text;             // reemplaza con el texto final
+                applyText(fullText, true);
+                maybeDispatchKommo();             // dispara por si acaso
+              }
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
@@ -214,10 +267,8 @@ export default function Chat() {
       createdAt: new Date().toISOString(),
     } as any;
 
-    // agregar ambos y limpiar input
     setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
-    // el efecto de "nuevo id" hará el auto-scroll una sola vez
     await handleStream(text, assistantId);
   };
 
