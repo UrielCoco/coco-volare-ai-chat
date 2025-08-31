@@ -1,28 +1,43 @@
-// Fuerza runtime Node y evita caché/edge
+// Fuerza runtime Node y evita caché/edge para SSE
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
 
-import { NextRequest } from 'next/server';
-import OpenAI from 'openai';
+import { NextRequest } from "next/server";
+import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.CV_ASSISTANT_ID!;
 
-// ---------- Utils básicos ----------
-function sseLine(event: string, data: any) {
+/* =========================
+   Utilidades SSE / parsing
+   ========================= */
+function sse(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
+
+function splitForDelta(s: string, size = 120) {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    out.push(s.slice(i, i + size));
+    i += size;
+  }
+  return out.length ? out : [s];
+}
+
 function hasVisibleBlock(text: string): boolean {
-  return /```cv:(itinerary|quote)\b/.test(text || '');
+  return /```cv:(itinerary|quote)\b/.test(text || "");
 }
 
 // Señales “dame un momento / estoy preparándolo” (multi-idioma)
 const WAIT_PATTERNS = [
   // ES
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i, /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
+  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
+  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
   // EN
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i, /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
+  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
+  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
   // IT
   /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
   // PT
@@ -32,45 +47,37 @@ const WAIT_PATTERNS = [
   // DE
   /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
 ];
-function assistantHasWaitPhrase(text: string): boolean {
-  const t = text || '';
+function hasWaitPhrase(text: string) {
+  const t = text || "";
   return WAIT_PATTERNS.some((rx) => rx.test(t));
 }
-function isJustQuestion(text: string): boolean {
-  const t = (text || '').trim();
-  if (!t) return false;
-  if (hasVisibleBlock(t)) return false;
-  const qm = t.includes('?') || t.includes('¿') || t.includes('？');
-  const endsQ = /[?？]\s*$/.test(t);
-  if (assistantHasWaitPhrase(t)) return false;
-  return qm || endsQ;
-}
 
-// Extraer cv:kommo desde texto (por si llega embebido)
 function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false, escape = false, depth = 0, first = -1;
+  let inString = false, esc = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
     const ch = src[i];
     if (inString) {
-      if (escape) { escape = false; continue; }
-      if (ch === '\\') { escape = true; continue; }
+      if (esc) { esc = false; continue; }
+      if (ch === "\\") { esc = true; continue; }
       if (ch === '"') { inString = false; continue; }
       continue;
     }
     if (ch === '"') { inString = true; continue; }
-    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
+    if (ch === "{") { if (depth === 0) first = i; depth++; continue; }
+    if (ch === "}") { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
   }
   return null;
 }
+
 function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any }> {
   const blocks: Array<{ raw: string; json: any }> = [];
   if (!text) return blocks;
 
+  // fence preferido
   const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
   while ((m = rxFence.exec(text))) {
-    const candidate = (m[1] || '').trim();
+    const candidate = (m[1] || "").trim();
     try {
       const json = JSON.parse(candidate);
       if (json && Array.isArray(json.ops)) blocks.push({ raw: candidate, json });
@@ -78,15 +85,16 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   }
   if (blocks.length) return blocks;
 
-  const at = text.toLowerCase().indexOf('```cv:kommo');
+  // rescate sin fence
+  const at = text.toLowerCase().indexOf("```cv:kommo");
   if (at >= 0) {
-    const openBrace = text.indexOf('{', at);
-    if (openBrace >= 0) {
-      const jsonSlice = extractBalancedJson(text, openBrace);
-      if (jsonSlice) {
+    const o = text.indexOf("{", at);
+    if (o >= 0) {
+      const js = extractBalancedJson(text, o);
+      if (js) {
         try {
-          const json = JSON.parse(jsonSlice);
-          if (json && Array.isArray(json.ops)) blocks.push({ raw: jsonSlice, json });
+          const json = JSON.parse(js);
+          if (json && Array.isArray(json.ops)) blocks.push({ raw: js, json });
         } catch {}
       }
     }
@@ -94,253 +102,163 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
-// ---------- OpenAI helpers ----------
+/* =========================
+   Helpers OpenAI (compat)
+   ========================= */
 async function appendUserMessage(threadId: string, text: string) {
-  await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
+  await openai.beta.threads.messages.create(threadId, { role: "user", content: text });
 }
 
 // Compat para distintas versiones del SDK en runs.retrieve
-// - Firma A: runs.retrieve(threadId: string, runId: string)
-// - Firma B: runs.retrieve(threadId: string, params: { run_id: string })
 async function retrieveRunCompat(threadId: string, runId: string) {
   const runs: any = (openai as any).beta.threads.runs;
   try {
-    if (typeof runs.retrieve === 'function' && runs.retrieve.length === 2) {
+    if (typeof runs.retrieve === "function" && runs.retrieve.length === 2) {
       return await runs.retrieve(threadId, runId);
     }
-  } catch {
-    // fallthrough
-  }
+  } catch {}
   return await runs.retrieve(threadId, { run_id: runId });
 }
 
-// Fallback sin streaming: 1 run normal + poll corto y emitir último mensaje del assistant
-async function runNoStreamAndEmit(args: {
+/* =========================
+   Ejecución sin stream real
+   (SSE propio + poll corto)
+   ========================= */
+async function executeOneRunSSE(args: {
   threadId: string;
-  safeEmit: (event: string, data: any) => void;
+  emit: (event: string, data: any) => void;
+  keepAlive?: () => void;
 }) {
-  const { threadId, safeEmit } = args;
+  const { threadId, emit, keepAlive } = args;
 
+  // Arranca run
   const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
+  emit("run.created", { runId: run.id });
 
-  // Poll corto (hasta ~12s)
-  for (let i = 0; i < 24; i++) {
+  // Poll: máx ~20s (25 * 800ms)
+  for (let i = 0; i < 25; i++) {
     const r = await retrieveRunCompat(threadId, run.id);
     const st = String(r.status);
-    if (['completed', 'failed', 'cancelled', 'expired', 'incomplete'].includes(st)) break;
-    await new Promise((res) => setTimeout(res, 500));
+    if (["completed", "failed", "cancelled", "expired", "incomplete"].includes(st)) break;
+    if (keepAlive) keepAlive();
+    await new Promise((res) => setTimeout(res, 800));
   }
 
-  // Tomar último mensaje del assistant
+  // Toma el último mensaje del assistant
   const msgs = await openai.beta.threads.messages.list(threadId, { limit: 10 } as any);
   const arr = (msgs?.data || []) as any[];
   const lastAssistant = arr
-    .filter((m) => m.role === 'assistant')
+    .filter((m) => m.role === "assistant")
     .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
 
-  let txt = '';
+  let text = "";
   const content = (lastAssistant?.content || []) as any[];
   if (content.length) {
-    txt = content
-      .filter((p) => p.type === 'output_text' || p.type === 'text')
-      .map((p: any) => p.text?.value || p.text || '')
-      .join('');
+    text = content
+      .filter((p) => p.type === "output_text" || p.type === "text")
+      .map((p: any) => p.text?.value || p.text || "")
+      .join("");
   }
 
-  if (txt) {
-    safeEmit('final', { text: txt });
-    const kommo = extractKommoBlocksFromText(txt);
-    for (const b of kommo) safeEmit('kommo', { ops: b.json.ops });
+  // Emitir en “deltas” simuladas para no romper UI
+  if (text) {
+    emit("textCreated", { text: "" });
+    for (const chunk of splitForDelta(text)) emit("textDelta", { value: chunk });
+
+    // Emitir cv:kommo si viene embebido
+    const kommoBlocks = extractKommoBlocksFromText(text);
+    for (const b of kommoBlocks) emit("kommo", { ops: b.json.ops });
+
+    emit("messageCompleted", { text });
   } else {
-    safeEmit('error', { message: 'No text returned on non-stream path.' });
-  }
-  return txt;
-}
-
-async function runAndStreamOnce(args: {
-  threadId: string;
-  controller: ReadableStreamDefaultController<Uint8Array>;
-  encoder: TextEncoder;
-  tag: string;
-  isClosedRef: { v: boolean };
-}) {
-  const { threadId, controller, encoder, tag, isClosedRef } = args;
-
-  const safeEnqueue = (chunk: Uint8Array) => {
-    if (isClosedRef.v) return;
-    try { controller.enqueue(chunk); } catch {}
-  };
-  const safeEmit = (event: string, data: any) => {
-    safeEnqueue(encoder.encode(sseLine(event, data)));
-  };
-
-  let fullText = '';
-  let kommoSent = 0;
-
-  // 1) Intento con streaming
-  try {
-    const stream: any = await openai.beta.threads.runs.stream(threadId, {
-      assistant_id: ASSISTANT_ID,
-      // temperature: 0.3,
-    });
-
-    stream
-      .on('run.created', (e: any) => {
-        safeEmit('run.created', { runId: e.id });
-        console.log(JSON.stringify({ tag, event: 'run.created', runId: e.id, threadId }));
-      })
-      .on('text.delta', (d: any) => {
-        if (d?.value) {
-          fullText += d.value;
-          safeEmit('delta', { value: d.value });
-          const blocks = extractKommoBlocksFromText(fullText);
-          if (blocks.length) {
-            for (const b of blocks) {
-              safeEmit('kommo', { ops: b.json.ops });
-              kommoSent += b.json.ops?.length || 0;
-            }
-          }
-        }
-      })
-      .on('message.completed', (msg: any) => {
-        const txt = (msg?.content || [])
-          .filter((p: any) => p.type === 'output_text' || p.type === 'text')
-          .map((p: any) => p.text?.value || p.text || '')
-          .join('');
-        if (txt) {
-          fullText += txt;
-          safeEmit('final', { text: txt });
-          const blocks = extractKommoBlocksFromText(txt);
-          if (blocks.length) {
-            for (const b of blocks) {
-              safeEmit('kommo', { ops: b.json.ops });
-              kommoSent += b.json.ops?.length || 0;
-            }
-          }
-        }
-        console.log(JSON.stringify({
-          tag, event: 'message.completed', fullLen: fullText.length,
-          kommoOps: kommoSent, threadId, runId: stream?.current?.id,
-        }));
-      })
-      .on('end', () => {
-        safeEmit('stream.end', { deltaChars: fullText.length, sawText: !!fullText });
-      })
-      .on('error', (e: any) => {
-        safeEmit('warn', { message: e?.message || 'stream error' });
-      });
-
-    try {
-      await stream.done();
-    } catch (e: any) {
-      safeEmit('warn', { message: e?.message || 'stream.done error' });
-    }
-  } catch (err: any) {
-    // 2) Fallback si el stream ni siquiera inicia
-    safeEmit('warn', { message: 'stream.create failed; falling back to non-stream run' });
-    const txt = await runNoStreamAndEmit({ threadId, safeEmit });
-    fullText += txt || '';
+    emit("messageCompleted", { text: "" });
   }
 
-  return { fullText, kommoSent };
+  return text;
 }
 
-// Reprompt minimalista: mandar "?" UNA sola vez
-async function continueWithQuestion(threadId: string) {
-  await openai.beta.threads.messages.create(threadId, { role: 'user', content: '?' });
+/* =========================
+   Reprompt mínimo “?”
+   ========================= */
+function needsRepromptWaitNoBlock(text: string) {
+  return !!text && !hasVisibleBlock(text) && hasWaitPhrase(text);
 }
 
 export async function POST(req: NextRequest) {
-  const tag = '[CV][server]';
+  const TAG = "[CV][server]";
   try {
     const body = (await req.json()) as {
-      message: { role: 'user'; parts: Array<{ type: 'text'; text: string }> };
+      message: { role: "user"; parts: Array<{ type: "text"; text: string }> };
       threadId?: string | null;
     };
 
-    const userText: string = body?.message?.parts?.[0]?.text ?? '';
-    console.log(JSON.stringify({ tag, event: 'request.in', hasThreadId: !!body?.threadId, userTextLen: userText.length }));
+    const userText: string = body?.message?.parts?.[0]?.text ?? "";
+    console.log(JSON.stringify({ tag: TAG, event: "request.in", hasThreadId: !!body?.threadId, userTextLen: userText.length }));
 
-    // Garantizar threadId string
+    // thread
     let threadId: string;
     if (body?.threadId && body.threadId.length > 0) {
       threadId = body.threadId;
-      console.log(JSON.stringify({ tag, event: 'thread.reuse', threadId }));
+      console.log(JSON.stringify({ tag: TAG, event: "thread.reuse", threadId }));
     } else {
       const t = await openai.beta.threads.create();
       threadId = t.id;
-      console.log(JSON.stringify({ tag, event: 'thread.created', threadId }));
+      console.log(JSON.stringify({ tag: TAG, event: "thread.created", threadId }));
     }
 
+    // SSE stream
     const encoder = new TextEncoder();
-
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        let isClosedRef = { v: false };
-        const safeEnqueue = (chunk: Uint8Array) => {
-          if (isClosedRef.v) return;
-          try { controller.enqueue(chunk); } catch {}
+        let closed = false;
+        const safeEnqueue = (s: string) => {
+          if (closed) return;
+          try { controller.enqueue(encoder.encode(s)); } catch {}
         };
-        const safeEmit = (event: string, data: any) => {
-          safeEnqueue(encoder.encode(sseLine(event, data)));
-        };
-        const safeClose = () => {
-          if (isClosedRef.v) return;
-          isClosedRef.v = true;
-          try { controller.close(); } catch {}
-        };
+        const emit = (event: string, data: any) => safeEnqueue(sse(event, data));
+        const keepAlive = () => safeEnqueue(sse("ping", { t: Date.now() }));
+        const close = () => { if (!closed) { closed = true; try { controller.close(); } catch {} } };
 
-        // meta para que el cliente guarde el threadId
-        safeEmit('meta', { threadId });
+        // meta para UI
+        emit("meta", { threadId });
 
-        // 1) Guardar mensaje del usuario
+        // guardar mensaje del usuario
         await appendUserMessage(threadId, userText);
-        console.log(JSON.stringify({ tag, event: 'message.append.ok', threadId }));
+        console.log(JSON.stringify({ tag: TAG, event: "message.append.ok", threadId }));
 
-        // 2) Primer run
-        const r1 = await runAndStreamOnce({ threadId, controller, encoder, tag, isClosedRef });
+        // Run 1
+        const text1 = await executeOneRunSSE({ threadId, emit, keepAlive });
+        const reprompt = needsRepromptWaitNoBlock(text1);
 
-        const r1HasBlock = hasVisibleBlock(r1.fullText);
-        const r1IsQuestion = isJustQuestion(r1.fullText);
-        const r1HasWait = assistantHasWaitPhrase(r1.fullText);
-
-        // 3) Si terminó con “espera tantito” y sin bloque, reprompt “?”
-        const shouldReprompt = !r1HasBlock && !r1IsQuestion && r1HasWait;
-
-        if (!shouldReprompt) {
-          safeEmit('done', { reason: 'ended-first-run', r1HasBlock, r1IsQuestion, r1HasWait });
-          safeClose();
+        if (!reprompt) {
+          emit("done", { reason: "ended-first-run" });
+          close();
           return;
         }
 
-        // 4) Mandar “?” y segundo run
-        await continueWithQuestion(threadId);
-        console.log(JSON.stringify({ tag, event: 'message.append.ok', info: 'auto-reprompt-?', threadId }));
+        // Reprompt “?”
+        await appendUserMessage(threadId, "?");
+        console.log(JSON.stringify({ tag: TAG, event: "message.append.ok", info: "auto-reprompt-?", threadId }));
 
-        const r2 = await runAndStreamOnce({ threadId, controller, encoder, tag, isClosedRef });
+        const text2 = await executeOneRunSSE({ threadId, emit, keepAlive });
 
-        safeEmit('done', {
-          reason: 'after-reprompt-?',
-          appendedChars: (r1.fullText.length + r2.fullText.length),
-        });
-        safeClose();
+        emit("done", { reason: "after-reprompt-?", len: (text1.length + text2.length) });
+        close();
       },
-      cancel() {
-        // Si el cliente corta la conexión, simplemente dejamos de emitir.
-      },
+      cancel() { /* noop */ },
     });
 
     return new Response(stream, {
       status: 200,
       headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
       },
     });
   } catch (err: any) {
-    console.error(tag, 'route.error', err?.message || err);
-    return new Response(JSON.stringify({ error: err?.message || 'unknown' }), { status: 500 });
+    console.error(TAG, "route.error", err?.message || err);
+    return new Response(JSON.stringify({ error: err?.message || "unknown" }), { status: 500 });
   }
 }
