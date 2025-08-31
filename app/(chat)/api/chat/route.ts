@@ -1,4 +1,3 @@
-// app/(chat)/api/chat/route.ts
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
@@ -89,9 +88,7 @@ function extractKommoOps(text: string): Array<any> {
     try {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {
-      // ignorar bloque malformado
-    }
+    } catch {}
   }
   return ops;
 }
@@ -197,7 +194,6 @@ async function runOnceWithStream(
         saw.text = true;
         fullText += complete;
 
-        // conteo de fences + huellas
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
         const fenceTypes = fences.map((m) => m[1]);
@@ -235,7 +231,6 @@ async function runOnceWithStream(
     }
 
     if (type === 'thread.run.completed') {
-      // Por si el proveedor no envió 'thread.message.completed', cerramos nosotros
       if (saw.text && !finalEmitted) {
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
@@ -288,8 +283,6 @@ async function runOnceWithStream(
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      // Último salvavidas: si hubo texto pero no se emitió final,
-      // lo sintetizamos aquí antes de cerrar el stream.
       if (saw.text && !finalEmitted) {
         const fences = [...fullText.matchAll(/```cv:(itinerary|quote)\s*([\s\S]*?)```/g)];
         const fenceCount = fences.length;
@@ -316,8 +309,6 @@ async function runOnceWithStream(
 
         const ops = extractKommoOps(finalText);
         if (ops.length) send('kommo', { ops });
-
-        finalEmitted = true;
       }
 
       slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
@@ -359,7 +350,7 @@ export async function POST(req: NextRequest) {
       const send = (event: string, data: any) =>
         controller.enqueue(encoder.encode(sse(event, data)));
 
-      // meta con threadId (cliente lo guarda)
+      // meta con threadId
       send('meta', { threadId: tid });
 
       try {
@@ -368,9 +359,7 @@ export async function POST(req: NextRequest) {
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
         const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          hasWaitPhrase(r1.fullText);
+          !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
@@ -379,8 +368,16 @@ export async function POST(req: NextRequest) {
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
-          // ---- Run 2
-          await runOnceWithStream(tid, send);
+          // ---- Run 2 (reprompt)
+          const r2 = await runOnceWithStream(tid, send);
+
+          // Fallback si el reprompt falló o no emitió nada
+          if (!r2.sawText) {
+            slog('auto.reprompt.retry', { reason: 'r2-no-text', threadId: tid });
+            await client.beta.threads.messages.create(tid, { role: 'user', content: 'continua' });
+            slog('message.append.ok', { threadId: tid, info: 'auto-continue' });
+            await runOnceWithStream(tid, send);
+          }
         }
 
         send('done', {});
