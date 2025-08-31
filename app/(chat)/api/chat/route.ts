@@ -105,17 +105,23 @@ async function runOnceWithStream(
   tid: string,
   send: (event: string, data: any) => void,
 ): Promise<{ fullText: string; sawText: boolean }> {
+  // --- helpers locales de diagnóstico ---
+  const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
+  const fenceStartRx = /```cv:(itinerary|quote)\b/i;
+  const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+
+  function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
+    // La UI puede ignorar este evento
+    send('diag', { phase, runId, threadId: tid, ...extra });
+  }
+
   let fullText = '';
-  let sawText = false;
-  let deltaChars = 0;
   let runId: string | null = null;
 
-  // createAndStream (SDK v4+)
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
   });
 
-  // Reenviamos solo los eventos que importan a la UI
   stream.on('event', (e: any) => {
     const type = e?.event as string;
 
@@ -128,12 +134,19 @@ async function runOnceWithStream(
     if (type === 'thread.message.delta') {
       const deltaText = extractDeltaTextFromEvent(e);
       if (deltaText) {
-        sawText = true;
-        deltaChars += deltaText.length;
+        saw.text = true;
+        saw.deltaChars += deltaText.length;
         fullText += deltaText;
         send('delta', { value: deltaText });
-        if (deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars, runId, threadId: tid });
+
+        // DIAG: ¿apareció fence ya en delta?
+        if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
+          saw.fenceSeenInDelta = true;
+          emitDiag('delta', { fenceSeenInDelta: true });
+        }
+
+        if (saw.deltaChars % 300 === 0) {
+          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
       }
       return;
@@ -142,8 +155,23 @@ async function runOnceWithStream(
     if (type === 'thread.message.completed') {
       const complete = flattenAssistantTextFromMessage(e?.data);
       if (complete) {
-        sawText = true;
+        saw.text = true;
         fullText += complete;
+
+        // DIAG final: contar fences y generar huellas
+        const fences = [...fullText.matchAll(allFencesRx)];
+        const fenceCount = fences.length;
+        const fenceTypes = fences.map(m => m[1]);
+        // huella simple para ver si son idénticos (no importa el orden)
+        const hashes = fences.map(m => {
+          const raw = m[0]; // fence completo
+          let hash = 0;
+          for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+          return hash.toString(16);
+        });
+        emitDiag('final', { fenceCount, fenceTypes, hashes, fenceSeenInDelta: saw.fenceSeenInDelta });
+
+        // Emitimos lo que ya usas
         send('final', { text: complete });
 
         const ops = extractKommoOps(complete);
@@ -173,7 +201,7 @@ async function runOnceWithStream(
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      slog('stream.end', { deltaChars, sawText, runId, threadId: tid });
+      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
       resolve();
     });
     stream.on('error', (err: any) => {
@@ -183,8 +211,9 @@ async function runOnceWithStream(
     });
   });
 
-  return { fullText, sawText };
+  return { fullText, sawText: saw.text };
 }
+
 
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
