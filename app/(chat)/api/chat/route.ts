@@ -7,17 +7,17 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-// ---------- Logs (una sola salida para evitar duplicados en Vercel) ----------
+// ---------- Logs (una sola salida para Vercel) ----------
 function log(event: string, meta: Record<string, any> = {}) {
   try { console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta })); } catch {}
 }
 
-// ---------- SSE helper (IMPORTANTE: incluye cabecera event:) ----------
+// ---------- SSE helper ----------
 function sse(event: string, data: any) {
   return `event:${event}\n` + `data:${JSON.stringify(data)}\n\n`;
 }
 
-// ---------- OpenAI helpers ----------
+// ---------- Helpers OpenAI/text ----------
 function flattenAssistantTextFromMessage(m: any): string {
   const out: string[] = [];
   for (const c of (m?.content || [])) {
@@ -45,8 +45,8 @@ const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '')
 const WAIT_PATTERNS = [
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
   /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  /d[eé]jame\b/i, /d[eé]jame preparar/i, /deja que/i,
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
+  /déjame preparar/i, /deja que.*prepare/i,
+  /give me a moment/i, /one moment/i, /hold on/i, /let me.*prepare/i,
   /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
 ];
 const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
@@ -84,6 +84,18 @@ function dedupeVisibleFencesKeepLast(text: string) {
   out += text.slice(cursor);
   log('diag.fence.dedup', { total: matches.length, dropped: matches.length - keep.filter(Boolean).length });
   return out;
+}
+
+// ---------- Intención del usuario (¿esperamos bloque?) ----------
+const ITINERARY_TRIGGER = /\b(itinerario|plan de viaje|route|hazlo|dale|ok\b|procede|armarlo|listo|sí adelante|si adelante|adelante|go ahead|do it)\b/i;
+const QUOTE_TRIGGER = /\b(cotizaci(?:ón|on)|cotiza|presupuesto|precio|precios|costo|costos|quote|pricing|how much|cu[aá]nto)\b/i;
+
+function userExpectsBlock(userText: string): { wantsItinerary: boolean; wantsQuote: boolean } {
+  const t = (userText || '').toLowerCase();
+  return {
+    wantsItinerary: ITINERARY_TRIGGER.test(t),
+    wantsQuote: QUOTE_TRIGGER.test(t),
+  };
 }
 
 // ---------- Run (single) ----------
@@ -194,7 +206,6 @@ export async function POST(req: NextRequest) {
 
   const rs = new ReadableStream({
     async start(controller) {
-      // Dedupe entre runs en este MISMO request
       let lastFenceKey: string | null = null;
 
       const send = (event: string, data: any) => {
@@ -214,11 +225,10 @@ export async function POST(req: NextRequest) {
         } else {
           log('sse.emit', { event, keys: Object.keys(data || {}) });
         }
-
         controller.enqueue(encoder.encode(sse(event, data)));
       };
 
-      // meta: thread id
+      // meta
       send('meta', { threadId });
 
       // Heartbeat
@@ -230,22 +240,24 @@ export async function POST(req: NextRequest) {
         // Run 1
         const r1 = await runOnceWithStream(threadId, send);
 
-        // Reprompt SI:
-        //  - no hay bloque visible, y (a) hay frase de espera o (b) simplemente no hubo bloque (fallback único)
-        const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          (hasWaitPhrase(r1.fullText) || true); // fallback único
+        // ¿El usuario esperaba bloque?
+        const intent = userExpectsBlock(userText);
+        const expectedBlock = intent.wantsItinerary || intent.wantsQuote;
 
-        if (shouldReprompt) {
-          log('auto.reprompt', { reason: hasWaitPhrase(r1.fullText) ? 'wait-no-block' : 'no-block-fallback', threadId });
+        // Decisión de reprompt:
+        // - Reprompt si SE ESPERABA bloque y no llegó bloque visible
+        // - O si el assistant prometió generar algo (frase de espera) y no llegó bloque
+        const needReprompt =
+          (!hasVisibleBlock(r1.fullText) && (expectedBlock || hasWaitPhrase(r1.fullText)));
+
+        if (needReprompt) {
+          log('auto.reprompt', { reason: expectedBlock ? 'expected-block-missing' : 'wait-no-block', threadId });
           await client.beta.threads.messages.create(threadId, { role: 'user', content: '?' });
           log('message.append.ok', { threadId, info: 'auto-?' });
 
           // Run 2
           const r2 = await runOnceWithStream(threadId, send);
 
-          // Fallback si aún no hubo texto
           if (!r2.sawText) {
             log('auto.reprompt.retry', { reason: 'r2-no-text', threadId });
             await client.beta.threads.messages.create(threadId, { role: 'user', content: 'continua' });
@@ -253,7 +265,7 @@ export async function POST(req: NextRequest) {
             await runOnceWithStream(threadId, send);
           }
         } else {
-          log('auto.reprompt.skip', { reason: 'has-visible-block-or-empty', threadId });
+          log('auto.reprompt.skip', { reason: 'no-need', threadId });
         }
 
         clearInterval(hb);
