@@ -8,7 +8,6 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-// -------------------- Tipos UI (solo para parsear el body) -------------------
 type UiMessage = {
   role: 'user' | 'assistant';
   parts: Array<{ type: 'text'; text: string }>;
@@ -19,19 +18,18 @@ function asText(msg?: UiMessage) {
   return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
 }
 
-// -------------------- Utilidades SSE --------------------
 function sse(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
 
-// -------------------- Logging servidor --------------------
+// ---------- Logs server ----------
 function slog(event: string, meta: Record<string, any> = {}) {
   try {
     console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
   } catch {}
 }
 
-// -------------------- Helpers OpenAI --------------------
+// ---------- Helpers OpenAI ----------
 function flattenAssistantTextFromMessage(message: any): string {
   const out: string[] = [];
   if (!message?.content) return '';
@@ -56,7 +54,7 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-// -------------------- Disparador “espera/un momento” --------------------
+// ---------- Detección de “un momento / preparando…” ----------
 const WAIT_PATTERNS = [
   // ES
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
@@ -73,15 +71,10 @@ const WAIT_PATTERNS = [
   // DE
   /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
 ];
-function hasWaitPhrase(text: string) {
-  const t = text || '';
-  return WAIT_PATTERNS.some((rx) => rx.test(t));
-}
-function hasVisibleBlock(text: string) {
-  return /```cv:(itinerary|quote)\b/.test(text || '');
-}
+const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
+const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '');
 
-// -------------------- Extrae ops de bloques cv:kommo --------------------
+// ---------- Extrae ops de bloques ```cv:kommo ...``` ----------
 function extractKommoOps(text: string): Array<any> {
   const ops: any[] = [];
   if (!text) return ops;
@@ -91,30 +84,26 @@ function extractKommoOps(text: string): Array<any> {
     try {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {
-      // ignorar bloque malformado
-    }
+    } catch {}
   }
   return ops;
 }
 
-// ======================================================================
-// Ejecuta UN run con createAndStream. Emite SSE (meta, delta, final, kommo)
-// y registra diagnósticos de fences visibles al final.
-// ======================================================================
+/**
+ * Ejecuta UN run con createAndStream y resuelve cuando termina.
+ * Emite: meta/delta/final/kommo + diag.fence.final (para auditoría).
+ */
 async function runOnceWithStream(
   tid: string,
   send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean }> {
+): Promise<{ fullText: string; sawText: boolean; runId: string | null }> {
+  const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
   let fullText = '';
-  let sawText = false;
-  let deltaChars = 0;
   let runId: string | null = null;
 
-  // abrir stream
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
   });
@@ -131,13 +120,17 @@ async function runOnceWithStream(
     if (type === 'thread.message.delta') {
       const deltaText = extractDeltaTextFromEvent(e);
       if (deltaText) {
-        sawText = true;
-        deltaChars += deltaText.length;
+        saw.text = true;
+        saw.deltaChars += deltaText.length;
         fullText += deltaText;
         send('delta', { value: deltaText });
 
-        if (deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars, runId, threadId: tid });
+        if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
+          saw.fenceSeenInDelta = true;
+        }
+
+        if (saw.deltaChars % 300 === 0) {
+          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
       }
       return;
@@ -146,75 +139,57 @@ async function runOnceWithStream(
     if (type === 'thread.message.completed') {
       const complete = flattenAssistantTextFromMessage(e?.data);
       if (complete) {
-        sawText = true;
+        saw.text = true;
         fullText += complete;
 
-        // ---- Diagnóstico de fences visibles
+        // DIAG final: contar fences visibles y fingerprint simples
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
         const fenceTypes = fences.map((m) => m[1]);
         const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+          const raw = m[0]; let h = 0; for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
           return h.toString(16);
         });
-        const unique = new Set(hashes).size;
-        slog('diag.fence.final', {
-          threadId: tid,
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique,
-          fenceSeenInDelta: false, // conservado para compatibilidad
+        send('diag.fence.final', {
+          runId, threadId: tid, fenceCount, fenceTypes, hashes, unique: new Set(hashes).size,
+          fenceSeenInDelta: saw.fenceSeenInDelta,
         });
 
-        // ---- Emitir final y posible cv:kommo
         send('final', { text: complete });
+
         const ops = extractKommoOps(complete);
-        slog('message.completed', {
-          fullLen: complete.length,
-          kommoOps: ops.length,
-          runId,
-          threadId: tid,
-        });
+        slog('message.completed', { fullLen: complete.length, kommoOps: ops.length, runId, threadId: tid });
         if (ops.length) send('kommo', { ops });
       }
       return;
     }
 
+    // ⚠️ IMPORTANTE: no propagamos errores intermedios al cliente (para no borrar “pensando…”)
     if (type === 'thread.run.failed') {
-      slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
-      send('error', { error: 'run_failed' });
+      slog('diag.run.failed', { runId, threadId: tid });
       return;
     }
-
     if (type === 'error') {
-      slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
-      send('error', { error: String(e?.data || 'unknown') });
+      slog('diag.stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
       return;
     }
   });
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      slog('stream.end', { deltaChars, sawText, runId, threadId: tid });
+      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
       resolve();
     });
     stream.on('error', (err: any) => {
       slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
+      // no enviamos 'error' al cliente aquí: cerramos y que el outer maneje
       resolve();
     });
   });
 
-  return { fullText, sawText };
+  return { fullText, sawText: saw.text, runId };
 }
 
-// ======================================================================
-// Handler HTTP (SSE)
-// ======================================================================
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
   const userText = asText(message);
@@ -234,14 +209,13 @@ export async function POST(req: NextRequest) {
   await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
   slog('message.append.ok', { threadId: tid });
 
-  // 3) Respuesta SSE
+  // 3) SSE
   const encoder = new TextEncoder();
   const rs = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: any) =>
         controller.enqueue(encoder.encode(sse(event, data)));
 
-      // meta con threadId (cliente lo guarda en sessionStorage)
       send('meta', { threadId: tid });
 
       try {
@@ -250,12 +224,13 @@ export async function POST(req: NextRequest) {
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
         const shouldReprompt =
-          !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
+          !!r1.fullText &&
+          !hasVisibleBlock(r1.fullText) &&
+          hasWaitPhrase(r1.fullText);
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
 
-          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
@@ -267,7 +242,8 @@ export async function POST(req: NextRequest) {
         controller.close();
       } catch (e: any) {
         slog('exception.createStream', { error: String(e?.message || e) });
-        send('error', { error: String(e?.message || e) });
+        // Solo si es fatal (no pudimos ni crear stream) avisamos error al cliente.
+        try { controller.enqueue(encoder.encode(sse('error', { error: String(e?.message || e) }))); } catch {}
         controller.close();
       }
     },

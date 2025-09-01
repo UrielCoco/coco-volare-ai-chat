@@ -7,9 +7,7 @@ import type { ChatMessage } from '@/lib/types';
 const THREAD_KEY = 'cv_thread_id_session';
 
 function ulog(event: string, meta: any = {}) {
-  try {
-    console.debug('[CV][ui]', event, meta);
-  } catch {}
+  try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
 // ---------- Helpers de extracción (respaldos para cv:kommo en texto) ----------
@@ -64,25 +62,16 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
 }
 
 // ---------- Desduplicación de fences visibles (cv:itinerary / cv:quote) ----------
-// Regla: si en un MISMO texto vienen 2+ fences VISIBLES idénticos, se elimina(n) todos
-// menos el ÚLTIMO para no duplicar tarjetas en la UI.
 function dedupeVisibleFencesKeepLast(text: string): string {
   if (!text) return text;
-
   const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
   const matches: Array<{ idx: number; start: number; end: number; raw: string }> = [];
   let m: RegExpExecArray | null;
   while ((m = rx.exec(text))) {
-    matches.push({
-      idx: matches.length,
-      start: m.index,
-      end: m.index + m[0].length,
-      raw: m[0],
-    });
+    matches.push({ idx: matches.length, start: m.index, end: m.index + m[0].length, raw: m[0] });
   }
   if (matches.length <= 1) return text;
 
-  // Agrupar por contenido RAW del fence (idénticos byte a byte)
   const groups = new Map<string, number[]>();
   matches.forEach((mm, i) => {
     const key = mm.raw;
@@ -91,32 +80,19 @@ function dedupeVisibleFencesKeepLast(text: string): string {
     groups.set(key, arr);
   });
 
-  // Marcar para eliminar todos menos el último de cada grupo con tamaño > 1
   const toDrop = new Set<number>();
-  Array.from(groups.entries()).forEach(([, idxs]) => {
-    if (idxs.length > 1) {
-      idxs.slice(0, -1).forEach((i) => toDrop.add(i));
-    }
+  Array.from(groups.values()).forEach((idxs) => {
+    if (idxs.length > 1) idxs.slice(0, -1).forEach((i) => toDrop.add(i)); // conserva SOLO el último
   });
   if (toDrop.size === 0) return text;
 
-  // Reconstruir texto saltando los rangos drop
-  let out = '';
-  let cursor = 0;
+  let out = ''; let cursor = 0;
   matches.forEach((mm, i) => {
-    if (toDrop.has(i)) {
-      out += text.slice(cursor, mm.start);
-      cursor = mm.end; // saltar este fence duplicado
-    }
+    if (toDrop.has(i)) { out += text.slice(cursor, mm.start); cursor = mm.end; }
   });
   out += text.slice(cursor);
 
-  ulog('ui.fence.dedup', {
-    total: matches.length,
-    dropped: toDrop.size,
-    kept: matches.length - toDrop.size,
-  });
-
+  ulog('ui.fence.dedup', { total: matches.length, dropped: toDrop.size, kept: matches.length - toDrop.size });
   return out;
 }
 
@@ -137,12 +113,15 @@ export default function Chat() {
   const runFinalsCountRef = useRef<number>(0);
   const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje “en curso”
 
+  // snapshot del estado para utilidades dentro del loop
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
 
   // auto-scroll: solo en NUEVO mensaje
   const lastMsgIdRef = useRef<string | null>(null);
-
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     const scroller = listRef.current;
     if (!scroller) return;
@@ -154,10 +133,7 @@ export default function Chat() {
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
-      if (ss) {
-        threadIdRef.current = ss;
-        ulog('thread.restore', { threadId: ss });
-      }
+      if (ss) { threadIdRef.current = ss; ulog('thread.restore', { threadId: ss }); }
     } catch {}
   }, []);
 
@@ -208,6 +184,17 @@ export default function Chat() {
     return id;
   }
 
+  // si el bubble activo desapareció (p.ej., tras un 'error' intermedio), crear otro
+  function ensureActiveAssistantBubble() {
+    const aid = activeAssistantIdRef.current;
+    const arr = messagesRef.current || [];
+    const idx = aid ? arr.findIndex((m) => m.id === aid) : -1;
+    if (idx === -1) {
+      const id = ensureTypingPlaceholder();
+      activeAssistantIdRef.current = id;
+    }
+  }
+
   async function handleStream(userText: string) {
     setIsLoading(true);
     runFinalsCountRef.current = 0;
@@ -234,7 +221,7 @@ export default function Chat() {
       let typingId = ensureTypingPlaceholder();
       activeAssistantIdRef.current = typingId;
 
-      // helpers para escribir en el mensaje ACTIVO (placeholder o el último)
+      // helpers para escribir en el mensaje ACTIVO
       const applyText = (chunk: string, replace = false) => {
         setMessages((prev) => {
           const next = [...prev];
@@ -272,12 +259,8 @@ export default function Chat() {
 
         for (const ev of events) {
           const lines = ev.split('\n');
-          const event = (lines.find((l) => l.startsWith('event:')) || '')
-            .replace('event:', '')
-            .trim();
-          const dataLine = (lines.find((l) => l.startsWith('data:')) || '')
-            .replace('data:', '')
-            .trim();
+          const event = (lines.find((l) => l.startsWith('event:')) || '').replace('event:', '').trim();
+          const dataLine = (lines.find((l) => l.startsWith('data:')) || '').replace('data:', '').trim();
           if (!event) continue;
 
           if (event === 'meta') {
@@ -303,6 +286,9 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
+                // asegurar bubble activo (por si algún error intermedio lo borró)
+                ensureActiveAssistantBubble();
+
                 if (fullText.length === 0) {
                   // primer delta: limpia el “…”
                   applyText('', true);
@@ -324,6 +310,9 @@ export default function Chat() {
 
                 // reinicia buffer para el siguiente mensaje potencial
                 fullText = '';
+
+                // asegurar bubble activo antes de escribir
+                ensureActiveAssistantBubble();
 
                 if (runFinalsCountRef.current === 0) {
                   // Primer final del stream → reemplaza el primer placeholder
@@ -353,15 +342,14 @@ export default function Chat() {
                 }
               }
             } catch {}
-          } else if (event === 'done' || event === 'error') {
+          } else if (event === 'done') {
             setIsLoading(false);
             // Limpia TODOS los placeholders “…” sobrantes
-            setMessages((prev) => {
-              const next = prev.filter(
-                (m: any) => !(m.role === 'assistant' && m.parts?.[0]?.text === '…')
-              );
-              return [...next];
-            });
+            setMessages((prev) => prev.filter((m: any) => !(m.role === 'assistant' && m.parts?.[0]?.text === '…')));
+          } else if (event === 'error') {
+            // ⚠️ NO limpiar ni cerrar: el server puede auto-reprompt y seguir streameando.
+            ulog('sse.error.ignored', { data: dataLine });
+            // dejamos la barra "pensando…" activa
           }
         }
       }
@@ -369,7 +357,6 @@ export default function Chat() {
       console.error('[CV][chat] stream error', err);
       setIsLoading(false);
       setMessages((prev) => {
-        // Si hay algún placeholder, muéstrale error
         const next = [...prev];
         for (let i = next.length - 1; i >= 0; i--) {
           const m: any = next[i];
@@ -391,7 +378,6 @@ export default function Chat() {
     if (!text || isLoading) return;
 
     const userId = `u_${Date.now()}`;
-
     const userMsg: ChatMessage = {
       id: userId,
       role: 'user',
