@@ -244,7 +244,7 @@ importers:
         specifier: ^4.0.8
         version: 4.0.9
       '@types/node':
-        specifier: ^22.8.6
+        specifier: ^22.18.0
         version: 22.18.0
       '@types/papaparse':
         specifier: ^5.3.15

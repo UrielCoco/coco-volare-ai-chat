@@ -111,19 +111,22 @@ async function runOnceWithStream(
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
+  // tiempos
+  const t0 = Date.now();
+  let tFirstDelta: number | null = null;
+
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // SSE opcional para inspección en cliente
-    send('diag', { phase, threadId: tid, ...extra });
+    // SSE opcional para inspección en cliente (no afecta UI si no lo consumes)
+    try { send('diag', { phase, threadId: tid, ...extra }); } catch {}
     // Log persistente en Vercel
-    slog(
-      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
-      { threadId: tid, ...extra },
-    );
+    slog(phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final', { threadId: tid, ...extra });
   }
 
   let fullText = '';
   let runId: string | null = null;
 
+  // Abrimos el stream como ya lo haces (mismo comportamiento)
+  // @ts-ignore - tipos del stream varían entre versiones del SDK
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
   });
@@ -131,19 +134,38 @@ async function runOnceWithStream(
   stream.on('event', (e: any) => {
     const type = e?.event as string;
 
+    // ---- creación de run
     if (type === 'thread.run.created') {
       runId = e?.data?.id ?? null;
       slog('run.created', { runId, threadId: tid });
       return;
     }
 
+    // ---- delta de mensaje
     if (type === 'thread.message.delta') {
-      const deltaText = extractDeltaTextFromEvent(e);
+      const content = e?.data?.delta?.content ?? [];
+      // extrae texto (tu versión original lo hacía así):
+      let deltaText = '';
+      if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item?.type === 'text' && item?.text?.value) deltaText += item.text.value;
+          if (item?.type === 'output_text_delta' && item?.value) deltaText += item.value;
+        }
+      }
       if (deltaText) {
         saw.text = true;
         saw.deltaChars += deltaText.length;
         fullText += deltaText;
         send('delta', { value: deltaText });
+
+        // primera delta: tiempo a primer chunk
+        if (tFirstDelta == null) {
+          tFirstDelta = Date.now();
+          slog('stream.first_delta', {
+            runId, threadId: tid,
+            firstDeltaMs: tFirstDelta - t0,
+          });
+        }
 
         // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
@@ -162,23 +184,41 @@ async function runOnceWithStream(
       return;
     }
 
+    // ---- mensaje completado (texto adicional fuera de delta)
     if (type === 'thread.message.completed') {
-      const complete = flattenAssistantTextFromMessage(e?.data);
+      // aplanado de texto (ya lo tenías):
+      const m = e?.data;
+      let complete = '';
+      try {
+        const out: string[] = [];
+        if (m?.content) {
+          for (const c of m.content) {
+            if (c?.type === 'text' && c?.text?.value) out.push(c.text.value);
+          }
+        }
+        complete = out.join('\n');
+      } catch {}
       if (complete) {
         saw.text = true;
         fullText += complete;
 
-        // DIAG final: contar fences y generar huellas
+        // DIAG final: contar fences y generar huellas (con type guards)
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
-        const fenceTypes = fences.map(m => m[1]);
-        const hashes = fences.map(m => {
-          const raw = m[0]; // fence completo
+
+        const fenceTypes: string[] = fences
+          .map((mm) => (mm?.[1] ?? '').trim())
+          .filter((s): s is string => s.length > 0);
+
+        const hashes: string[] = fences.map((mm) => {
+          const raw = String(mm?.[0] ?? '');
           let hash = 0;
           for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
           return hash.toString(16);
         });
+
         const unique = Array.from(new Set(hashes)).length;
+
         emitDiag('final', {
           runId,
           fenceCount,
@@ -191,7 +231,20 @@ async function runOnceWithStream(
         // Emitimos lo que ya usas
         send('final', { text: complete });
 
-        const ops = extractKommoOps(complete);
+        // Extra: ¿mandó operaciones Kommo en el texto?
+        const ops: any[] = (() => {
+          const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
+          const found: any[] = [];
+          let m: RegExpExecArray | null;
+          while ((m = rxFence.exec(complete))) {
+            try {
+              const j = JSON.parse((m[1] || '').trim());
+              if (j && Array.isArray(j.ops)) found.push(...j.ops);
+            } catch {}
+          }
+          return found;
+        })();
+
         slog('message.completed', {
           fullLen: complete.length,
           kommoOps: ops.length,
@@ -203,33 +256,74 @@ async function runOnceWithStream(
       return;
     }
 
-    if (type === 'thread.run.failed') {
-      slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
-      send('error', { error: 'run_failed' });
+    // ---- steps/tools (solo logs, NO cambiamos SSE)
+    if (type === 'thread.run.step.delta' || type === 'thread.run.step.completed') {
+      try {
+        const d = e?.data;
+        const details = d?.step_details || d?.delta?.step_details;
+        let toolCalls = 0;
+        let names: string[] = [];
+        if (details?.type === 'tool_calls') {
+          const list = details?.tool_calls ?? details?.delta?.tool_calls ?? [];
+          toolCalls = Array.isArray(list) ? list.length : 0;
+          names = (Array.isArray(list) ? list : [])
+            .map((tc: any) => (tc?.function?.name ?? '').toString().trim())
+            .filter((s: string): s is string => s.length > 0);
+        }
+        slog(type === 'thread.run.step.delta' ? 'run.step.delta' : 'run.step.completed', {
+          runId, threadId: tid, toolCalls, names,
+        });
+      } catch {}
       return;
     }
 
+    // ---- requires_action / cancel / otros (solo logs)
+    if (type === 'thread.run.requires_action' || type === 'thread.run.cancelling' || type === 'thread.run.cancelled') {
+      slog('run.state', { type, runId, threadId: tid });
+      return;
+    }
+
+    // ---- error del stream
     if (type === 'error') {
       slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
       send('error', { error: String(e?.data || 'unknown') });
       return;
     }
+
+    // Cualquier otro evento que no hayamos clasificado (solo diagnóstico)
+    try {
+      slog('stream.event.other', { type, runId, threadId: tid });
+    } catch {}
   });
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
+      slog('stream.end', {
+        deltaChars: saw.deltaChars,
+        sawText: saw.text,
+        runId,
+        threadId: tid,
+      });
+      // tiempos
+      slog('stream.timing', {
+        runId, threadId: tid,
+        firstDeltaMs: tFirstDelta == null ? null : (tFirstDelta - t0),
+        totalMs: Date.now() - t0,
+      });
+      // cerrar SSE del caller
+      try { send('done', { ok: true }); } catch {}
       resolve();
     });
     stream.on('error', (err: any) => {
       slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
+      try { send('error', { error: String(err?.message || err) }); } catch {}
       resolve();
     });
   });
 
   return { fullText, sawText: saw.text };
 }
+
 
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
