@@ -1,3 +1,4 @@
+// app/(chat)/api/chat/route.ts
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
@@ -7,6 +8,7 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
+// -------------------- Tipos UI (solo para parsear el body) -------------------
 type UiMessage = {
   role: 'user' | 'assistant';
   parts: Array<{ type: 'text'; text: string }>;
@@ -17,18 +19,19 @@ function asText(msg?: UiMessage) {
   return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
 }
 
+// -------------------- Utilidades SSE --------------------
 function sse(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
 
-// ---------- Logs server ----------
+// -------------------- Logging servidor --------------------
 function slog(event: string, meta: Record<string, any> = {}) {
   try {
     console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
   } catch {}
 }
 
-// ---------- Helpers OpenAI ----------
+// -------------------- Helpers OpenAI --------------------
 function flattenAssistantTextFromMessage(message: any): string {
   const out: string[] = [];
   if (!message?.content) return '';
@@ -53,7 +56,7 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-// ---------- Detección de disparador “te lo preparo / un momento” ----------
+// -------------------- Disparador “espera/un momento” --------------------
 const WAIT_PATTERNS = [
   // ES
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
@@ -78,7 +81,7 @@ function hasVisibleBlock(text: string) {
   return /```cv:(itinerary|quote)\b/.test(text || '');
 }
 
-// ---------- Extrae ops de bloques ```cv:kommo ...``` en texto ----------
+// -------------------- Extrae ops de bloques cv:kommo --------------------
 function extractKommoOps(text: string): Array<any> {
   const ops: any[] = [];
   if (!text) return ops;
@@ -88,73 +91,30 @@ function extractKommoOps(text: string): Array<any> {
     try {
       const json = JSON.parse((m[1] || '').trim());
       if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {}
+    } catch {
+      // ignorar bloque malformado
+    }
   }
   return ops;
 }
 
-// ---------- Dedupe de fences visibles (conserva el ÚLTIMO idéntico) ----------
-function dedupeVisibleFencesKeepLast(text: string): string {
-  if (!text) return text;
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
-  const matches: Array<{ start: number; end: number; raw: string }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = rx.exec(text))) {
-    matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
-  }
-  if (matches.length <= 1) return text;
-
-  const groups = new Map<string, number[]>();
-  matches.forEach((mm, i) => {
-    const arr = groups.get(mm.raw) || [];
-    arr.push(i);
-    groups.set(mm.raw, arr);
-  });
-
-  const toDrop = new Set<number>();
-  for (const [, idxs] of groups) {
-    if (idxs.length > 1) idxs.slice(0, -1).forEach((i) => toDrop.add(i));
-  }
-  if (!toDrop.size) return text;
-
-  let out = '';
-  let cursor = 0;
-  matches.forEach((mm, i) => {
-    if (toDrop.has(i)) {
-      out += text.slice(cursor, mm.start);
-      cursor = mm.end;
-    }
-  });
-  out += text.slice(cursor);
-
-  slog('diag.fence.dedup', {
-    total: matches.length,
-    dropped: toDrop.size,
-    kept: matches.length - toDrop.size,
-  });
-
-  return out;
-}
-
-/**
- * Ejecuta UN run con createAndStream y resuelve cuando termina.
- * Si no llega 'thread.message.completed' pero hubo deltas, sintetiza un 'final'.
- */
+// ======================================================================
+// Ejecuta UN run con createAndStream. Emite SSE (meta, delta, final, kommo)
+// y registra diagnósticos de fences visibles al final.
+// ======================================================================
 async function runOnceWithStream(
   tid: string,
   send: (event: string, data: any) => void,
 ): Promise<{ fullText: string; sawText: boolean }> {
-  const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
-  const emitDiag = (phase: 'final' | 'delta' | 'final.synth', extra: Record<string, any> = {}) =>
-    send('diag', { phase, threadId: tid, ...extra });
-
   let fullText = '';
+  let sawText = false;
+  let deltaChars = 0;
   let runId: string | null = null;
-  let finalEmitted = false;
 
+  // abrir stream
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
   });
@@ -171,18 +131,13 @@ async function runOnceWithStream(
     if (type === 'thread.message.delta') {
       const deltaText = extractDeltaTextFromEvent(e);
       if (deltaText) {
-        saw.text = true;
-        saw.deltaChars += deltaText.length;
+        sawText = true;
+        deltaChars += deltaText.length;
         fullText += deltaText;
         send('delta', { value: deltaText });
 
-        if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
-          saw.fenceSeenInDelta = true;
-          emitDiag('delta', { fenceSeenInDelta: true, runId });
-        }
-
-        if (saw.deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
+        if (deltaChars % 300 === 0) {
+          slog('stream.delta.tick', { deltaChars, runId, threadId: tid });
         }
       }
       return;
@@ -191,9 +146,10 @@ async function runOnceWithStream(
     if (type === 'thread.message.completed') {
       const complete = flattenAssistantTextFromMessage(e?.data);
       if (complete) {
-        saw.text = true;
+        sawText = true;
         fullText += complete;
 
+        // ---- Diagnóstico de fences visibles
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
         const fenceTypes = fences.map((m) => m[1]);
@@ -203,67 +159,27 @@ async function runOnceWithStream(
           for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
           return h.toString(16);
         });
-
-        emitDiag('final', {
+        const unique = new Set(hashes).size;
+        slog('diag.fence.final', {
+          threadId: tid,
           runId,
           fenceCount,
           fenceTypes,
           hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
+          unique,
+          fenceSeenInDelta: false, // conservado para compatibilidad
         });
 
-        const finalText = dedupeVisibleFencesKeepLast(complete);
-        send('final', { text: finalText });
-
-        const ops = extractKommoOps(finalText);
+        // ---- Emitir final y posible cv:kommo
+        send('final', { text: complete });
+        const ops = extractKommoOps(complete);
         slog('message.completed', {
-          fullLen: finalText.length,
+          fullLen: complete.length,
           kommoOps: ops.length,
           runId,
           threadId: tid,
         });
         if (ops.length) send('kommo', { ops });
-
-        finalEmitted = true;
-      }
-      return;
-    }
-
-    if (type === 'thread.run.completed') {
-      if (saw.text && !finalEmitted) {
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-
-        emitDiag('final.synth', {
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        const finalText = dedupeVisibleFencesKeepLast(fullText);
-        send('final', { text: finalText });
-
-        const ops = extractKommoOps(finalText);
-        slog('message.completed', {
-          fullLen: finalText.length,
-          kommoOps: ops.length,
-          runId,
-          threadId: tid,
-        });
-        if (ops.length) send('kommo', { ops });
-
-        finalEmitted = true;
       }
       return;
     }
@@ -283,35 +199,7 @@ async function runOnceWithStream(
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      if (saw.text && !finalEmitted) {
-        const fences = [...fullText.matchAll(/```cv:(itinerary|quote)\s*([\s\S]*?)```/g)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-
-        slog('diag.fence.final.synth.end', {
-          runId,
-          threadId: tid,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        const finalText = dedupeVisibleFencesKeepLast(fullText);
-        send('final', { text: finalText });
-
-        const ops = extractKommoOps(finalText);
-        if (ops.length) send('kommo', { ops });
-      }
-
-      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
+      slog('stream.end', { deltaChars, sawText, runId, threadId: tid });
       resolve();
     });
     stream.on('error', (err: any) => {
@@ -321,9 +209,12 @@ async function runOnceWithStream(
     });
   });
 
-  return { fullText, sawText: saw.text };
+  return { fullText, sawText };
 }
 
+// ======================================================================
+// Handler HTTP (SSE)
+// ======================================================================
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
   const userText = asText(message);
@@ -343,14 +234,14 @@ export async function POST(req: NextRequest) {
   await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
   slog('message.append.ok', { threadId: tid });
 
-  // 3) Abrir SSE
+  // 3) Respuesta SSE
   const encoder = new TextEncoder();
   const rs = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: any) =>
         controller.enqueue(encoder.encode(sse(event, data)));
 
-      // meta con threadId
+      // meta con threadId (cliente lo guarda en sessionStorage)
       send('meta', { threadId: tid });
 
       try {
@@ -368,16 +259,8 @@ export async function POST(req: NextRequest) {
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
-          // ---- Run 2 (reprompt)
-          const r2 = await runOnceWithStream(tid, send);
-
-          // Fallback si el reprompt falló o no emitió nada
-          if (!r2.sawText) {
-            slog('auto.reprompt.retry', { reason: 'r2-no-text', threadId: tid });
-            await client.beta.threads.messages.create(tid, { role: 'user', content: 'continua' });
-            slog('message.append.ok', { threadId: tid, info: 'auto-continue' });
-            await runOnceWithStream(tid, send);
-          }
+          // ---- Run 2
+          await runOnceWithStream(tid, send);
         }
 
         send('done', {});

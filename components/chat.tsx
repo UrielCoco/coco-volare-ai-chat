@@ -336,8 +336,7 @@ export default function Chat() {
                   }
                 } else {
                   // FINAL SUBSECUENTE (p.ej. tras reprompt "?"):
-                  // En lugar de crear un mensaje nuevo, REEMPLAZAMOS el placeholder activo
-                  // que ya venía siendo alimentado por los deltas del segundo run.
+                  // Reemplazamos el placeholder activo (no creamos nuevo bubble).
                   applyText(text, true);
                 }
 
