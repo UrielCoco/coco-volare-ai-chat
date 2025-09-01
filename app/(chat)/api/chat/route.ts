@@ -1,3 +1,4 @@
+// app/(chat)/api/chat/route.ts
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
@@ -14,36 +15,34 @@ type UiMessage = {
 
 function asText(msg?: UiMessage) {
   if (!msg?.parts?.length) return '';
-  try {
-    return msg.parts.map((p) => p?.text || '').join('');
-  } catch { return ''; }
+  return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
 }
 
 function sse(event: string, data: any) {
-  return `data:${JSON.stringify({ event, ...data })}\n\n`;
+  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
 
-function slog(event: string, meta: Record<string, any> = {}) {
-  try { console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta })); } catch {}
-}
-
-// --- helpers OpenAI / streaming ---
 function flattenAssistantTextFromMessage(message: any): string {
+  // message: OpenAI.Beta.Threads.Messages.Message
   const out: string[] = [];
   if (!message?.content) return '';
   for (const c of message.content) {
+    // formatos posibles segun SDK
     if (c.type === 'text' && c.text?.value) out.push(c.text.value);
+    // algunos SDKs antiguos usan c.text?.annotations pero value sigue existiendo
   }
   return out.join('\n');
 }
 
 function extractDeltaTextFromEvent(e: any): string {
+  // Para eventos 'thread.message.delta' el texto suele venir en e.data.delta.content[*].text.value
   try {
     const content = e?.data?.delta?.content;
     if (Array.isArray(content)) {
       const parts: string[] = [];
       for (const item of content) {
         if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
+        // algunas variantes usan 'output_text'
         if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
       }
       return parts.join('');
@@ -52,174 +51,140 @@ function extractDeltaTextFromEvent(e: any): string {
   return '';
 }
 
-const WAIT_PATTERNS = [
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
-  /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
-  /um momento/i, /deixa eu/i, /vou preparar/i, /estou preparando/i,
-  /un instant/i, /laisse(-|\s)?moi/i, /je vais pr[eé]parer/i, /je pr[eé]pare/i,
-  /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
-];
-const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
-const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '');
-
-function dedupeVisibleFencesKeepLast(text: string) {
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
-  const matches: { start: number; end: number; raw: string }[] = [];
+// --- Extrae ops de bloques ```cv:kommo ... ```
+function extractKommoOps(text: string): Array<any> {
+  const ops: any[] = [];
+  if (!text) return ops;
+  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
-  while ((m = rx.exec(text))) {
-    const raw = m[0];
-    matches.push({ start: m.index, end: m.index + raw.length, raw });
-  }
-  if (matches.length <= 1) return text;
-
-  const seen = new Set<string>();
-  const keep = new Array(matches.length).fill(false);
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const key = matches[i].raw;
-    if (!seen.has(key)) { seen.add(key); keep[i] = true; }
-  }
-  let out = '';
-  let cursor = 0;
-  for (let i = 0; i < matches.length; i++) {
-    const mm = matches[i];
-    out += text.slice(cursor, mm.start);
-    if (keep[i]) out += mm.raw;
-    cursor = mm.end;
-  }
-  out += text.slice(cursor);
-  return out;
-}
-
-async function runOnceWithStream(
-  tid: string,
-  send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean }> {
-  const saw = { text: false, deltaChars: 0 };
-  let fullText = '';
-  let runId: string | null = null;
-  let finalEmitted = false;
-
-  const stream: any = await client.beta.threads.runs.createAndStream(tid, { assistant_id: ASSISTANT_ID });
-
-  stream.on('event', (e: any) => {
-    const type = e?.event as string;
-
-    if (type === 'thread.run.created') {
-      runId = e?.data?.id ?? null;
-      slog('run.created', { runId, threadId: tid });
-      return;
+  while ((m = rxFence.exec(text))) {
+    try {
+      const json = JSON.parse((m[1] || '').trim());
+      if (json && Array.isArray(json.ops)) ops.push(...json.ops);
+    } catch {
+      // ignora bloque malformado
     }
-
-    if (type === 'thread.message.delta') {
-      const deltaText = extractDeltaTextFromEvent(e);
-      if (deltaText) {
-        saw.text = true;
-        saw.deltaChars += deltaText.length;
-        fullText += deltaText;
-        send('delta', { value: deltaText });
-        if (saw.deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
-        }
-      }
-      return;
-    }
-
-    if (type === 'thread.message.completed') {
-      const complete = flattenAssistantTextFromMessage(e?.data);
-      if (complete) {
-        saw.text = true;
-        fullText += complete;
-        const finalText = dedupeVisibleFencesKeepLast(fullText);
-        send('final', { text: finalText });
-        finalEmitted = true;
-      }
-      return;
-    }
-
-    if (type === 'thread.run.failed') {
-      slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
-      send('error', { error: 'run_failed' });
-      return;
-    }
-  });
-
-  await new Promise<void>((resolve) => {
-    stream.on('end', () => { slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid }); resolve(); });
-    stream.on('error', (err: any) => { slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) }); send('error', { error: String(err?.message || err) }); resolve(); });
-  });
-
-  if (!finalEmitted && saw.text && fullText) {
-    const finalText = dedupeVisibleFencesKeepLast(fullText);
-    send('final', { text: finalText });
   }
-
-  return { fullText, sawText: saw.text };
+  return ops;
 }
 
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
-  const userText = asText(message);
-  slog('request.in', { hasThreadId: !!threadId, userTextLen: userText.length });
 
+  // 1) Asegurar thread
   let tid = String(threadId || '');
   if (!tid) {
     const t = await client.beta.threads.create();
     tid = t.id;
-    slog('thread.created', { threadId: tid });
-  } else {
-    slog('thread.reuse', { threadId: tid });
   }
 
+  // 2) Adjuntar mensaje de usuario
+  const userText = asText(message);
   await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
-  slog('message.append.ok', { threadId: tid });
 
+  // 3) SSE → Cliente
   const encoder = new TextEncoder();
 
   const rs = new ReadableStream({
     async start(controller) {
-      let __lastFenceKey: string | null = null;
-      const send = (event: string, data: any) => {
-        try {
-          if (event === 'final' && data && typeof data.text === 'string') {
-            const m = data.text.match(/```cv:(itinerary|quote)\s*([\s\S]*?)```/i);
-            if (m) {
-              const key = m[1] + '|' + (m[2] || '').trim();
-              if (__lastFenceKey === key) { slog('final.skip.dup', { threadId: tid }); return; }
-              __lastFenceKey = key;
-            }
-          }
-        } catch {}
-        controller.enqueue(encoder.encode(`data:${JSON.stringify({ event, ...data })}\n\n`));
-      };
+      const send = (event: string, data: any) =>
+        controller.enqueue(encoder.encode(sse(event, data)));
 
+      // meta con threadId
       send('meta', { threadId: tid });
 
+      let sawText = false;
+      let runId: string | null = null;
+
       try {
-        const r1 = await runOnceWithStream(tid, send);
-        const shouldReprompt = !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
+        // Usamos createAndStream para compatibilidad y tipeo seguro
+        const stream = await client.beta.threads.runs.createAndStream(tid, {
+          assistant_id: ASSISTANT_ID,
+        });
 
-        if (shouldReprompt) {
-          slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-          await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
-          slog('message.append.ok', { threadId: tid, info: 'auto-?' });
-          const r2 = await runOnceWithStream(tid, send);
+        // Escuchamos un solo canal "event" para cubrir todas las variantes de SDK
+        stream.on('event', (e: any) => {
+          const type = e?.event as string;
 
-          if (!r2.sawText) {
-            slog('auto.reprompt.retry', { reason: 'r2-no-text', threadId: tid });
-            await client.beta.threads.messages.create(tid, { role: 'user', content: 'continua' });
-            slog('message.append.ok', { threadId: tid, info: 'auto-continue' });
-            await runOnceWithStream(tid, send);
+          if (type === 'thread.run.created') {
+            runId = e?.data?.id ?? null;
+            return;
           }
-        }
 
-        controller.enqueue(encoder.encode(`data:${JSON.stringify({ event: 'done' })}\n\n`));
-        controller.close();
+          if (type === 'thread.message.delta') {
+            const deltaText = extractDeltaTextFromEvent(e);
+            if (deltaText) {
+              sawText = true;
+              send('delta', { value: deltaText });
+            }
+            return;
+          }
+
+          if (type === 'thread.message.completed') {
+            // mensaje completo del assistant
+            const full = flattenAssistantTextFromMessage(e?.data);
+            if (full) {
+              sawText = true;
+              send('final', { text: full });
+
+              // si incluye bloque cv:kommo, avisamos explícitamente
+              const ops = extractKommoOps(full);
+              if (ops.length) send('kommo', { ops });
+            }
+            return;
+          }
+
+          if (type === 'error') {
+            send('error', { error: String(e?.data || 'unknown') });
+            return;
+          }
+
+          if (type === 'thread.run.failed') {
+            send('error', { error: 'run_failed' });
+            return;
+          }
+
+          if (type === 'done' || type === 'thread.run.completed') {
+            // no enviamos nada extra aquí; el cierre formal lo hace stream.on('end')
+            return;
+          }
+        });
+
+        stream.on('end', async () => {
+          if (!sawText && runId) {
+            // Algunas versiones del SDK exigen objeto { thread_id, run_id }
+            try {
+              // @ts-expect-error: distintas firmas segun versión
+              await client.beta.threads.runs.cancel({ thread_id: tid, run_id: runId });
+            } catch {
+              try {
+                // fallback a firma (threadId, runId) en SDKs más nuevos
+                // @ts-expect-error: firma alternativa
+                await client.beta.threads.runs.cancel(tid, runId);
+              } catch {}
+            }
+          }
+          send('done', {});
+          controller.close();
+        });
+
+        stream.on('error', async (err: any) => {
+          if (runId) {
+            try {
+              // @ts-expect-error: distintas firmas segun versión
+              await client.beta.threads.runs.cancel({ thread_id: tid, run_id: runId });
+            } catch {
+              try {
+                // @ts-expect-error
+                await client.beta.threads.runs.cancel(tid, runId);
+              } catch {}
+            }
+          }
+          send('error', { error: String(err?.message || err) });
+          controller.close();
+        });
       } catch (e: any) {
-        slog('exception.createStream', { error: String(e?.message || e) });
-        controller.enqueue(encoder.encode(`data:${JSON.stringify({ event: 'error', error: String(e?.message || e) })}\n\n`));
+        send('error', { error: String(e?.message || e) });
         controller.close();
       }
     },

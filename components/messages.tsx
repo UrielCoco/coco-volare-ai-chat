@@ -34,7 +34,7 @@ function guessLang(msgs: ChatMessage[]): 'es' | 'en' {
     }
   }
   return 'es';
-}
+};
 
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
@@ -102,38 +102,27 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
     <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
       <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
-        <span className="inline-block">{label}</span>
-        <span className="inline-block">…</span>
+        <span className="opacity-90">{label}</span>
+        <span className="w-1.5 h-1.5 rounded-full bg-white/80 animate-bounce" style={{ animationDelay: '0ms' }} />
+        <span className="w-1.5 h-1.5 rounded-full bg-white/60 animate-bounce" style={{ animationDelay: '150ms' }} />
+        <span className="w-1.5 h-1.5 rounded-full bg-white/40 animate-bounce" style={{ animationDelay: '300ms' }} />
       </div>
     </div>
   );
 }
 
-export default function Messages({
-  messages,
-  isLoading,
-  setMessages,
-  regenerate,
-  isReadonly,
-  chatId,
-}: Props) {
-  const [lang, setLang] = useState<'es' | 'en'>(guessLang(messages));
+// -------------- Main ---------------------
+export default function Messages(props: Props) {
+  const { messages, isLoading } = props;
+  const lang = guessLang(messages);
+
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
-
-  useEffect(() => {
-    const last = [...messages].reverse().find((m) => (m as any).role === 'assistant' || (m as any).role === 'user');
-    if (last) setLang(guessLang([last as any]));
-  }, [messages]);
 
   useEffect(() => {
     if (isLoading) { setShowLoader(true); setPhase('in'); }
     else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
   }, [isLoading, showLoader]);
-
-  // Dedupe por render
-  const seenItin = new Set<string>();
-  const seenQuote = new Set<string>();
 
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
@@ -141,7 +130,7 @@ export default function Messages({
         const role = (m as any).role as 'user' | 'assistant' | 'system';
         const raw = getText(m) ?? '';
         const trimmed = raw.replace(/\u200B/g, '').trim();
-        const hasKommoOnly = /```cv:kommo[\s\S]*?```/i.test(trimmed) && trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim().length === 0;
+        // Oculta bloques secretos cv:kommo del texto visible
         const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         const stopped = (m as any)?.stopped === true;
 
@@ -156,25 +145,13 @@ export default function Messages({
         }
 
         if (role === 'assistant') {
-          // ⛑️ Si el mensaje trae SOLO cv:kommo (sin texto visible), mantenemos un "…" visible
-          if (!visible) {
-            if (hasKommoOnly) {
-              return (
-                <AssistantBubble key={(m as any).id || i}>
-                  <div className="opacity-70">…</div>
-                </AssistantBubble>
-              );
-            }
-            return null;
-          }
+          // Evita burbuja doble cuando aún no hay tokens
+          if (!visible) return null;
 
           // 1) Itinerario
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
           if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
-            const __key = JSON.stringify(it.data);
-            if (seenItin.has(__key)) return null; // dedupe
-            seenItin.add(__key);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <ItineraryCard data={it.data} />
@@ -186,9 +163,6 @@ export default function Messages({
           const q = extractLabeledJson(trimmed, 'cv:quote');
           if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
-            const __keyQ = JSON.stringify(q.data);
-            if (seenQuote.has(__keyQ)) return null; // dedupe
-            seenQuote.add(__keyQ);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <QuoteCard data={q.data} />
