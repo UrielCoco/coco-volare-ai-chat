@@ -1,286 +1,169 @@
-import { NextRequest } from 'next/server';
+import 'server-only';
 import OpenAI from 'openai';
+import type { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
 
-// ---------- Logs (una sola salida para Vercel) ----------
-function log(event: string, meta: Record<string, any> = {}) {
-  try { console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta })); } catch {}
+// ---------------------------- utils SSE ------------------------------------
+
+function sse(event: string, data?: unknown) {
+  return `event: ${event}\n` + (data !== undefined ? `data: ${JSON.stringify(data)}\n` : '') + `\n`;
 }
 
-// ---------- SSE helper ----------
-function sse(event: string, data: any) {
-  return `event:${event}\n` + `data:${JSON.stringify(data)}\n\n`;
-}
-
-// ---------- Helpers OpenAI/text ----------
-function flattenAssistantTextFromMessage(m: any): string {
-  const out: string[] = [];
-  for (const c of (m?.content || [])) {
-    if (c.type === 'text' && c.text?.value) out.push(c.text.value);
-  }
-  return out.join('\n');
-}
-
-function extractDeltaTextFromEvent(e: any): string {
-  try {
-    const content = e?.data?.delta?.content;
-    if (Array.isArray(content)) {
-      const parts: string[] = [];
-      for (const it of content) {
-        if (it?.type === 'text' && it?.text?.value) parts.push(it.text.value);
-        if (it?.type === 'output_text' && it?.text?.value) parts.push(it.text.value);
-      }
-      return parts.join('');
-    }
-  } catch {}
-  return '';
-}
-
-const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '');
-const WAIT_PATTERNS = [
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  /déjame preparar/i, /deja que.*prepare/i,
-  /give me a moment/i, /one moment/i, /hold on/i, /let me.*prepare/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
-];
-const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
-
-function findFences(text: string) {
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
-  const arr: { label: string; json: string; len: number }[] = [];
+function findFences(src: string) {
+  const fences: Array<{ label: string; json: string }> = [];
+  // nuestros fences principales
+  const re = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
-  while ((m = rx.exec(text || ''))) {
-    const json = (m[2] || '').trim();
-    arr.push({ label: m[1], json, len: json.length });
-  }
-  return arr;
+  while ((m = re.exec(src))) fences.push({ label: m[1], json: m[2].trim() });
+
+  // tolerancia a ```json
+  const reJson = /```json\s*([\s\S]*?)```/g;
+  while ((m = reJson.exec(src))) fences.push({ label: 'json', json: m[1].trim() });
+
+  return fences;
 }
 
-function dedupeVisibleFencesKeepLast(text: string) {
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
-  const matches: { start: number; end: number; raw: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = rx.exec(text))) matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
-  if (matches.length <= 1) return text;
-
-  const seen = new Set<string>();
-  const keep = new Array(matches.length).fill(false);
-  for (let i = matches.length - 1; i >= 0; i--) {
-    if (!seen.has(matches[i].raw)) { seen.add(matches[i].raw); keep[i] = true; }
+// extrae texto robustamente de un evento message.* del SDK
+function extractTextFromMessageContent(content: any[]): string {
+  if (!Array.isArray(content)) return '';
+  let out = '';
+  for (const part of content) {
+    // formatos posibles según el tipo de evento
+    // completed => { type: 'output_text', text: { value } }
+    // delta     => { type: 'output_text', text: { value } }  ó  { type: 'output_text.delta', text: { value } }
+    // fallback  => { type: 'text', text: { value } } ó { type:'text', text:'...' }
+    const val =
+      part?.text?.value ??
+      part?.delta?.text?.value ??
+      (typeof part?.text === 'string' ? part.text : '');
+    if (typeof val === 'string') out += val;
   }
-  let out = '', cursor = 0;
-  for (let i = 0; i < matches.length; i++) {
-    const mm = matches[i];
-    out += text.slice(cursor, mm.start);
-    if (keep[i]) out += mm.raw;
-    cursor = mm.end;
-  }
-  out += text.slice(cursor);
-  log('diag.fence.dedup', { total: matches.length, dropped: matches.length - keep.filter(Boolean).length });
   return out;
 }
 
-// ---------- Intención del usuario (¿esperamos bloque?) ----------
-const ITINERARY_TRIGGER = /\b(itinerario|plan de viaje|route|hazlo|dale|ok\b|procede|armarlo|listo|sí adelante|si adelante|adelante|go ahead|do it)\b/i;
-const QUOTE_TRIGGER = /\b(cotizaci(?:ón|on)|cotiza|presupuesto|precio|precios|costo|costos|quote|pricing|how much|cu[aá]nto)\b/i;
+// ---------------------------- route ----------------------------------------
 
-function userExpectsBlock(userText: string): { wantsItinerary: boolean; wantsQuote: boolean } {
-  const t = (userText || '').toLowerCase();
-  return {
-    wantsItinerary: ITINERARY_TRIGGER.test(t),
-    wantsQuote: QUOTE_TRIGGER.test(t),
-  };
-}
-
-// ---------- Run (single) ----------
-async function runOnceWithStream(
-  threadId: string,
-  send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean }> {
-  let fullText = '';
-  let finalEmitted = false;
-  let runId: string | null = null;
-  const seen = { text: false, deltaChars: 0 };
-
-  const stream: any = await client.beta.threads.runs.createAndStream(threadId, { assistant_id: ASSISTANT_ID });
-
-  stream.on('event', (e: any) => {
-    const type = e?.event as string;
-
-    if (type === 'thread.run.created') {
-      runId = e?.data?.id ?? null;
-      log('run.created', { runId, threadId });
-      return;
-    }
-
-    if (type === 'thread.message.delta') {
-      const delta = extractDeltaTextFromEvent(e);
-      if (delta) {
-        seen.text = true;
-        seen.deltaChars += delta.length;
-        fullText += delta;
-        send('delta', { value: delta });
-        if (seen.deltaChars % 300 === 0) log('stream.delta.tick', { runId, threadId, deltaChars: seen.deltaChars });
-      }
-      return;
-    }
-
-    if (type === 'thread.message.completed') {
-      const add = flattenAssistantTextFromMessage(e?.data);
-      if (add) {
-        seen.text = true;
-        fullText += add;
-
-        const finalText = dedupeVisibleFencesKeepLast(fullText);
-        const fences = findFences(finalText);
-        log('message.completed', {
-          runId, threadId,
-          textLen: finalText.length,
-          fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
-          hasVisibleBlock: hasVisibleBlock(finalText),
-        });
-
-        send('final', { text: finalText });
-        finalEmitted = true;
-      }
-      return;
-    }
-
-    if (type === 'thread.run.failed') {
-      log('stream.error', { runId, threadId, error: 'run_failed' });
-      send('error', { error: 'run_failed' });
-      return;
-    }
-  });
-
-  await new Promise<void>((resolve) => {
-    stream.on('end', () => { log('stream.end', { runId, threadId, deltaChars: seen.deltaChars, sawText: seen.text }); resolve(); });
-    stream.on('error', (err: any) => { log('exception.stream', { runId, threadId, error: String(err?.message || err) }); send('error', { error: String(err?.message || err) }); resolve(); });
-  });
-
-  if (!finalEmitted && seen.text && fullText) {
-    const finalText = dedupeVisibleFencesKeepLast(fullText);
-    const fences = findFences(finalText);
-    log('message.completed.synthetic', {
-      threadId, textLen: finalText.length,
-      fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
-      hasVisibleBlock: hasVisibleBlock(finalText),
-    });
-    send('final', { text: finalText });
-  }
-
-  return { fullText, sawText: seen.text };
-}
-
-// ---------- Route ----------
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const queryTid = req.nextUrl.searchParams.get('threadId') || '';
-  const bodyTid = body?.threadId || '';
-  const msg = body?.message;
-
-  const userText = typeof msg === 'string' ? msg : (msg?.parts?.[0]?.text || '');
-  log('request.in', { hasThreadId: !!(queryTid || bodyTid), userTextLen: (userText || '').length });
-
-  // Thread
-  let threadId = String(queryTid || bodyTid || '');
-  if (!threadId) {
-    const t = await client.beta.threads.create();
-    threadId = t.id;
-    log('thread.created', { threadId });
-  } else {
-    log('thread.reuse', { threadId });
-  }
-
-  // Append user message
-  await client.beta.threads.messages.create(threadId, { role: 'user', content: userText });
-  log('message.append.ok', { threadId });
+  const { message, threadId: incomingThreadId } = await req.json();
 
   const encoder = new TextEncoder();
 
-  const rs = new ReadableStream({
+  const streamBody = new ReadableStream({
     async start(controller) {
-      let lastFenceKey: string | null = null;
-
-      const send = (event: string, data: any) => {
-        if (event === 'final' && data && typeof data.text === 'string') {
-          const fences = findFences(data.text);
-          if (fences.length) {
-            const key = `${fences[0].label}|${fences[0].json}`;
-            if (lastFenceKey === key) { log('final.skip.dup', { threadId }); return; }
-            lastFenceKey = key;
-          }
-          log('final.emit', {
-            threadId,
-            textLen: data.text.length,
-            fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
-            hasVisibleBlock: hasVisibleBlock(data.text),
-          });
-        } else {
-          log('sse.emit', { event, keys: Object.keys(data || {}) });
-        }
+      const write = (event: string, data?: unknown) => {
         controller.enqueue(encoder.encode(sse(event, data)));
       };
 
-      // meta
-      send('meta', { threadId });
-
-      // Heartbeat
-      const hb = setInterval(() => {
-        try { controller.enqueue(encoder.encode(sse('hb', { t: Date.now() }))); } catch {}
-      }, 8000);
+      let threadId = incomingThreadId as string | undefined;
+      let closed = false;
+      const safeClose = () => {
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
+      };
 
       try {
-        // Run 1
-        const r1 = await runOnceWithStream(threadId, send);
+        if (!client.apiKey) throw new Error('Missing OPENAI_API_KEY');
+        if (!process.env.OPENAI_ASSISTANT_ID) throw new Error('Missing OPENAI_ASSISTANT_ID');
 
-        // ¿El usuario esperaba bloque?
-        const intent = userExpectsBlock(userText);
-        const expectedBlock = intent.wantsItinerary || intent.wantsQuote;
-
-        // Decisión de reprompt:
-        // - Reprompt si SE ESPERABA bloque y no llegó bloque visible
-        // - O si el assistant prometió generar algo (frase de espera) y no llegó bloque
-        const needReprompt =
-          (!hasVisibleBlock(r1.fullText) && (expectedBlock || hasWaitPhrase(r1.fullText)));
-
-        if (needReprompt) {
-          log('auto.reprompt', { reason: expectedBlock ? 'expected-block-missing' : 'wait-no-block', threadId });
-          await client.beta.threads.messages.create(threadId, { role: 'user', content: '?' });
-          log('message.append.ok', { threadId, info: 'auto-?' });
-
-          // Run 2
-          const r2 = await runOnceWithStream(threadId, send);
-
-          if (!r2.sawText) {
-            log('auto.reprompt.retry', { reason: 'r2-no-text', threadId });
-            await client.beta.threads.messages.create(threadId, { role: 'user', content: 'continua' });
-            log('message.append.ok', { threadId, info: 'auto-continue' });
-            await runOnceWithStream(threadId, send);
-          }
-        } else {
-          log('auto.reprompt.skip', { reason: 'no-need', threadId });
+        // crear thread si hace falta
+        if (!threadId) {
+          const thread = await client.beta.threads.create();
+          threadId = thread.id;
+          write('meta', { threadId });
         }
 
-        clearInterval(hb);
-        controller.enqueue(encoder.encode(sse('done', {})));
-        controller.close();
-      } catch (e: any) {
-        clearInterval(hb);
-        log('exception.createStream', { error: String(e?.message || e) });
-        controller.enqueue(encoder.encode(sse('error', { error: String(e?.message || e) })));
-        controller.close();
+        // agregar mensaje del usuario
+        await client.beta.threads.messages.create(threadId!, {
+          role: 'user',
+          content: message?.content ?? (typeof message === 'string' ? message : ''),
+        });
+
+        // lanzar run con streaming de eventos
+        const runStream = await client.beta.threads.runs.stream(threadId!, {
+          assistant_id: process.env.OPENAI_ASSISTANT_ID!,
+          instructions:
+            'Cuando devuelvas un itinerario o una cotización, incluye un bloque de código con ```cv:itinerary``` o ```cv:quote``` que contenga SOLO JSON válido. No repitas ese JSON fuera del bloque.',
+        });
+
+        let currentMessageText = '';
+        let lastDeltaEcho = '';
+
+        runStream.on('event', (ev: any) => {
+          const type = ev?.event || ev?.type;
+          if (!type) return;
+
+          // Recibimos deltas de texto
+          if (type === 'thread.message.delta') {
+            const deltaContent = ev?.data?.delta?.content ?? [];
+            const value = extractTextFromMessageContent(deltaContent);
+            if (value && value !== lastDeltaEcho) {
+              lastDeltaEcho = value;
+              currentMessageText += value;
+              write('delta', { value }); // el cliente mantiene el "pensando…"
+            }
+          }
+
+          // Un mensaje del assistant terminó: emitimos un final con el texto completo
+          if (type === 'thread.message.completed') {
+            // priorizamos el texto consolidado que trae el evento
+            const msgContent = ev?.data?.message?.content ?? [];
+            const fullTextFromEvent = extractTextFromMessageContent(msgContent);
+            const fullText = fullTextFromEvent || currentMessageText;
+            currentMessageText = '';
+
+            if (fullText && fullText.trim()) {
+              write('final', {
+                text: fullText,
+                fences: findFences(fullText),
+              });
+            }
+          }
+
+          // Run finalizado con éxito
+          if (type === 'thread.run.completed') {
+            write('done', { ok: true });
+            safeClose();
+          }
+
+          // Errores (fallo del run o paso)
+          if (
+            type === 'thread.run.failed' ||
+            type === 'thread.run.step.failed' ||
+            type === 'error'
+          ) {
+            const msg =
+              ev?.data?.last_error?.message ??
+              ev?.data?.error?.message ??
+              ev?.error ??
+              'Run failed';
+            write('error', { message: msg });
+            write('done', { ok: false });
+            safeClose();
+          }
+        });
+
+        // Esperamos a que termine el stream (método correcto del SDK)
+        await runStream.done();
+
+        // por si no recibimos eventos de cierre explícitos
+        write('done', { ok: true });
+        safeClose();
+      } catch (err: any) {
+        write('error', { message: String(err?.message || err) });
+        write('done', { ok: false });
+        safeClose();
       }
     },
   });
 
-  return new Response(rs, {
+  return new Response(streamBody, {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
