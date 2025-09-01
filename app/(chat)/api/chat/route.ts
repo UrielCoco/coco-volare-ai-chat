@@ -5,7 +5,9 @@ import OpenAI from 'openai';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY!,
+});
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
 type UiMessage = {
@@ -47,6 +49,7 @@ function extractDeltaTextFromEvent(e: any): string {
       for (const item of content) {
         if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
         if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
+        if (item?.type === 'output_text_delta' && (item as any)?.value) parts.push((item as any).value);
       }
       return parts.join('');
     }
@@ -57,19 +60,45 @@ function extractDeltaTextFromEvent(e: any): string {
 // ---------- Detección de disparador “te lo preparo / un momento” ----------
 const WAIT_PATTERNS = [
   // ES
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
+  /dame un momento/i,
+  /un momento/i,
+  /perm[ií]teme/i,
+  /en breve/i,
+  /lo preparo/i,
+  /te preparo/i,
+  /voy a preparar/i,
+  /estoy preparando/i,
+  /ahora mismo/i,
   // EN
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
+  /give me a moment/i,
+  /one moment/i,
+  /hold on/i,
+  /let me/i,
+  /just a moment/i,
+  /i('|’)ll prepare/i,
+  /i will prepare/i,
+  /i('|’)m preparing/i,
+  /working on it/i,
   // IT
-  /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
+  /un attimo/i,
+  /lascia(mi)? che/i,
+  /preparo/i,
+  /sto preparando/i,
   // PT
-  /um momento/i, /deixa eu/i, /vou preparar/i, /estou preparando/i,
+  /um momento/i,
+  /deixa eu/i,
+  /vou preparar/i,
+  /estou preparando/i,
   // FR
-  /un instant/i, /laisse(-|\s)?moi/i, /je vais pr[eé]parer/i, /je pr[eé]pare/i,
+  /un instant/i,
+  /laisse(-|\s)?moi/i,
+  /je vais pr[eé]parer/i,
+  /je pr[eé]pare/i,
   // DE
-  /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
+  /einen moment/i,
+  /lass mich/i,
+  /ich werde vorbereiten/i,
+  /ich bereite vor/i,
 ];
 function hasWaitPhrase(text: string) {
   const t = text || '';
@@ -96,37 +125,120 @@ function extractKommoOps(text: string): Array<any> {
   return ops;
 }
 
+// ---------- Utilidades heurísticas (Opción B) ----------
+function includesAny(s: string, needles: RegExp[] | string[]) {
+  const txt = s || '';
+  return needles.some((n) => (n instanceof RegExp ? n.test(txt) : txt.toLowerCase().includes(n.toLowerCase())));
+}
+
+function isLikelyClarifyingQuestion(text: string) {
+  const rx = [
+    /\?/, // cualquier pregunta
+    /fecha|fechas|cu[aá]ntas|personas|preferencias|presupuesto|presup|d[eé]nde|desde|hasta/i,
+    /dates?|how many|people|preferences?|budget|where|from.*to/i,
+  ];
+  return includesAny(text, rx);
+}
+
+function detectUserLang(s: string): 'en' | 'es' | 'pt' | 'it' | 'fr' | 'de' | 'other' {
+  const t = (s || '').toLowerCase();
+  const score = (arr: RegExp[]) => arr.reduce((acc, r) => (r.test(t) ? acc + 1 : acc), 0);
+  const en = score([/\bthe\b/, /\band\b/, /\bplease\b/, /\bi want\b/]);
+  const es = score([/\bque\b/, /\bpara\b/, /\bviaje\b/, /¿|¡/]);
+  const pt = score([/\bque\b/, /\bpara\b/, /\bviagem\b/]);
+  const it = score([/\bper\b/, /\bviaggio\b/]);
+  const fr = score([/\bpour\b/, /\bvoyage\b/]);
+  const de = score([/\bund\b/, /\breise\b/]);
+  const max = Math.max(en, es, pt, it, fr, de);
+  if (max === 0) return 'other';
+  if (max === en) return 'en';
+  if (max === es) return 'es';
+  if (max === pt) return 'pt';
+  if (max === it) return 'it';
+  if (max === fr) return 'fr';
+  return 'de';
+}
+
+type RepromptDecision = { ok: boolean; reason?: string; langHint?: string };
+
+function decideAutoReprompt(opts: {
+  fullText: string;
+  userText: string;
+  messageCountInRun: number;
+  alreadyRepromptedInThisRequest: boolean;
+}): RepromptDecision {
+  const text = opts.fullText || '';
+  const len = text.length;
+
+  // Reglas endurecidas (B):
+  if (!text) return { ok: false, reason: 'empty' };
+  if (hasVisibleBlock(text)) return { ok: false, reason: 'has-visible-block' };
+  if (!hasWaitPhrase(text)) return { ok: false, reason: 'no-wait-phrase' };
+  if (len > 180) return { ok: false, reason: 'too-long' };
+  if (isLikelyClarifyingQuestion(text)) return { ok: false, reason: 'clarifying-question' };
+  if (opts.messageCountInRun > 1) return { ok: false, reason: 'multi-msg-run' };
+  if (opts.alreadyRepromptedInThisRequest) return { ok: false, reason: 'already-reprompted' };
+
+  const userLang = detectUserLang(opts.userText);
+  const hint =
+    userLang === 'en'
+      ? ' Please continue in English.'
+      : userLang === 'es'
+      ? ' Por favor continúa en español.'
+      : undefined;
+
+  return { ok: true, reason: 'wait-no-block', langHint: hint };
+}
+
 /**
  * Ejecuta UN run con createAndStream y resuelve cuando termina.
- * Emite los mismos eventos que ya consume tu UI.
- * Devuelve el texto completo recibido en ese run.
- * (AHORA con logs de diagnóstico de fences).
+ * Emite los mismos eventos que ya consume la UI.
+ * Devuelve el texto completo recibido en ese run y metadatos (D).
+ *
+ * Opción A: ya NO emite 'done' aquí (solo al final del pipeline).
  */
 async function runOnceWithStream(
   tid: string,
   send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean }> {
-  // --- helpers locales de diagnóstico ---
+): Promise<{
+  fullText: string;
+  sawText: boolean;
+  messagesMeta: Array<{
+    id?: string;
+    hadFence: boolean;
+    fenceTypes: string[];
+    textLen: number;
+    order: number;
+  }>;
+  messagesCount: number;
+}> {
   const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
   const fenceStartRx = /```cv:(itinerary|quote)\b/i;
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
-  // tiempos
   const t0 = Date.now();
   let tFirstDelta: number | null = null;
 
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // SSE opcional para inspección en cliente (no afecta UI si no lo consumes)
-    try { send('diag', { phase, threadId: tid, ...extra }); } catch {}
-    // Log persistente en Vercel
+    try {
+      send('diag', { phase, threadId: tid, ...extra });
+    } catch {}
     slog(phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final', { threadId: tid, ...extra });
   }
 
   let fullText = '';
   let runId: string | null = null;
 
-  // Abrimos el stream como ya lo haces (mismo comportamiento)
-  // @ts-ignore - tipos del stream varían entre versiones del SDK
+  // D: tracking de mensajes por run
+  const msgMeta: Array<{
+    id?: string;
+    hadFence: boolean;
+    fenceTypes: string[];
+    textLen: number;
+    order: number;
+  }> = [];
+  let messageOrder = 0;
+
   const stream: any = await client.beta.threads.runs.createAndStream(tid, {
     assistant_id: ASSISTANT_ID,
   });
@@ -141,33 +253,36 @@ async function runOnceWithStream(
       return;
     }
 
+    // ---- message created / in_progress (D)
+    if (type === 'thread.message.created') {
+      const m = e?.data;
+      msgMeta.push({ id: m?.id, hadFence: false, fenceTypes: [], textLen: 0, order: ++messageOrder });
+      slog('message.created', { runId, threadId: tid, messageId: m?.id, order: messageOrder });
+      return;
+    }
+    if (type === 'thread.message.in_progress') {
+      slog('message.in_progress', { runId, threadId: tid, messageId: e?.data?.id });
+      return;
+    }
+
     // ---- delta de mensaje
     if (type === 'thread.message.delta') {
-      const content = e?.data?.delta?.content ?? [];
-      // extrae texto (tu versión original lo hacía así):
-      let deltaText = '';
-      if (Array.isArray(content)) {
-        for (const item of content) {
-          if (item?.type === 'text' && item?.text?.value) deltaText += item.text.value;
-          if (item?.type === 'output_text_delta' && item?.value) deltaText += item.value;
-        }
-      }
+      const deltaText = extractDeltaTextFromEvent(e);
       if (deltaText) {
         saw.text = true;
         saw.deltaChars += deltaText.length;
         fullText += deltaText;
         send('delta', { value: deltaText });
 
-        // primera delta: tiempo a primer chunk
         if (tFirstDelta == null) {
           tFirstDelta = Date.now();
           slog('stream.first_delta', {
-            runId, threadId: tid,
+            runId,
+            threadId: tid,
             firstDeltaMs: tFirstDelta - t0,
           });
         }
 
-        // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
           emitDiag('delta', {
@@ -184,94 +299,90 @@ async function runOnceWithStream(
       return;
     }
 
-    // ---- mensaje completado (texto adicional fuera de delta)
+    // ---- mensaje completado
     if (type === 'thread.message.completed') {
-      // aplanado de texto (ya lo tenías):
       const m = e?.data;
-      let complete = '';
+
+      let completeForThisMessage = '';
       try {
-        const out: string[] = [];
-        if (m?.content) {
-          for (const c of m.content) {
-            if (c?.type === 'text' && c?.text?.value) out.push(c.text.value);
-          }
-        }
-        complete = out.join('\n');
+        completeForThisMessage = flattenAssistantTextFromMessage(m);
       } catch {}
-      if (complete) {
+
+      if (completeForThisMessage) {
         saw.text = true;
-        fullText += complete;
+        fullText += completeForThisMessage;
 
-        // DIAG final: contar fences y generar huellas (con type guards)
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
+        // D: por mensaje, detectar fences
+        const fences = [...completeForThisMessage.matchAll(allFencesRx)];
+        const fenceTypes = fences.map((mm) => String(mm[1]));
+        const hadFence = fenceTypes.length > 0;
 
-        const fenceTypes: string[] = fences
-          .map((mm) => (mm?.[1] ?? '').trim())
-          .filter((s): s is string => s.length > 0);
+        // Asociar meta al último slot creado
+        const last = msgMeta[msgMeta.length - 1];
+        if (last) {
+          last.hadFence = hadFence;
+          last.fenceTypes = fenceTypes;
+          last.textLen = completeForThisMessage.length;
+        }
 
-        const hashes: string[] = fences.map((mm) => {
-          const raw = String(mm?.[0] ?? '');
+        // DIAG final del run (agregado: mantenemos el global)
+        const allFences = [...fullText.matchAll(allFencesRx)];
+        const hashes = allFences.map((mm) => {
+          const raw = mm[0];
           let hash = 0;
           for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
           return hash.toString(16);
         });
-
         const unique = Array.from(new Set(hashes)).length;
 
         emitDiag('final', {
           runId,
-          fenceCount,
-          fenceTypes,
+          fenceCount: allFences.length,
+          fenceTypes: allFences.map((mm) => String(mm[1])),
           hashes,
           unique,
           fenceSeenInDelta: saw.fenceSeenInDelta,
         });
 
-        // Emitimos lo que ya usas
-        send('final', { text: complete });
+        // Emitimos lo que ya usas (UI): un 'final' por mensaje completado
+        send('final', { text: completeForThisMessage });
 
-        // Extra: ¿mandó operaciones Kommo en el texto?
-        const ops: any[] = (() => {
-          const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
-          const found: any[] = [];
-          let m: RegExpExecArray | null;
-          while ((m = rxFence.exec(complete))) {
-            try {
-              const j = JSON.parse((m[1] || '').trim());
-              if (j && Array.isArray(j.ops)) found.push(...j.ops);
-            } catch {}
-          }
-          return found;
-        })();
-
+        const ops = extractKommoOps(completeForThisMessage);
         slog('message.completed', {
-          fullLen: complete.length,
+          fullLen: completeForThisMessage.length,
           kommoOps: ops.length,
           runId,
           threadId: tid,
+          messageId: m?.id,
         });
         if (ops.length) send('kommo', { ops });
       }
       return;
     }
 
-    // ---- steps/tools (solo logs, NO cambiamos SSE)
+    // ---- steps/tools (solo logs)
     if (type === 'thread.run.step.delta' || type === 'thread.run.step.completed') {
       try {
         const d = e?.data;
         const details = d?.step_details || d?.delta?.step_details;
         let toolCalls = 0;
         let names: string[] = [];
+
         if (details?.type === 'tool_calls') {
           const list = details?.tool_calls ?? details?.delta?.tool_calls ?? [];
           toolCalls = Array.isArray(list) ? list.length : 0;
+
+          // ----- FIX TS: filtra con type-guard para garantizar string[] -----
           names = (Array.isArray(list) ? list : [])
-            .map((tc: any) => (tc?.function?.name ?? '').toString().trim())
-            .filter((s: string): s is string => s.length > 0);
+            .map((tc: any) => (tc?.function?.name ? String(tc.function.name) : undefined))
+            .filter((n: string | undefined): n is string => typeof n === 'string' && n.length > 0);
         }
+
         slog(type === 'thread.run.step.delta' ? 'run.step.delta' : 'run.step.completed', {
-          runId, threadId: tid, toolCalls, names,
+          runId,
+          threadId: tid,
+          toolCalls,
+          names,
         });
       } catch {}
       return;
@@ -290,7 +401,7 @@ async function runOnceWithStream(
       return;
     }
 
-    // Cualquier otro evento que no hayamos clasificado (solo diagnóstico)
+    // Otros eventos (diagnóstico)
     try {
       slog('stream.event.other', { type, runId, threadId: tid });
     } catch {}
@@ -304,26 +415,23 @@ async function runOnceWithStream(
         runId,
         threadId: tid,
       });
-      // tiempos
       slog('stream.timing', {
-        runId, threadId: tid,
-        firstDeltaMs: tFirstDelta == null ? null : (tFirstDelta - t0),
+        runId,
+        threadId: tid,
+        firstDeltaMs: tFirstDelta == null ? null : tFirstDelta - t0,
         totalMs: Date.now() - t0,
       });
-      // cerrar SSE del caller
-      try { send('done', { ok: true }); } catch {}
       resolve();
     });
     stream.on('error', (err: any) => {
       slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      try { send('error', { error: String(err?.message || err) }); } catch {}
+      send('error', { error: String(err?.message || err) });
       resolve();
     });
   });
 
-  return { fullText, sawText: saw.text };
+  return { fullText, sawText: saw.text, messagesMeta: msgMeta, messagesCount: msgMeta.length };
 }
-
 
 export async function POST(req: NextRequest) {
   const { message, threadId } = await req.json();
@@ -348,32 +456,64 @@ export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const rs = new ReadableStream({
     async start(controller) {
-      const send = (event: string, data: any) =>
-        controller.enqueue(encoder.encode(sse(event, data)));
+      const send = (event: string, data: any) => controller.enqueue(encoder.encode(sse(event, data)));
 
-      // meta con threadId (cliente lo guarda)
+      // meta con threadId
       send('meta', { threadId: tid });
 
       try {
         // ---- Run 1
         const r1 = await runOnceWithStream(tid, send);
 
-        // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
-        const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          hasWaitPhrase(r1.fullText);
+        // --- Opción B: heurística afinada para auto-reprompt
+        const decision = decideAutoReprompt({
+          fullText: r1.fullText,
+          userText,
+          messageCountInRun: r1.messagesCount,
+          alreadyRepromptedInThisRequest: false,
+        });
 
-        if (shouldReprompt) {
-          slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-          // Enviar "?" oculto en el MISMO hilo
-          await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
+        slog('auto.reprompt.decision', {
+          threadId: tid,
+          ok: decision.ok,
+          reason: decision.reason,
+          r1Len: r1.fullText.length,
+          r1Msgs: r1.messagesCount,
+        });
+
+        if (decision.ok) {
+          const content = decision.langHint ? `?${decision.langHint}` : '?';
+          await client.beta.threads.messages.create(tid, { role: 'user', content });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
           // ---- Run 2
-          await runOnceWithStream(tid, send);
+          const r2 = await runOnceWithStream(tid, send);
+
+          // Log D: resumen de ambos runs
+          slog('runs.summary', {
+            threadId: tid,
+            r1: {
+              msgs: r1.messagesCount,
+              meta: r1.messagesMeta.map((m) => ({
+                order: m.order,
+                hadFence: m.hadFence,
+                fenceTypes: m.fenceTypes,
+                textLen: m.textLen,
+              })),
+            },
+            r2: {
+              msgs: r2.messagesCount,
+              meta: r2.messagesMeta.map((m) => ({
+                order: m.order,
+                hadFence: m.hadFence,
+                fenceTypes: m.fenceTypes,
+                textLen: m.textLen,
+              })),
+            },
+          });
         }
 
+        // Opción A: emitir 'done' **solo una vez**, al final del pipeline
         send('done', {});
         controller.close();
       } catch (e: any) {
