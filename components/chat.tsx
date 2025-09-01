@@ -1,205 +1,400 @@
-// components/Chat.tsx
 'use client';
 
-import React, { useMemo, useRef, useState } from 'react';
-import { streamChat } from '@/lib/streamChat';
+import { useEffect, useRef, useState } from 'react';
+import Messages from './messages';
+import type { ChatMessage } from '@/lib/types';
 
-type Msg = { id: string; role: 'user' | 'assistant'; text: string };
-type Itinerary = any; // ajusta si tienes un tipo estable
+const THREAD_KEY = 'cv_thread_id_session';
+
+function ulog(event: string, meta: any = {}) {
+  try {
+    console.debug('[CV][ui]', event, meta);
+  } catch {}
+}
+
+// ---------- Helpers de extracción (respaldos para cv:kommo en texto) ----------
+function extractBalancedJson(src: string, startIdx: number): string | null {
+  let inString = false, escape = false, depth = 0, first = -1;
+  for (let i = startIdx; i < src.length; i++) {
+    const ch = src[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') { inString = false; continue; }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
+    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
+  }
+  return null;
+}
+
+function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any }> {
+  const blocks: Array<{ raw: string; json: any }> = [];
+  if (!text) return blocks;
+
+  // Fence completa
+  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = rxFence.exec(text))) {
+    const candidate = (m[1] || '').trim();
+    try {
+      const json = JSON.parse(candidate);
+      if (json && Array.isArray(json.ops)) blocks.push({ raw: candidate, json });
+    } catch {}
+  }
+  if (blocks.length) return blocks;
+
+  // Fallback: fence sin cerrar pero JSON balanceado
+  const at = text.toLowerCase().indexOf('```cv:kommo');
+  if (at >= 0) {
+    const openBrace = text.indexOf('{', at);
+    if (openBrace >= 0) {
+      const jsonSlice = extractBalancedJson(text, openBrace);
+      if (jsonSlice) {
+        try {
+          const json = JSON.parse(jsonSlice);
+          if (json && Array.isArray(json.ops)) blocks.push({ raw: jsonSlice, json });
+        } catch {}
+      }
+    }
+  }
+  return blocks;
+}
 
 export default function Chat() {
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [itineraries, setItineraries] = useState<Itinerary[]>([]);
-  const [typing, setTyping] = useState(false);
-  const [threadId, setThreadId] = useState<string | undefined>(undefined);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
-  const addUser = (text: string) =>
-    setMessages((m) => [...m, { id: crypto.randomUUID(), role: 'user', text }]);
+  const threadIdRef = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
 
-  const addAssistantDraft = () => {
-    const id = crypto.randomUUID();
-    setMessages((m) => [...m, { id, role: 'assistant', text: '' }]);
-    return id;
+  // evita duplicados de Kommo por contenido
+  const kommoHashesRef = useRef<Set<string>>(new Set());
+
+  // manejar múltiples mensajes del assistant en un mismo run
+  const runFinalsCountRef = useRef<number>(0);
+  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje "en curso"
+
+  // altura dinámica del composer
+  const [composerH, setComposerH] = useState<number>(84);
+
+  // auto-scroll: solo en NUEVO mensaje
+  const lastMsgIdRef = useRef<string | null>(null);
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const scroller = listRef.current;
+    if (!scroller) return;
+    endRef.current?.scrollIntoView({ behavior, block: 'end' });
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  const appendToAssistant = (id: string, chunk: string) =>
-    setMessages((m) =>
-      m.map((msg) => (msg.id === id ? { ...msg, text: msg.text + chunk } : msg))
-    );
+  // restaurar thread
+  useEffect(() => {
+    try {
+      const ss = window.sessionStorage.getItem(THREAD_KEY);
+      if (ss) {
+        threadIdRef.current = ss;
+        ulog('thread.restore', { threadId: ss });
+      }
+    } catch {}
+  }, []);
 
-  const replaceAssistant = (id: string, text: string) =>
-    setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text } : msg)));
-
-  const send = async (text: string) => {
-    if (!text.trim()) return;
-    addUser(text);
-
-    let draftId: string | null = null;
-    setTyping(true);
-
-    await streamChat({
-      endpoint: `/api/chat${threadId ? `?threadId=${threadId}` : ''}`,
-      body: { message: text, threadId },
-      handlers: {
-        onStartDraft: () => {
-          draftId = addAssistantDraft();
-        },
-        onTextDelta: (chunk) => {
-          if (draftId) appendToAssistant(draftId, chunk);
-        },
-        onFinal: ({ text: cleaned, blocks, extractedJson }) => {
-          // Asegura bubble final
-          if (!draftId) draftId = addAssistantDraft();
-          replaceAssistant(draftId!, cleaned);
-
-          // Captura blocks del backend (si vienen)
-          const fromBlocks = (blocks || [])
-            .filter((b) => b && typeof b === 'object' && 'json' in b)
-            .map((b: any) => b.json);
-
-          const toAdd: any[] = [];
-          if (fromBlocks.length) toAdd.push(...fromBlocks);
-          if (extractedJson) toAdd.push(extractedJson);
-
-          if (toAdd.length) {
-            setItineraries((arr) => [...arr, ...toAdd]);
-          }
-        },
-        onError: (err) => {
-          console.error('stream error', err);
-          if (!draftId) draftId = addAssistantDraft();
-          replaceAssistant(
-            draftId!,
-            'Uy, hubo un problema procesando la respuesta. ¿Probamos de nuevo?'
-          );
-        },
-        onDone: () => setTyping(false),
-      },
+  // medir composer
+  useEffect(() => {
+    if (!composerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = Math.ceil(entries[0].contentRect.height);
+      if (h && h !== composerH) setComposerH(h);
     });
-  };
+    ro.observe(composerRef.current);
+    return () => ro.disconnect();
+  }, [composerH]);
 
-  const onSubmit = (e: React.FormEvent) => {
+  // auto-scroll en nuevo mensaje
+  useEffect(() => {
+    const last = messages[messages.length - 1]?.id;
+    if (!last) return;
+    if (lastMsgIdRef.current !== last) {
+      lastMsgIdRef.current = last;
+      requestAnimationFrame(() => scrollToBottom('smooth'));
+    }
+  }, [messages]);
+
+  // --- despacho a Kommo ---
+  function dispatchKommoOps(ops: any[], rawKey: string) {
+    const key = 'k_' + rawKey.slice(0, 40);
+    if (kommoHashesRef.current.has(key)) return;
+    kommoHashesRef.current.add(key);
+    fetch('/api/kommo/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ops, threadId: threadIdRef.current }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  // crea un mensaje placeholder con “…” (typing)
+  function ensureTypingPlaceholder(): string {
+    const id = `a_typing_${Date.now()}`;
+    const placeholder: ChatMessage = {
+      id,
+      role: 'assistant',
+      parts: [{ type: 'text', text: '…' }] as any,
+      createdAt: new Date().toISOString(),
+    } as any;
+    setMessages((prev) => [...prev, placeholder]);
+    return id;
+  }
+
+  async function handleStream(userText: string) {
+    setIsLoading(true);
+    runFinalsCountRef.current = 0;
+    activeAssistantIdRef.current = null;
+
+    try {
+      const res = await fetch('/api/chat?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: { role: 'user', parts: [{ type: 'text', text: userText }] },
+          threadId: threadIdRef.current,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.body) throw new Error('Stream no soportado.');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let fullText = ''; // acumulado del mensaje “en curso”
+
+      // typing placeholder desde el arranque
+      let typingId = ensureTypingPlaceholder();
+      activeAssistantIdRef.current = typingId;
+
+      // helpers para escribir en el mensaje ACTIVO (placeholder o el último)
+      const applyText = (chunk: string, replace = false) => {
+        setMessages((prev) => {
+          const next = [...prev];
+          const aid = activeAssistantIdRef.current;
+          const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
+          if (idx >= 0) {
+            const curr = next[idx] as any;
+            const before = curr.parts?.[0]?.text ?? '';
+            curr.parts = [{ type: 'text', text: replace ? chunk : before + chunk }];
+            next[idx] = curr;
+          }
+          return next;
+        });
+      };
+
+      // intenta despachar Kommo si ya llegó un bloque (en delta/final)
+      const maybeDispatchKommo = () => {
+        const blocks = extractKommoBlocksFromText(fullText);
+        for (const b of blocks) {
+          try {
+            if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
+              dispatchKommoOps(b.json.ops, b.raw);
+            }
+          } catch {}
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+
+        for (const ev of events) {
+          const lines = ev.split('\n');
+          const event = (lines.find((l) => l.startsWith('event:')) || '')
+            .replace('event:', '')
+            .trim();
+          const dataLine = (lines.find((l) => l.startsWith('data:')) || '')
+            .replace('data:', '')
+            .trim();
+          if (!event) continue;
+
+          if (event === 'meta') {
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              if (data?.threadId) {
+                threadIdRef.current = data.threadId;
+                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
+              }
+            } catch {}
+          } else if (event === 'kommo') {
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              const ops = Array.isArray(data?.ops) ? data.ops : [];
+              ulog('sse.kommo', { count: ops.length });
+              if (ops.length) {
+                const rawKey = JSON.stringify(ops).slice(0, 40);
+                dispatchKommoOps(ops, rawKey);
+              }
+            } catch {}
+            continue;
+          } else if (event === 'delta') {
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              if (typeof data?.value === 'string' && data.value.length) {
+                if (fullText.length === 0) {
+                  // primer delta: limpia el “…”
+                  applyText('', true);
+                }
+                fullText += data.value;
+                applyText(data.value);
+                maybeDispatchKommo();
+              }
+            } catch {}
+          } else if (event === 'final') {
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              if (typeof data?.text === 'string') {
+                const text = data.text;
+
+                // ¿incluye bloque visible?
+                const hasBlock = /```cv:(itinerary|quote)\b/.test(text);
+
+                // reinicia buffer para el siguiente mensaje potencial
+                fullText = '';
+
+                if (runFinalsCountRef.current === 0) {
+                  // Reemplaza el primer typing por el texto final corto
+                  applyText(text, true);
+
+                  // Si NO hay bloque visible, dejamos un 2º placeholder “pensando…”
+                  if (!hasBlock) {
+                    const id2 = ensureTypingPlaceholder();
+                    activeAssistantIdRef.current = id2;
+                  }
+                } else {
+                  // Final adicional → NUEVO mensaje
+                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                  const newMsg: ChatMessage = {
+                    id,
+                    role: 'assistant',
+                    parts: [{ type: 'text', text }] as any,
+                    createdAt: new Date().toISOString(),
+                  } as any;
+                  setMessages((prev) => [...prev, newMsg]);
+                  activeAssistantIdRef.current = id;
+                }
+
+                runFinalsCountRef.current += 1;
+
+                // Despacho Kommo si vino en este final
+                const blocks = extractKommoBlocksFromText(text);
+                for (const b of blocks) {
+                  try {
+                    if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
+                      dispatchKommoOps(b.json.ops, b.raw);
+                    }
+                  } catch {}
+                }
+              }
+            } catch {}
+          } else if (event === 'done' || event === 'error') {
+            setIsLoading(false);
+            // Limpia cualquier placeholder “…” sobrante
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex(
+                (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
+              );
+              if (idx >= 0) next.splice(idx, 1);
+              return next;
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[CV][chat] stream error', err);
+      setIsLoading(false);
+      setMessages((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex(
+          (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
+        );
+        if (idx >= 0) {
+          (next[idx] as any).parts = [
+            { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
+          ];
+        }
+        return next;
+      });
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const val = inputRef.current?.value ?? '';
-    inputRef.current!.value = '';
-    send(val);
-  };
+    const text = input.trim();
+    if (!text || isLoading) return;
 
-  const showThread = useMemo(
-    () =>
-      messages.map((m) => (
-        <div
-          key={m.id}
-          className={`mb-2 max-w-[85%] rounded-2xl px-3 py-2 ${
-            m.role === 'user'
-              ? 'self-end bg-amber-500/20 text-amber-100'
-              : 'self-start bg-neutral-800 text-neutral-100'
-          }`}
-        >
-          {m.text}
-        </div>
-      )),
-    [messages]
-  );
+    const userId = `u_${Date.now()}`;
+
+    const userMsg: ChatMessage = {
+      id: userId,
+      role: 'user',
+      parts: [{ type: 'text', text }] as any,
+      createdAt: new Date().toISOString(),
+    } as any;
+
+    setMessages((prev) => [...prev, userMsg]);
+    setInput('');
+    await handleStream(text);
+  };
 
   return (
-    <div className="flex h-dvh w-full flex-col items-stretch bg-black/95 p-4">
-      <div className="mx-auto w-full max-w-2xl flex-1 overflow-y-auto rounded-2xl bg-black/40 p-4">
-        <div className="flex flex-col">{showThread}</div>
-
-        {/* Render de itinerarios extraídos del JSON (no mostramos el JSON crudo) */}
-        {itineraries.map((it, i) => (
-          <ItineraryCard key={i} data={it} />
-        ))}
-
-        {typing && <TypingDots className="mt-2" />}
+    <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
+      {/* lista scrolleable */}
+      <div
+        ref={listRef}
+        className="flex-1 overflow-y-auto"
+        style={{ paddingBottom: `${composerH + 24}px` }}
+      >
+        <div className="mx-auto max-w-3xl w-full px-4">
+          <Messages
+            messages={messages}
+            isLoading={isLoading}
+            setMessages={({ messages }) => setMessages(messages)}
+            regenerate={async () => {}}
+          />
+          <div ref={endRef} />
+        </div>
       </div>
 
-      <form onSubmit={onSubmit} className="mx-auto mt-3 flex w-full max-w-2xl gap-2">
-        <input
-          ref={inputRef}
-          className="flex-1 rounded-full bg-neutral-900 px-4 py-3 text-neutral-100 outline-none placeholder:text-neutral-500"
-          placeholder="Escribe tu mensaje…"
-        />
-        <button
-          type="submit"
-          className="rounded-full bg-amber-500 px-5 py-3 font-medium text-black hover:bg-amber-400"
-        >
-          ➤
-        </button>
+      {/* composer */}
+      <form
+        ref={composerRef}
+        onSubmit={handleSubmit}
+        className="sticky bottom-0 left-0 right-0 w-full bg-background/70 backdrop-blur"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
+        <div className="mx-auto max-w-3xl flex items-center gap-2 px-3 py-4">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Escribe tu mensaje…"
+            className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
+          />
+          <button
+            type="submit"
+            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
+            aria-label="Enviar"
+          >
+            ➤
+          </button>
+        </div>
       </form>
     </div>
   );
-}
-
-/** Indicador de “pensando…” independiente del bubble */
-function TypingDots({ className = '' }: { className?: string }) {
-  return (
-    <div className={`flex items-center gap-1 text-neutral-400 ${className}`}>
-      <Dot /> <Dot delay="150ms" /> <Dot delay="300ms" />
-    </div>
-  );
-}
-
-function Dot({ delay = '0ms' }: { delay?: string }) {
-  return (
-    <span
-      className="inline-block h-2 w-2 animate-bounce rounded-full bg-neutral-600"
-      style={{ animationDelay: delay }}
-    />
-  );
-}
-
-/** Vista simple para itinerarios; adapta a tu estructura si es distinta */
-function ItineraryCard({ data }: { data: any }) {
-  // Intentamos detectar estructura común: { days: [{ title, description, ... }] }
-  const days: any[] =
-    Array.isArray(data?.days) ? data.days : Array.isArray(data) ? data : [];
-
-  return (
-    <div className="mt-3 rounded-2xl border border-neutral-800 bg-neutral-900 p-4 text-neutral-100">
-      <div className="mb-2 text-sm uppercase tracking-wide text-neutral-400">
-        Itinerario
-      </div>
-
-      {days.length ? (
-        <ol className="space-y-2">
-          {days.map((d: any, idx: number) => (
-            <li key={idx} className="rounded-xl bg-black/30 p-3">
-              <div className="font-semibold">Día {idx + 1}{d?.title ? ` · ${d.title}` : ''}</div>
-              {d?.description && (
-                <div className="text-neutral-300">{d.description}</div>
-              )}
-              {Array.isArray(d?.activities) && d.activities.length > 0 && (
-                <ul className="mt-1 list-disc pl-5 text-neutral-300">
-                  {d.activities.map((a: any, i: number) => (
-                    <li key={i}>
-                      {a.time ? `[${a.time}] ` : ''}
-                      {a.name || a.title || a.description || JSON.stringify(a)}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <pre className="whitespace-pre-wrap break-words text-neutral-300">
-          {/* Si la estructura es otra, mostramos un resumen amigable */}
-          {summarizeUnknown(data)}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function summarizeUnknown(obj: any) {
-  try {
-    // Muestra solo los 800 primeros caracteres para evitar “paredes de texto”
-    const s = JSON.stringify(obj, null, 2);
-    return s.length > 800 ? s.slice(0, 800) + '…' : s;
-  } catch {
-    return String(obj);
-  }
 }
