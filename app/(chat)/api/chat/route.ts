@@ -7,27 +7,17 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-/** ----------------- logging (compacto) ----------------- */
+// ---------- Logs (una sola salida para Vercel) ----------
 function log(event: string, meta: Record<string, any> = {}) {
   try { console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta })); } catch {}
 }
 
-/** ----------------- SSE helpers ----------------- */
-const sse = (event: string, data: any) => `event:${event}\n` + `data:${JSON.stringify(data)}\n\n`;
-
-/** ----------------- text helpers ----------------- */
-function extractDeltaTextFromEvent(e: any): string {
-  try {
-    const arr = e?.data?.delta?.content;
-    if (!Array.isArray(arr)) return '';
-    let out = '';
-    for (const it of arr) {
-      if (it?.type === 'text' && it?.text?.value) out += it.text.value;
-      if (it?.type === 'output_text' && it?.text?.value) out += it.text.value; // algunos modelos
-    }
-    return out;
-  } catch { return ''; }
+// ---------- SSE helper ----------
+function sse(event: string, data: any) {
+  return `event:${event}\n` + `data:${JSON.stringify(data)}\n\n`;
 }
+
+// ---------- Helpers OpenAI/text ----------
 function flattenAssistantTextFromMessage(m: any): string {
   const out: string[] = [];
   for (const c of (m?.content || [])) {
@@ -36,93 +26,133 @@ function flattenAssistantTextFromMessage(m: any): string {
   return out.join('\n');
 }
 
-// fences: ```cv:itinerary ...``` y ```cv:quote ...```
-const FENCE_RX = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
-type Block = { type: 'itinerary' | 'quote', json: any, raw: string };
-
-function parseBlocksAndClean(text: string): { cleanText: string; blocks: Block[] } {
-  const blocks: Block[] = [];
-  let clean = text || '';
-  // colecta
-  const matches = [...clean.matchAll(FENCE_RX)];
-  for (const m of matches) {
-    const type = (m[1] as 'itinerary' | 'quote');
-    const rawJson = (m[2] || '').trim();
-    let parsed: any = null;
-    try { parsed = JSON.parse(rawJson); } catch { /* si viene incompleto, lo ignoramos */ }
-    if (parsed) blocks.push({ type, json: parsed, raw: m[0] });
-  }
-  // elimina del texto todos los fences
-  clean = clean.replace(FENCE_RX, '').trim();
-  // dedupe por contenido JSON
-  const seen = new Set<string>();
-  const deduped: Block[] = [];
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const key = `${blocks[i].type}:${JSON.stringify(blocks[i].json)}`;
-    if (!seen.has(key)) { seen.add(key); deduped.push(blocks[i]); }
-  }
-  deduped.reverse();
-  return { cleanText: clean, blocks: deduped };
+function extractDeltaTextFromEvent(e: any): string {
+  try {
+    const content = e?.data?.delta?.content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const it of content) {
+        if (it?.type === 'text' && it?.text?.value) parts.push(it.text.value);
+        if (it?.type === 'output_text' && it?.text?.value) parts.push(it.text.value);
+      }
+      return parts.join('');
+    }
+  } catch {}
+  return '';
 }
 
+const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '');
 const WAIT_PATTERNS = [
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i, /déjame preparar/i,
+  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
+  /déjame preparar/i, /deja que.*prepare/i,
   /give me a moment/i, /one moment/i, /hold on/i, /let me.*prepare/i,
   /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
 ];
-const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some(r => r.test(t || ''));
+const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
 
+function findFences(text: string) {
+  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+  const arr: { label: string; json: string; len: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(text || ''))) {
+    const json = (m[2] || '').trim();
+    arr.push({ label: m[1], json, len: json.length });
+  }
+  return arr;
+}
+
+function dedupeVisibleFencesKeepLast(text: string) {
+  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+  const matches: { start: number; end: number; raw: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(text))) matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
+  if (matches.length <= 1) return text;
+
+  const seen = new Set<string>();
+  const keep = new Array(matches.length).fill(false);
+  for (let i = matches.length - 1; i >= 0; i--) {
+    if (!seen.has(matches[i].raw)) { seen.add(matches[i].raw); keep[i] = true; }
+  }
+  let out = '', cursor = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const mm = matches[i];
+    out += text.slice(cursor, mm.start);
+    if (keep[i]) out += mm.raw;
+    cursor = mm.end;
+  }
+  out += text.slice(cursor);
+  log('diag.fence.dedup', { total: matches.length, dropped: matches.length - keep.filter(Boolean).length });
+  return out;
+}
+
+// ---------- Intención del usuario (¿esperamos bloque?) ----------
 const ITINERARY_TRIGGER = /\b(itinerario|plan de viaje|route|hazlo|dale|ok\b|procede|armarlo|listo|sí adelante|si adelante|adelante|go ahead|do it)\b/i;
 const QUOTE_TRIGGER = /\b(cotizaci(?:ón|on)|cotiza|presupuesto|precio|precios|costo|costos|quote|pricing|how much|cu[aá]nto)\b/i;
-const wants = (userText: string) => ({
-  it: ITINERARY_TRIGGER.test(userText || ''),
-  qu: QUOTE_TRIGGER.test(userText || ''),
-});
 
-/** ----------------- run (buffered) ----------------- */
-async function runBuffered(
+function userExpectsBlock(userText: string): { wantsItinerary: boolean; wantsQuote: boolean } {
+  const t = (userText || '').toLowerCase();
+  return {
+    wantsItinerary: ITINERARY_TRIGGER.test(t),
+    wantsQuote: QUOTE_TRIGGER.test(t),
+  };
+}
+
+// ---------- Run (single) ----------
+async function runOnceWithStream(
   threadId: string,
   send: (event: string, data: any) => void,
-): Promise<{ text: string; blocks: Block[]; sawText: boolean }> {
-
-  let bufText = '';
-  let accBlocks: Block[] = [];
+): Promise<{ fullText: string; sawText: boolean }> {
+  let fullText = '';
+  let finalEmitted = false;
   let runId: string | null = null;
-  let chars = 0;
-  let sawText = false;
+  const seen = { text: false, deltaChars: 0 };
 
   const stream: any = await client.beta.threads.runs.createAndStream(threadId, { assistant_id: ASSISTANT_ID });
 
   stream.on('event', (e: any) => {
-    const ev = e?.event as string;
+    const type = e?.event as string;
 
-    if (ev === 'thread.run.created') {
+    if (type === 'thread.run.created') {
       runId = e?.data?.id ?? null;
       log('run.created', { runId, threadId });
       return;
     }
 
-    if (ev === 'thread.message.delta') {
-      const d = extractDeltaTextFromEvent(e);
-      if (d) {
-        bufText += d;
-        chars += d.length;
-        sawText = true;
-        if (chars % 800 === 0) log('stream.delta.tick', { runId, threadId, deltaChars: chars });
+    if (type === 'thread.message.delta') {
+      const delta = extractDeltaTextFromEvent(e);
+      if (delta) {
+        seen.text = true;
+        seen.deltaChars += delta.length;
+        fullText += delta;
+        send('delta', { value: delta });
+        if (seen.deltaChars % 300 === 0) log('stream.delta.tick', { runId, threadId, deltaChars: seen.deltaChars });
       }
       return;
     }
 
-    if (ev === 'thread.message.completed') {
-      // asegura recoger texto que venga en el "completed"
+    if (type === 'thread.message.completed') {
       const add = flattenAssistantTextFromMessage(e?.data);
-      if (add) { bufText += add; sawText = true; }
+      if (add) {
+        seen.text = true;
+        fullText += add;
+
+        const finalText = dedupeVisibleFencesKeepLast(fullText);
+        const fences = findFences(finalText);
+        log('message.completed', {
+          runId, threadId,
+          textLen: finalText.length,
+          fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
+          hasVisibleBlock: hasVisibleBlock(finalText),
+        });
+
+        send('final', { text: finalText });
+        finalEmitted = true;
+      }
       return;
     }
 
-    if (ev === 'thread.run.failed') {
-      // dejamos que el flujo cierre; afuera enviaremos un "final" con lo que haya
+    if (type === 'thread.run.failed') {
       log('stream.error', { runId, threadId, error: 'run_failed' });
       send('error', { error: 'run_failed' });
       return;
@@ -130,43 +160,35 @@ async function runBuffered(
   });
 
   await new Promise<void>((resolve) => {
-    stream.on('end', resolve);
-    stream.on('error', (err: any) => {
-      log('exception.stream', { runId, threadId, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
-      resolve();
+    stream.on('end', () => { log('stream.end', { runId, threadId, deltaChars: seen.deltaChars, sawText: seen.text }); resolve(); });
+    stream.on('error', (err: any) => { log('exception.stream', { runId, threadId, error: String(err?.message || err) }); send('error', { error: String(err?.message || err) }); resolve(); });
+  });
+
+  if (!finalEmitted && seen.text && fullText) {
+    const finalText = dedupeVisibleFencesKeepLast(fullText);
+    const fences = findFences(finalText);
+    log('message.completed.synthetic', {
+      threadId, textLen: finalText.length,
+      fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
+      hasVisibleBlock: hasVisibleBlock(finalText),
     });
-  });
+    send('final', { text: finalText });
+  }
 
-  // al terminar el stream, parseamos y limpiamos
-  const { cleanText, blocks } = parseBlocksAndClean(bufText);
-  accBlocks = blocks;
-
-  // log compacto del final
-  log('message.completed', {
-    runId, threadId,
-    textLen: cleanText.length,
-    blocks: accBlocks.map(b => ({ type: b.type, keys: Object.keys(b.json || {}).slice(0, 6) })),
-  });
-
-  // emitimos el único "final" de este run
-  send('final', { text: cleanText, blocks: accBlocks });
-
-  return { text: cleanText, blocks: accBlocks, sawText };
+  return { fullText, sawText: seen.text };
 }
 
-/** ----------------- route ----------------- */
+// ---------- Route ----------
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const queryTid = req.nextUrl.searchParams.get('threadId') || '';
   const bodyTid = body?.threadId || '';
-  const userText = typeof body?.message === 'string'
-    ? body.message
-    : (body?.message?.parts?.[0]?.text || '');
+  const msg = body?.message;
 
+  const userText = typeof msg === 'string' ? msg : (msg?.parts?.[0]?.text || '');
   log('request.in', { hasThreadId: !!(queryTid || bodyTid), userTextLen: (userText || '').length });
 
-  // thread
+  // Thread
   let threadId = String(queryTid || bodyTid || '');
   if (!threadId) {
     const t = await client.beta.threads.create();
@@ -176,7 +198,7 @@ export async function POST(req: NextRequest) {
     log('thread.reuse', { threadId });
   }
 
-  // append user message
+  // Append user message
   await client.beta.threads.messages.create(threadId, { role: 'user', content: userText });
   log('message.append.ok', { threadId });
 
@@ -184,46 +206,63 @@ export async function POST(req: NextRequest) {
 
   const rs = new ReadableStream({
     async start(controller) {
+      let lastFenceKey: string | null = null;
+
       const send = (event: string, data: any) => {
-        // sólo logeamos eventos relevantes para no llenar logs
-        if (event === 'final') {
+        if (event === 'final' && data && typeof data.text === 'string') {
+          const fences = findFences(data.text);
+          if (fences.length) {
+            const key = `${fences[0].label}|${fences[0].json}`;
+            if (lastFenceKey === key) { log('final.skip.dup', { threadId }); return; }
+            lastFenceKey = key;
+          }
           log('final.emit', {
             threadId,
-            textLen: (data?.text || '').length,
-            blocks: (data?.blocks || []).map((b: any) => ({ type: b.type })),
+            textLen: data.text.length,
+            fences: fences.map(f => ({ label: f.label, len: f.len, preview: f.json.slice(0, 160) })),
+            hasVisibleBlock: hasVisibleBlock(data.text),
           });
-        } else if (event === 'error' || event === 'done' || event === 'meta') {
-          log(event, { keys: Object.keys(data || {}) });
+        } else {
+          log('sse.emit', { event, keys: Object.keys(data || {}) });
         }
         controller.enqueue(encoder.encode(sse(event, data)));
       };
 
-      // meta + “pensando”
+      // meta
       send('meta', { threadId });
-      // si quieres un heartbeat visual, déjalo; no logea
-      const hb = setInterval(() => controller.enqueue(encoder.encode(sse('hb', { t: Date.now() }))), 8000);
+
+      // Heartbeat
+      const hb = setInterval(() => {
+        try { controller.enqueue(encoder.encode(sse('hb', { t: Date.now() }))); } catch {}
+      }, 8000);
 
       try {
-        // run 1 (buffered)
-        const r1 = await runBuffered(threadId, send);
+        // Run 1
+        const r1 = await runOnceWithStream(threadId, send);
 
-        const intent = wants(userText.toLowerCase());
-        const expectedBlock = intent.it || intent.qu;
-        const gotBlock = (r1.blocks || []).length > 0;
-        const promised = hasWaitPhrase(r1.text);
+        // ¿El usuario esperaba bloque?
+        const intent = userExpectsBlock(userText);
+        const expectedBlock = intent.wantsItinerary || intent.wantsQuote;
 
-        const needReprompt = (!gotBlock && (expectedBlock || promised));
+        // Decisión de reprompt:
+        // - Reprompt si SE ESPERABA bloque y no llegó bloque visible
+        // - O si el assistant prometió generar algo (frase de espera) y no llegó bloque
+        const needReprompt =
+          (!hasVisibleBlock(r1.fullText) && (expectedBlock || hasWaitPhrase(r1.fullText)));
 
         if (needReprompt) {
           log('auto.reprompt', { reason: expectedBlock ? 'expected-block-missing' : 'wait-no-block', threadId });
           await client.beta.threads.messages.create(threadId, { role: 'user', content: '?' });
           log('message.append.ok', { threadId, info: 'auto-?' });
 
-          const r2 = await runBuffered(threadId, send);
+          // Run 2
+          const r2 = await runOnceWithStream(threadId, send);
+
           if (!r2.sawText) {
+            log('auto.reprompt.retry', { reason: 'r2-no-text', threadId });
             await client.beta.threads.messages.create(threadId, { role: 'user', content: 'continua' });
             log('message.append.ok', { threadId, info: 'auto-continue' });
-            await runBuffered(threadId, send);
+            await runOnceWithStream(threadId, send);
           }
         } else {
           log('auto.reprompt.skip', { reason: 'no-need', threadId });
