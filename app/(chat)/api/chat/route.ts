@@ -1,203 +1,173 @@
-// app/(chat)/api/chat/route.ts
-import { NextRequest } from 'next/server';
+import 'server-only';
 import OpenAI from 'openai';
+import type { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
 
-// ---------- Logger mínimo ----------
-function log(event: string, data: Record<string, unknown> = {}) {
-  try { console.log(JSON.stringify({ tag: "[CV][server]", event, ...data })); } catch {}
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
+
+// ---------------------------- utils SSE ------------------------------------
+
+function sse(event: string, data?: unknown) {
+  return `event: ${event}\n` + (data !== undefined ? `data: ${JSON.stringify(data)}\n` : '') + `\n`;
 }
 
-// ---------- OpenAI ----------
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
-
-// ---------- Utilería de fences (sólo diagnóstico, no afecta UI) ----------
-type Fence = { type: string; raw: string; hash: string };
-const fenceRegex = /```([a-zA-Z0-9_-]*)(?:\s+[\w-]+)?\s*\n([\s\S]*?)\n```/g;
-function extractFences(text: string): Fence[] {
-  const out: Fence[] = [];
+function findFences(src: string) {
+  const fences: Array<{ label: string; json: string }> = [];
+  // nuestros fences principales
+  const re = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
-  while ((m = fenceRegex.exec(text)) !== null) {
-    const lang = (m[1] || "").trim().toLowerCase();
-    const body = (m[2] || "").trim();
-    const hash = Array.from(new TextEncoder().encode(body))
-      .reduce((a, b) => ((a << 5) - a + b) | 0, 0)
-      .toString(16);
-    out.push({ type: lang || "code", raw: body, hash });
+  while ((m = re.exec(src))) fences.push({ label: m[1], json: m[2].trim() });
+
+  // tolerancia a ```json
+  const reJson = /```json\s*([\s\S]*?)```/g;
+  while ((m = reJson.exec(src))) fences.push({ label: 'json', json: m[1].trim() });
+
+  return fences;
+}
+
+// extrae texto robustamente de un evento message.* del SDK
+function extractTextFromMessageContent(content: any[]): string {
+  if (!Array.isArray(content)) return '';
+  let out = '';
+  for (const part of content) {
+    // formatos posibles según el tipo de evento
+    // completed => { type: 'output_text', text: { value } }
+    // delta     => { type: 'output_text', text: { value } }  ó  { type: 'output_text.delta', text: { value } }
+    // fallback  => { type: 'text', text: { value } } ó { type:'text', text:'...' }
+    const val =
+      part?.text?.value ??
+      part?.delta?.text?.value ??
+      (typeof part?.text === 'string' ? part.text : '');
+    if (typeof val === 'string') out += val;
   }
   return out;
 }
 
-// ---------- SSE helpers ----------
-function encodeSSE(line: string) { return new TextEncoder().encode(line); }
-function sseJSON(event: string, payload: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(payload)}\n\n`;
-}
-
-// ---------- Helpers de thread ----------
-async function ensureThreadId(threadId?: string | null) {
-  if (threadId) { log("thread.reuse", { threadId }); return threadId; }
-  const t = await client.beta.threads.create();
-  log("thread.created", { threadId: t.id });
-  return t.id;
-}
+// ---------------------------- route ----------------------------------------
 
 export async function POST(req: NextRequest) {
-  let body: any;
-  try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
-  const rawText = (body?.text ?? "").toString();
-  const userText = rawText.trim();
-  const incomingThreadId: string | null = body?.threadId ?? null;
+  const { message, threadId: incomingThreadId } = await req.json();
 
-  log("request.in", { hasThreadId: !!incomingThreadId, userTextLen: userText.length });
+  const encoder = new TextEncoder();
 
-  // ✅ GUARD: NO RUN si el texto viene vacío (bootstrap/ping)
-  if (userText.length === 0) {
-    const rs = new ReadableStream({
-      start(controller) {
-        log("skip.append.empty", { reason: "bootstrap/ping" });
-        controller.enqueue(encodeSSE(sseJSON("info", { bootstrap: true })));
-        controller.enqueue(encodeSSE(sseJSON("done", { ok: true })));
-        controller.close();
-      }
-    });
-    return new Response(rs, {
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-      },
-    });
-  }
-
-  const threadId = await ensureThreadId(incomingThreadId);
-  await client.beta.threads.messages.create(threadId, { role: "user", content: userText });
-  log("message.append.ok", { threadId });
-
-  const rs = new ReadableStream({
+  const streamBody = new ReadableStream({
     async start(controller) {
-      const send = (event: string, data: any) => controller.enqueue(encodeSSE(sseJSON(event, data)));
+      const write = (event: string, data?: unknown) => {
+        controller.enqueue(encoder.encode(sse(event, data)));
+      };
 
-      let full = "";
-      let deltaChars = 0;
-      let fenceSeenInDelta = false;
-      const fenceHashes = new Set<string>();
-      const fenceTypes  = new Set<string>();
-      let currentRunId: string | undefined;
+      let threadId = incomingThreadId as string | undefined;
+      let closed = false;
+      const safeClose = () => {
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
+      };
 
       try {
-        // ✅ Iterador asíncrono tipado (sin .on(...))
-        const stream = await client.beta.threads.runs.stream(threadId, { assistant_id: ASSISTANT_ID });
+        if (!client.apiKey) throw new Error('Missing OPENAI_API_KEY');
+        if (!process.env.OPENAI_ASSISTANT_ID) throw new Error('Missing OPENAI_ASSISTANT_ID');
 
-        for await (const event of stream) {
-          const ev = event.event; // string como 'thread.message.delta'
-          const data: any = event.data;
+        // crear thread si hace falta
+        if (!threadId) {
+          const thread = await client.beta.threads.create();
+          threadId = thread.id;
+          write('meta', { threadId });
+        }
 
-          switch (ev) {
-            case "thread.run.created": {
-              currentRunId = data?.id;
-              log("run.created", { runId: currentRunId, threadId });
-              break;
-            }
+        // agregar mensaje del usuario
+        await client.beta.threads.messages.create(threadId!, {
+          role: 'user',
+          content: message?.content ?? (typeof message === 'string' ? message : ''),
+        });
 
-            case "thread.message.delta": {
-              const parts = data?.delta?.content ?? [];
-              for (const p of parts) {
-                if (p.type === "text_delta" || p.type === "output_text_delta") {
-                  const chunk = p.text?.value ?? p.value ?? "";
-                  if (!chunk) continue;
-                  full += chunk;
-                  deltaChars += chunk.length;
-                  if (deltaChars % 600 < chunk.length) {
-                    log("stream.delta.tick", { deltaChars, runId: currentRunId, threadId });
-                  }
-                  // Fences en delta (diagnóstico)
-                  const fences = extractFences(chunk);
-                  if (fences.length) {
-                    fenceSeenInDelta = true;
-                    fences.forEach(f => { fenceHashes.add(f.hash); fenceTypes.add(f.type); });
-                    log("diag.fence.delta", {
-                      count: fences.length,
-                      types: fences.map(f => f.type),
-                      hashes: fences.map(f => f.hash),
-                    });
-                  }
-                  // Mantener protocolo SSE
-                  send("delta", { value: chunk });
-                }
-              }
-              break;
-            }
+        // lanzar run con streaming de eventos
+        const runStream = await client.beta.threads.runs.stream(threadId!, {
+          assistant_id: process.env.OPENAI_ASSISTANT_ID!,
+          instructions:
+            'Cuando devuelvas un itinerario o una cotización, incluye un bloque de código con ```cv:itinerary``` o ```cv:quote``` que contenga SOLO JSON válido. No repitas ese JSON fuera del bloque.',
+        });
 
-            case "thread.run.step.completed": {
-              const step = data;
-              const details = step?.step_details;
-              if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
-                for (const tc of details.tool_calls) {
-                  if (tc?.type === "function" && tc.function?.name === "emit_itinerary") {
-                    try {
-                      const args = JSON.parse(tc.function.arguments ?? "{}");
-                      if (args?.title && Array.isArray(args?.days)) {
-                        send("itinerary", { payload: args });
-                      }
-                    } catch {}
-                  }
-                }
-              }
-              break;
-            }
+        let currentMessageText = '';
+        let lastDeltaEcho = '';
 
-            case "thread.run.failed": {
-              log("stream.error", { runId: currentRunId, threadId, error: "run_failed" });
-              send("error", { error: "run_failed" });
-              break;
-            }
+        runStream.on('event', (ev: any) => {
+          const type = ev?.event || ev?.type;
+          if (!type) return;
 
-            case "thread.run.completed": {
-              // Fences finales (diagnóstico)
-              const finalFences = extractFences(full);
-              finalFences.forEach(f => { fenceHashes.add(f.hash); fenceTypes.add(f.type); });
-
-              log("diag.fence.final", {
-                fenceCount: finalFences.length,
-                fenceTypes: Array.from(fenceTypes),
-                hashes: Array.from(fenceHashes),
-                unique: Array.from(fenceHashes).length,
-                fenceSeenInDelta,
-              });
-
-              log("message.completed", { fullLen: full.length, kommoOps: 0, runId: currentRunId, threadId });
-              log("stream.end", { deltaChars, sawText: full.length > 0, runId: currentRunId, threadId });
-
-              send("done", { ok: true });
-              controller.close();
-              break;
-            }
-
-            case "error": {
-              log("stream.error", { runId: currentRunId, threadId, error: "stream_error" });
-              send("error", { error: "stream_error" });
-              controller.close();
-              break;
+          // Recibimos deltas de texto
+          if (type === 'thread.message.delta') {
+            const deltaContent = ev?.data?.delta?.content ?? [];
+            const value = extractTextFromMessageContent(deltaContent);
+            if (value && value !== lastDeltaEcho) {
+              lastDeltaEcho = value;
+              currentMessageText += value;
+              write('delta', { value }); // el cliente mantiene el "pensando…"
             }
           }
-        }
-      } catch (e: any) {
-        log("stream.error", { error: "exception", detail: String(e?.message || e) });
-        send("error", { error: String(e?.message || e) });
-        controller.close();
+
+          // Un mensaje del assistant terminó: emitimos un final con el texto completo
+          if (type === 'thread.message.completed') {
+            // priorizamos el texto consolidado que trae el evento
+            const msgContent = ev?.data?.message?.content ?? [];
+            const fullTextFromEvent = extractTextFromMessageContent(msgContent);
+            const fullText = fullTextFromEvent || currentMessageText;
+            currentMessageText = '';
+
+            if (fullText && fullText.trim()) {
+              write('final', {
+                text: fullText,
+                fences: findFences(fullText),
+              });
+            }
+          }
+
+          // Run finalizado con éxito
+          if (type === 'thread.run.completed') {
+            write('done', { ok: true });
+            safeClose();
+          }
+
+          // Errores (fallo del run o paso)
+          if (
+            type === 'thread.run.failed' ||
+            type === 'thread.run.step.failed' ||
+            type === 'error'
+          ) {
+            const msg =
+              ev?.data?.last_error?.message ??
+              ev?.data?.error?.message ??
+              ev?.error ??
+              'Run failed';
+            write('error', { message: msg });
+            write('done', { ok: false });
+            safeClose();
+          }
+        });
+
+        // Esperamos a que termine el stream (método correcto del SDK)
+        await runStream.done();
+
+        // por si no recibimos eventos de cierre explícitos
+        write('done', { ok: true });
+        safeClose();
+      } catch (err: any) {
+        write('error', { message: String(err?.message || err) });
+        write('done', { ok: false });
+        safeClose();
       }
     },
   });
 
-  return new Response(rs, {
+  return new Response(streamBody, {
     headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
     },
   });
 }
