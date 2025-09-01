@@ -5,15 +5,18 @@ import OpenAI from 'openai';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// ---------- Logger mínimo ----------
 function log(event: string, data: Record<string, unknown> = {}) {
   try { console.log(JSON.stringify({ tag: "[CV][server]", event, ...data })); } catch {}
 }
 
+// ---------- OpenAI ----------
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
+// ---------- Utilería de fences (sólo diagnóstico, no afecta UI) ----------
 type Fence = { type: string; raw: string; hash: string };
-const fenceRegex = /```([a-zA-Z0-9_-]*)(?:\\s+[\\w-]+)?\\s*\\n([\\s\\S]*?)\\n```/g;
+const fenceRegex = /```([a-zA-Z0-9_-]*)(?:\s+[\w-]+)?\s*\n([\s\S]*?)\n```/g;
 function extractFences(text: string): Fence[] {
   const out: Fence[] = [];
   let m: RegExpExecArray | null;
@@ -28,11 +31,13 @@ function extractFences(text: string): Fence[] {
   return out;
 }
 
+// ---------- SSE helpers ----------
 function encodeSSE(line: string) { return new TextEncoder().encode(line); }
 function sseJSON(event: string, payload: any) {
-  return `event: ${event}\\n` + `data: ${JSON.stringify(payload)}\\n\\n`;
+  return `event: ${event}\n` + `data: ${JSON.stringify(payload)}\n\n`;
 }
 
+// ---------- Helpers de thread ----------
 async function ensureThreadId(threadId?: string | null) {
   if (threadId) { log("thread.reuse", { threadId }); return threadId; }
   const t = await client.beta.threads.create();
@@ -60,30 +65,37 @@ export async function POST(req: NextRequest) {
       let deltaChars = 0;
       let fenceSeenInDelta = false;
       const fenceHashes = new Set<string>();
-      const fenceTypes = new Set<string>();
+      const fenceTypes  = new Set<string>();
       let currentRunId: string | undefined;
 
       try {
+        // ✅ Iterador asíncrono, sin .on(...). Esto elimina los errores de tipos.
         const stream = await client.beta.threads.runs.stream(threadId, { assistant_id: ASSISTANT_ID });
 
-        for await (const ev of stream) {
-          switch (ev.type) {
-            case "run.created": {
-              currentRunId = ev.data.id;
+        for await (const { event, data } of stream) {
+          switch (event) {
+            case "thread.run.created": {
+              const run = data as any; // tipo Run
+              currentRunId = run?.id;
               log("run.created", { runId: currentRunId, threadId });
               break;
             }
+
             case "thread.message.delta": {
-              const parts = ev.data.delta?.content ?? [];
+              // data: MessageDeltaEvent
+              const md = data as any;
+              const parts = md.delta?.content ?? [];
               for (const p of parts) {
-                if (p.type === "text_delta") {
-                  const chunk = p.text?.value ?? "";
+                // Algunos SDKs muestran 'text_delta', otros 'output_text_delta'
+                if (p.type === "text_delta" || p.type === "output_text_delta") {
+                  const chunk = p.text?.value ?? p.value ?? "";
                   if (!chunk) continue;
                   full += chunk;
                   deltaChars += chunk.length;
                   if (deltaChars % 600 < chunk.length) {
                     log("stream.delta.tick", { deltaChars, runId: currentRunId, threadId });
                   }
+                  // Fences en delta (diagnóstico)
                   const fences = extractFences(chunk);
                   if (fences.length) {
                     fenceSeenInDelta = true;
@@ -94,15 +106,17 @@ export async function POST(req: NextRequest) {
                       hashes: fences.map(f => f.hash),
                     });
                   }
+                  // Mantener protocolo SSE
                   send("delta", { value: chunk });
                 }
               }
               break;
             }
-            case "run.step.completed": {
-              // Si el asistente llamó una función, aparecerá aquí
-              const step = ev.data;
-              const details: any = (step as any).step_details;
+
+            case "thread.run.step.completed": {
+              // data: RunStep (para tool-calls)
+              const step = data as any;
+              const details = step?.step_details;
               if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
                 for (const tc of details.tool_calls) {
                   if (tc?.type === "function" && tc.function?.name === "emit_itinerary") {
@@ -117,14 +131,18 @@ export async function POST(req: NextRequest) {
               }
               break;
             }
-            case "run.failed": {
+
+            case "thread.run.failed": {
               log("stream.error", { runId: currentRunId, threadId, error: "run_failed" });
               send("error", { error: "run_failed" });
               break;
             }
-            case "run.completed": {
+
+            case "thread.run.completed": {
+              // Fences finales (diagnóstico)
               const finalFences = extractFences(full);
               finalFences.forEach(f => { fenceHashes.add(f.hash); fenceTypes.add(f.type); });
+
               log("diag.fence.final", {
                 fenceCount: finalFences.length,
                 fenceTypes: Array.from(fenceTypes),
@@ -132,12 +150,15 @@ export async function POST(req: NextRequest) {
                 unique: Array.from(fenceHashes).length,
                 fenceSeenInDelta,
               });
+
               log("message.completed", { fullLen: full.length, kommoOps: 0, runId: currentRunId, threadId });
               log("stream.end", { deltaChars, sawText: full.length > 0, runId: currentRunId, threadId });
+
               send("done", { ok: true });
               controller.close();
               break;
             }
+
             case "error": {
               log("stream.error", { runId: currentRunId, threadId, error: "stream_error" });
               send("error", { error: "stream_error" });
