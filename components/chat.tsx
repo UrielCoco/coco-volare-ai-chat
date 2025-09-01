@@ -14,40 +14,18 @@ function ulog(event: string, meta: any = {}) {
 
 // ---------- Helpers de extracción (respaldos para cv:kommo en texto) ----------
 function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false,
-    escape = false,
-    depth = 0,
-    first = -1;
+  let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
     const ch = src[i];
     if (inString) {
-      if (escape) {
-        escape = false;
-        continue;
-      }
-      if (ch === '\\') {
-        escape = true;
-        continue;
-      }
-      if (ch === '"') {
-        inString = false;
-        continue;
-      }
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') { inString = false; continue; }
       continue;
     }
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-    if (ch === '{') {
-      if (depth === 0) first = i;
-      depth++;
-      continue;
-    }
-    if (ch === '}') {
-      depth--;
-      if (depth === 0 && first >= 0) return src.slice(first, i + 1);
-    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
+    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
   }
   return null;
 }
@@ -250,9 +228,7 @@ export default function Chat() {
               const data = JSON.parse(dataLine || '{}');
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
-                try {
-                  window.sessionStorage.setItem(THREAD_KEY, data.threadId);
-                } catch {}
+                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
               }
             } catch {}
           } else if (event === 'kommo') {
