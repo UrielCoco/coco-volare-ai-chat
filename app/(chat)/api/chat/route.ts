@@ -14,16 +14,12 @@ type UiMessage = {
 };
 
 function asText(msg?: UiMessage) {
-  if (!msg?.parts?.length) return '';
-  return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
+  if (!msg) return '';
+  const p = msg.parts?.[0]?.text ?? '';
+  return typeof p === 'string' ? p : '';
 }
 
-function sse(event: string, data: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
-}
-
-// ---------- Logs server ----------
-function slog(event: string, meta: Record<string, any> = {}) {
+function ulog(event: string, meta: any = {}) {
   try {
     console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
   } catch {}
@@ -39,178 +35,87 @@ function flattenAssistantTextFromMessage(message: any): string {
   return out.join('\n');
 }
 
-function extractDeltaTextFromEvent(e: any): string {
+function extractDeltaTextFromEventStream(chunk: any): string {
+  const out: string[] = [];
   try {
-    const content = e?.data?.delta?.content;
-    if (Array.isArray(content)) {
-      const parts: string[] = [];
-      for (const item of content) {
-        if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
-        if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
-      }
-      return parts.join('');
+    const items = chunk?.delta?.content || [];
+    for (const it of items) {
+      if (it.type === 'output_text' && it.text) out.push(it.text);
+      if (it.type === 'input_text' && it.text) out.push(it.text);
     }
   } catch {}
-  return '';
+  return out.join('');
 }
 
-// ---------- Detección de “un momento / preparando…” ----------
-const WAIT_PATTERNS = [
-  // ES
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  // EN
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
-  // IT
-  /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
-  // PT
-  /um momento/i, /deixa eu/i, /vou preparar/i, /estou preparando/i,
-  // FR
-  /un instant/i, /laisse(-|\s)?moi/i, /je vais pr[eé]parer/i, /je pr[eé]pare/i,
-  // DE
-  /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
-];
-const hasWaitPhrase = (t: string) => WAIT_PATTERNS.some((rx) => rx.test(t || ''));
-const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '');
-
-// ---------- Extrae ops de bloques ```cv:kommo ...``` ----------
-function extractKommoOps(text: string): Array<any> {
-  const ops: any[] = [];
-  if (!text) return ops;
-  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
-  let m: RegExpExecArray | null;
-  while ((m = rxFence.exec(text))) {
-    try {
-      const json = JSON.parse((m[1] || '').trim());
-      if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {}
-  }
-  return ops;
+function sse(event: string, data: any) {
+  return `data:${JSON.stringify({ event, ...data })}\n\n`;
 }
 
-/**
- * Ejecuta UN run con createAndStream y resuelve cuando termina.
- * Emite: meta/delta/final/kommo + diag.fence.final (para auditoría).
- */
-async function runOnceWithStream(
-  tid: string,
-  send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean; runId: string | null }> {
-  const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
-  const fenceStartRx = /```cv:(itinerary|quote)\b/i;
-  const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+async function runOnceWithStream(threadId: string, send: (e: string, d: any) => void) {
+  const stream = await client.beta.threads.runs.stream(threadId, { assistant_id: ASSISTANT_ID });
 
-  let fullText = '';
-  let runId: string | null = null;
+  let finalText = '';
 
-  const stream: any = await client.beta.threads.runs.createAndStream(tid, {
-    assistant_id: ASSISTANT_ID,
-  });
-
-  stream.on('event', (e: any) => {
-    const type = e?.event as string;
-
-    if (type === 'thread.run.created') {
-      runId = e?.data?.id ?? null;
-      slog('run.created', { runId, threadId: tid });
-      return;
-    }
-
-    if (type === 'thread.message.delta') {
-      const deltaText = extractDeltaTextFromEvent(e);
-      if (deltaText) {
-        saw.text = true;
-        saw.deltaChars += deltaText.length;
-        fullText += deltaText;
-        send('delta', { value: deltaText });
-
-        if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
-          saw.fenceSeenInDelta = true;
+  return await new Promise<{ finalText: string }>((resolve, reject) => {
+    stream
+      // Deltas de texto “puros” (este sí existe tipado)
+      .on('textDelta', (delta: { value?: string }) => {
+        if (delta?.value) send('delta', { value: delta.value });
+      })
+      // Evento genérico para cubrir TODAS las variantes tipadas del SDK
+      .on('event', (evt: { event: string; data?: any }) => {
+        // 1) Deltas de mensaje (cuando no llegan por textDelta)
+        if (evt.event === 'thread.message.delta' || evt.event === 'message.delta') {
+          try {
+            const items = evt?.data?.delta?.content ?? [];
+            for (const it of items) {
+              // algunos SDKs usan output_text / input_text, otros text
+              if (it?.type === 'output_text' && it?.text) {
+                send('delta', { value: it.text });
+              } else if (it?.type === 'input_text' && it?.text) {
+                send('delta', { value: it.text });
+              } else if (it?.type === 'text' && it?.text?.value) {
+                send('delta', { value: it.text.value });
+              }
+            }
+          } catch {}
         }
 
-        if (saw.deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
+        // 2) Mensaje completado (nombre estable: message.completed)
+        if (evt.event === 'thread.message.completed' || evt.event === 'message.completed') {
+          try {
+            const msg = evt.data;
+            const parts = Array.isArray(msg?.content) ? msg.content : [];
+            const text = parts
+              .filter((c: any) => c?.type === 'text' && c?.text?.value)
+              .map((c: any) => c.text.value)
+              .join('\n');
+
+            if (text) {
+              finalText += text;
+              send('final', { text });
+            }
+          } catch {}
         }
-      }
-      return;
-    }
 
-    if (type === 'thread.message.completed') {
-      const complete = flattenAssistantTextFromMessage(e?.data);
-      if (complete) {
-        saw.text = true;
-        fullText += complete;
-
-        // DIAG final: contar fences visibles y fingerprint simples
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0]; let h = 0; for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-        send('diag.fence.final', {
-          runId, threadId: tid, fenceCount, fenceTypes, hashes, unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        send('final', { text: complete });
-
-        const ops = extractKommoOps(complete);
-        slog('message.completed', { fullLen: complete.length, kommoOps: ops.length, runId, threadId: tid });
-        if (ops.length) send('kommo', { ops });
-      }
-      return;
-    }
-
-    // ⚠️ IMPORTANTE: no propagamos errores intermedios al cliente (para no borrar “pensando…”)
-    if (type === 'thread.run.failed') {
-      slog('diag.run.failed', { runId, threadId: tid });
-      return;
-    }
-    if (type === 'error') {
-      slog('diag.stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
-      return;
-    }
+        // 3) Run terminado
+        if (evt.event === 'run.completed' || evt.event === 'thread.run.completed') {
+          resolve({ finalText });
+        }
+      })
+      .on('end', () => resolve({ finalText }))
+      .on('error', (err: any) => reject(err));
   });
-
-  await new Promise<void>((resolve) => {
-    stream.on('end', () => {
-      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
-      resolve();
-    });
-    stream.on('error', (err: any) => {
-      slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      // no enviamos 'error' al cliente aquí: cerramos y que el outer maneje
-      resolve();
-    });
-  });
-
-  return { fullText, sawText: saw.text, runId };
 }
 
+
+// ---------- Route ----------
 export async function POST(req: NextRequest) {
-  const { message, threadId } = await req.json();
-  const userText = asText(message);
-  slog('request.in', { hasThreadId: !!threadId, userTextLen: userText.length });
+  const { message } = await req.json();
+  const tid = (req.nextUrl.searchParams.get('threadId') || '').trim();
 
-  // 1) Asegurar thread
-  let tid = String(threadId || '');
-  if (!tid) {
-    const t = await client.beta.threads.create();
-    tid = t.id;
-    slog('thread.created', { threadId: tid });
-  } else {
-    slog('thread.reuse', { threadId: tid });
-  }
-
-  // 2) Adjuntar mensaje del usuario
-  await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
-  slog('message.append.ok', { threadId: tid });
-
-  // 3) SSE
   const encoder = new TextEncoder();
+
   const rs = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: any) =>
@@ -218,38 +123,41 @@ export async function POST(req: NextRequest) {
 
       send('meta', { threadId: tid });
 
+      // Heartbeat para mantener vivo el loader en el cliente
+      const hb = setInterval(() => { try { send('hb', { t: Date.now() }); } catch {} }, 8000);
+
       try {
         // ---- Run 1
         const r1 = await runOnceWithStream(tid, send);
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
         const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          hasWaitPhrase(r1.fullText);
+          r1.finalText &&
+          !/```cv:(itinerary|quote)\b/i.test(r1.finalText) &&
+          /^\s*(un\s+momento|dame\s+un\s+segundo|give\s+me\s+a\s+moment)/i.test(r1.finalText);
 
         if (shouldReprompt) {
-          slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-
-          await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
-          slog('message.append.ok', { threadId: tid, info: 'auto-?' });
-
-          // ---- Run 2
+          await client.beta.threads.messages.create(tid, {
+            role: 'user',
+            content: '?',
+          });
           await runOnceWithStream(tid, send);
         }
 
         send('done', {});
+        clearInterval(hb);
         controller.close();
       } catch (e: any) {
-        slog('exception.createStream', { error: String(e?.message || e) });
-        // Solo si es fatal (no pudimos ni crear stream) avisamos error al cliente.
-        try { controller.enqueue(encoder.encode(sse('error', { error: String(e?.message || e) }))); } catch {}
-        controller.close();
+        clearInterval(hb);
+        ulog('error', { msg: String(e?.message || e) });
+        try { controller.enqueue(encoder.encode(sse('error', { message: 'stream_error' }))); } catch {}
+        try { controller.close(); } catch {}
       }
     },
   });
 
   return new Response(rs, {
+    status: 200,
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
