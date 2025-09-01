@@ -14,11 +14,13 @@ type UiMessage = {
 
 function asText(msg?: UiMessage) {
   if (!msg?.parts?.length) return '';
-  return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
+  try {
+    return msg.parts.map((p) => p?.text || '').join('');
+  } catch { return ''; }
 }
 
 function sse(event: string, data: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
+  return `data:${JSON.stringify({ event, ...data })}\n\n`;
 }
 
 // ---------- Logs server ----------
@@ -78,32 +80,19 @@ function hasVisibleBlock(text: string) {
   return /```cv:(itinerary|quote)\b/.test(text || '');
 }
 
-// ---------- Extrae ops de bloques ```cv:kommo ...``` en texto ----------
-function extractKommoOps(text: string): Array<any> {
-  const ops: any[] = [];
-  if (!text) return ops;
-  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
-  let m: RegExpExecArray | null;
-  while ((m = rxFence.exec(text))) {
-    try {
-      const json = JSON.parse((m[1] || '').trim());
-      if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {}
-  }
-  return ops;
-}
-
-// ---------- Dedupe de fences visibles (conserva el ÚLTIMO idéntico) ----------
-function dedupeVisibleFencesKeepLast(text: string): string {
-  if (!text) return text;
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
-  const matches: Array<{ start: number; end: number; raw: string }> = [];
+// ---------- Dedup de fences dentro del MISMO mensaje ----------
+function dedupeVisibleFencesKeepLast(text: string) {
+  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+  const matches: { start: number; end: number; raw: string; key: string }[] = [];
   let m: RegExpExecArray | null;
   while ((m = rx.exec(text))) {
-    matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
+    const raw = m[0];
+    const key = `${m[1]}|${m[2].trim()}`;
+    matches.push({ start: m.index, end: m.index + raw.length, raw, key });
   }
   if (matches.length <= 1) return text;
 
+  // Agrupa por llave y conserva SOLO el último de cada grupo
   const groups = new Map<string, number[]>();
   matches.forEach((mm, i) => {
     const arr = groups.get(mm.raw) || [];
@@ -126,13 +115,7 @@ function dedupeVisibleFencesKeepLast(text: string): string {
     }
   });
   out += text.slice(cursor);
-
-  slog('diag.fence.dedup', {
-    total: matches.length,
-    dropped: toDrop.size,
-    kept: matches.length - toDrop.size,
-  });
-
+  slog('diag.fence.dedup', { total: matches.length, dropped: toDrop.size, kept: matches.length - toDrop.size });
   return out;
 }
 
@@ -194,74 +177,11 @@ async function runOnceWithStream(
         saw.text = true;
         fullText += complete;
 
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-
-        emitDiag('final', {
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        const finalText = dedupeVisibleFencesKeepLast(complete);
-        send('final', { text: finalText });
-
-        const ops = extractKommoOps(finalText);
-        slog('message.completed', {
-          fullLen: finalText.length,
-          kommoOps: ops.length,
-          runId,
-          threadId: tid,
-        });
-        if (ops.length) send('kommo', { ops });
-
-        finalEmitted = true;
-      }
-      return;
-    }
-
-    if (type === 'thread.run.completed') {
-      if (saw.text && !finalEmitted) {
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-
-        emitDiag('final.synth', {
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
         const finalText = dedupeVisibleFencesKeepLast(fullText);
         send('final', { text: finalText });
 
-        const ops = extractKommoOps(finalText);
-        slog('message.completed', {
-          fullLen: finalText.length,
-          kommoOps: ops.length,
-          runId,
-          threadId: tid,
-        });
-        if (ops.length) send('kommo', { ops });
+        // (Opcional) Si llevas Kommo por SSE, aquí puedes extraer y emitir 'kommo'
+        // const ops = extractKommoOps(finalText); if (ops.length) send('kommo', { ops });
 
         finalEmitted = true;
       }
@@ -273,44 +193,10 @@ async function runOnceWithStream(
       send('error', { error: 'run_failed' });
       return;
     }
-
-    if (type === 'error') {
-      slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
-      send('error', { error: String(e?.data || 'unknown') });
-      return;
-    }
   });
 
   await new Promise<void>((resolve) => {
     stream.on('end', () => {
-      if (saw.text && !finalEmitted) {
-        const fences = [...fullText.matchAll(/```cv:(itinerary|quote)\s*([\s\S]*?)```/g)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
-        });
-
-        slog('diag.fence.final.synth.end', {
-          runId,
-          threadId: tid,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique: new Set(hashes).size,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        const finalText = dedupeVisibleFencesKeepLast(fullText);
-        send('final', { text: finalText });
-
-        const ops = extractKommoOps(finalText);
-        if (ops.length) send('kommo', { ops });
-      }
-
       slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
       resolve();
     });
@@ -320,6 +206,12 @@ async function runOnceWithStream(
       resolve();
     });
   });
+
+  // Si nunca llegó 'message.completed' pero sí hubo deltas, sintetiza un final
+  if (!finalEmitted && saw.text && fullText) {
+    const finalText = dedupeVisibleFencesKeepLast(fullText);
+    send('final', { text: finalText });
+  }
 
   return { fullText, sawText: saw.text };
 }
@@ -343,12 +235,28 @@ export async function POST(req: NextRequest) {
   await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
   slog('message.append.ok', { threadId: tid });
 
-  // 3) Abrir SSE
   const encoder = new TextEncoder();
+
   const rs = new ReadableStream({
     async start(controller) {
-      const send = (event: string, data: any) =>
+      // ⬇️ DEDUPE ENTRE RUNS (Opción C): evita emitir dos 'final' idénticos
+      let __lastFenceKey: string | null = null;
+      const send = (event: string, data: any) => {
+        try {
+          if (event === 'final' && data && typeof data.text === 'string') {
+            const m = data.text.match(/```cv:(itinerary|quote)\s*([\s\S]*?)```/i);
+            if (m) {
+              const key = m[1] + '|' + (m[2] || '').trim();
+              if (__lastFenceKey === key) {
+                slog('final.skip.dup', { threadId: tid });
+                return; // skip duplicado exacto entre runs
+              }
+              __lastFenceKey = key;
+            }
+          }
+        } catch {}
         controller.enqueue(encoder.encode(sse(event, data)));
+      };
 
       // meta con threadId
       send('meta', { threadId: tid });
@@ -358,20 +266,17 @@ export async function POST(req: NextRequest) {
         const r1 = await runOnceWithStream(tid, send);
 
         // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
-        const shouldReprompt =
-          !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
+        const shouldReprompt = !!r1.fullText && !hasVisibleBlock(r1.fullText) && hasWaitPhrase(r1.fullText);
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-
-          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
           // ---- Run 2 (reprompt)
           const r2 = await runOnceWithStream(tid, send);
 
-          // Fallback si el reprompt falló o no emitió nada
+          // Fallback si el reprompt no emitió nada
           if (!r2.sawText) {
             slog('auto.reprompt.retry', { reason: 'r2-no-text', threadId: tid });
             await client.beta.threads.messages.create(tid, { role: 'user', content: 'continua' });

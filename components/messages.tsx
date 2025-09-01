@@ -102,27 +102,38 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
     <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
       <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
-        <span className="opacity-90">{label}</span>
-        <span className="w-1.5 h-1.5 rounded-full bg-white/80 animate-bounce" style={{ animationDelay: '0ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-white/60 animate-bounce" style={{ animationDelay: '150ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-white/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+        <span className="inline-block">{label}</span>
+        <span className="inline-block">…</span>
       </div>
     </div>
   );
 }
 
-// -------------- Main ---------------------
-export default function Messages(props: Props) {
-  const { messages, isLoading } = props;
-  const lang = guessLang(messages);
-
+export default function Messages({
+  messages,
+  isLoading,
+  setMessages,
+  regenerate,
+  isReadonly,
+  chatId,
+}: Props) {
+  const [lang, setLang] = useState<'es' | 'en'>(guessLang(messages));
   const [showLoader, setShowLoader] = useState(false);
   const [phase, setPhase] = useState<'in' | 'out'>('in');
+
+  useEffect(() => {
+    const last = [...messages].reverse().find((m) => (m as any).role === 'assistant' || (m as any).role === 'user');
+    if (last) setLang(guessLang([last as any]));
+  }, [messages]);
 
   useEffect(() => {
     if (isLoading) { setShowLoader(true); setPhase('in'); }
     else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
   }, [isLoading, showLoader]);
+
+  // Dedupe per render: evita duplicados idénticos de itinerario/cotización
+  const seenItin = new Set<string>();
+  const seenQuote = new Set<string>();
 
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
@@ -152,6 +163,9 @@ export default function Messages(props: Props) {
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
           if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
+            const __key = JSON.stringify(it.data);
+            if (seenItin.has(__key)) return null; // dedupe
+            seenItin.add(__key);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <ItineraryCard data={it.data} />
@@ -163,6 +177,9 @@ export default function Messages(props: Props) {
           const q = extractLabeledJson(trimmed, 'cv:quote');
           if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
+            const __keyQ = JSON.stringify(q.data);
+            if (seenQuote.has(__keyQ)) return null; // dedupe
+            seenQuote.add(__keyQ);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <QuoteCard data={q.data} />
