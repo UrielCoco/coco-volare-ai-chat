@@ -18,16 +18,17 @@ export async function handleRunStreamWithTool(client: OpenAI, params: {
   let full = "";
   let runId: string | undefined;
 
-  for await (const { event, data } of stream) {
-    switch (event) {
+  for await (const event of stream) {
+    const ev = event.event;
+    const data: any = event.data;
+
+    switch (ev) {
       case "thread.run.created": {
-        const run = data as any;
-        runId = run?.id;
+        runId = data?.id;
         break;
       }
       case "thread.message.delta": {
-        const md = data as any;
-        const parts = md.delta?.content ?? [];
+        const parts = data?.delta?.content ?? [];
         for (const p of parts) {
           if (p.type === "text_delta" || p.type === "output_text_delta") {
             const chunk = p.text?.value ?? p.value ?? "";
@@ -39,8 +40,7 @@ export async function handleRunStreamWithTool(client: OpenAI, params: {
         break;
       }
       case "thread.run.step.completed": {
-        const step = data as any;
-        const details = step?.step_details;
+        const details = data?.step_details;
         if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
           for (const tc of details.tool_calls) {
             if (tc?.type === "function" && tc.function?.name === "emit_itinerary") {

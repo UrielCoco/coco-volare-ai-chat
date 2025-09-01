@@ -48,13 +48,33 @@ async function ensureThreadId(threadId?: string | null) {
 export async function POST(req: NextRequest) {
   let body: any;
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
-  const userText: string = (body?.text ?? "").toString();
+  const rawText = (body?.text ?? "").toString();
+  const userText = rawText.trim();
   const incomingThreadId: string | null = body?.threadId ?? null;
 
   log("request.in", { hasThreadId: !!incomingThreadId, userTextLen: userText.length });
 
+  // ✅ GUARD: NO RUN si el texto viene vacío (bootstrap/ping)
+  if (userText.length === 0) {
+    const rs = new ReadableStream({
+      start(controller) {
+        log("skip.append.empty", { reason: "bootstrap/ping" });
+        controller.enqueue(encodeSSE(sseJSON("info", { bootstrap: true })));
+        controller.enqueue(encodeSSE(sseJSON("done", { ok: true })));
+        controller.close();
+      }
+    });
+    return new Response(rs, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+      },
+    });
+  }
+
   const threadId = await ensureThreadId(incomingThreadId);
-  await client.beta.threads.messages.create(threadId, { role: "user", content: userText || "…" });
+  await client.beta.threads.messages.create(threadId, { role: "user", content: userText });
   log("message.append.ok", { threadId });
 
   const rs = new ReadableStream({
@@ -69,24 +89,23 @@ export async function POST(req: NextRequest) {
       let currentRunId: string | undefined;
 
       try {
-        // ✅ Iterador asíncrono, sin .on(...). Esto elimina los errores de tipos.
+        // ✅ Iterador asíncrono tipado (sin .on(...))
         const stream = await client.beta.threads.runs.stream(threadId, { assistant_id: ASSISTANT_ID });
 
-        for await (const { event, data } of stream) {
-          switch (event) {
+        for await (const event of stream) {
+          const ev = event.event; // string como 'thread.message.delta'
+          const data: any = event.data;
+
+          switch (ev) {
             case "thread.run.created": {
-              const run = data as any; // tipo Run
-              currentRunId = run?.id;
+              currentRunId = data?.id;
               log("run.created", { runId: currentRunId, threadId });
               break;
             }
 
             case "thread.message.delta": {
-              // data: MessageDeltaEvent
-              const md = data as any;
-              const parts = md.delta?.content ?? [];
+              const parts = data?.delta?.content ?? [];
               for (const p of parts) {
-                // Algunos SDKs muestran 'text_delta', otros 'output_text_delta'
                 if (p.type === "text_delta" || p.type === "output_text_delta") {
                   const chunk = p.text?.value ?? p.value ?? "";
                   if (!chunk) continue;
@@ -114,8 +133,7 @@ export async function POST(req: NextRequest) {
             }
 
             case "thread.run.step.completed": {
-              // data: RunStep (para tool-calls)
-              const step = data as any;
+              const step = data;
               const details = step?.step_details;
               if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
                 for (const tc of details.tool_calls) {
