@@ -3,72 +3,42 @@ import OpenAI from 'openai';
 
 export type StreamSend = (event: string, data: any) => void;
 
+export async function runAssistantOnce(client: OpenAI, threadId: string, assistantId: string) {
+  // Útil para llamadas “no streaming”
+  const run = await client.beta.threads.runs.createAndPoll(threadId, {
+    assistant_id: assistantId,
+  });
+  return run;
+}
+
 export async function handleRunStreamWithTool(client: OpenAI, params: {
   threadId: string;
   assistantId: string;
-  onDelta: (text: string) => void;
-  onToolItinerary: (json: any) => void;
-  onError: (kind: string, detail?: unknown) => void;
-  onComplete: (full: string) => void;
+  send: StreamSend;
+  itineraryParameters?: any;
 }) {
-  const stream = await client.beta.threads.runs.stream(params.threadId, {
-    assistant_id: params.assistantId,
+  const { threadId, assistantId, send, itineraryParameters } = params;
+
+  // @ts-ignore - el tipo exacto del stream varía según versión del SDK
+  const runStream: any = await client.beta.threads.runs.stream(threadId, {
+    assistant_id: assistantId,
+    tools: itineraryParameters ? [{
+      type: 'function',
+      function: { name: 'emit_itinerary', description: 'Itinerary', parameters: itineraryParameters }
+    }] : undefined,
   });
 
-  let full = "";
-  let runId: string | undefined;
-
-  for await (const event of stream) {
-    const ev = event.event;
-    const data: any = event.data;
-
-    switch (ev) {
-      case "thread.run.created": {
-        runId = data?.id;
-        break;
-      }
-      case "thread.message.delta": {
-        const parts = data?.delta?.content ?? [];
-        for (const p of parts) {
-          if (p.type === "text_delta" || p.type === "output_text_delta") {
-            const chunk = p.text?.value ?? p.value ?? "";
-            if (!chunk) continue;
-            full += chunk;
-            params.onDelta(chunk);
-          }
+  runStream
+    .on('textDelta', (d: any) => send('delta', { value: d?.value || '' }))
+    .on('toolCallCompleted', (ev: any) => {
+      try {
+        if (ev?.toolCall?.function?.name === 'emit_itinerary') {
+          const args = JSON.parse(ev.toolCall.function.arguments ?? '{}');
+          if (args?.title && Array.isArray(args?.days)) send('itinerary', { payload: args });
         }
-        break;
-      }
-      case "thread.run.step.completed": {
-        const details = data?.step_details;
-        if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
-          for (const tc of details.tool_calls) {
-            if (tc?.type === "function" && tc.function?.name === "emit_itinerary") {
-              try {
-                const args = JSON.parse(tc.function.arguments ?? "{}");
-                if (args?.title && Array.isArray(args?.days)) {
-                  params.onToolItinerary(args);
-                }
-              } catch {}
-            }
-          }
-        }
-        break;
-      }
-      case "thread.run.completed": {
-        params.onComplete(full);
-        break;
-      }
-      case "thread.run.failed": {
-        params.onError("run_failed", data);
-        break;
-      }
-      case "error": {
-        params.onError("stream_error", data);
-        break;
-      }
-    }
-  }
+      } catch {}
+    });
 
-  return { runId };
+  // Devuelve el stream para que el caller encadene otros handlers si quiere
+  return runStream;
 }
