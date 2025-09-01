@@ -63,63 +63,6 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
-// ---------- Desduplicación de fences visibles (cv:itinerary / cv:quote) ----------
-// Regla: si en un MISMO texto vienen 2+ fences VISIBLES idénticos, se elimina(n) todos
-// menos el ÚLTIMO para no duplicar tarjetas en la UI.
-function dedupeVisibleFencesKeepLast(text: string): string {
-  if (!text) return text;
-
-  const rx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/gi;
-  const matches: Array<{ idx: number; start: number; end: number; raw: string }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = rx.exec(text))) {
-    matches.push({
-      idx: matches.length,
-      start: m.index,
-      end: m.index + m[0].length,
-      raw: m[0],
-    });
-  }
-  if (matches.length <= 1) return text;
-
-  // Agrupar por contenido RAW del fence (idénticos byte a byte)
-  const groups = new Map<string, number[]>();
-  matches.forEach((mm, i) => {
-    const key = mm.raw;
-    const arr = groups.get(key) || [];
-    arr.push(i);
-    groups.set(key, arr);
-  });
-
-  // Marcar para eliminar todos menos el último de cada grupo con tamaño > 1
-  const toDrop = new Set<number>();
-  Array.from(groups.entries()).forEach(([, idxs]) => {
-    if (idxs.length > 1) {
-      idxs.slice(0, -1).forEach((i) => toDrop.add(i));
-    }
-  });
-  if (toDrop.size === 0) return text;
-
-  // Reconstruir texto saltando los rangos drop
-  let out = '';
-  let cursor = 0;
-  matches.forEach((mm, i) => {
-    if (toDrop.has(i)) {
-      out += text.slice(cursor, mm.start);
-      cursor = mm.end; // saltar este fence duplicado
-    }
-  });
-  out += text.slice(cursor);
-
-  ulog('ui.fence.dedup', {
-    total: matches.length,
-    dropped: toDrop.size,
-    kept: matches.length - toDrop.size,
-  });
-
-  return out;
-}
-
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -133,9 +76,9 @@ export default function Chat() {
   // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
 
-  // controla finales dentro del MISMO stream (pueden ser varios runs: reprompt “?”)
+  // manejar múltiples mensajes del assistant en un mismo run
   const runFinalsCountRef = useRef<number>(0);
-  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje “en curso”
+  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje "en curso"
 
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
@@ -316,17 +259,16 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                // ---- desduplicar fences visibles manteniendo el ÚLTIMO idéntico
-                const textRaw = data.text;
-                const text = dedupeVisibleFencesKeepLast(textRaw);
+                const text = data.text;
 
+                // ¿incluye bloque visible?
                 const hasBlock = /```cv:(itinerary|quote)\b/.test(text);
 
                 // reinicia buffer para el siguiente mensaje potencial
                 fullText = '';
 
                 if (runFinalsCountRef.current === 0) {
-                  // Primer final del stream → reemplaza el primer placeholder
+                  // Reemplaza el primer typing por el texto final corto
                   applyText(text, true);
 
                   // Si NO hay bloque visible, dejamos un 2º placeholder “pensando…”
@@ -335,9 +277,16 @@ export default function Chat() {
                     activeAssistantIdRef.current = id2;
                   }
                 } else {
-                  // FINAL SUBSECUENTE (p.ej. tras reprompt "?"):
-                  // Reemplazamos el placeholder activo (no creamos nuevo bubble).
-                  applyText(text, true);
+                  // Final adicional → NUEVO mensaje
+                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                  const newMsg: ChatMessage = {
+                    id,
+                    role: 'assistant',
+                    parts: [{ type: 'text', text }] as any,
+                    createdAt: new Date().toISOString(),
+                  } as any;
+                  setMessages((prev) => [...prev, newMsg]);
+                  activeAssistantIdRef.current = id;
                 }
 
                 runFinalsCountRef.current += 1;
@@ -355,12 +304,14 @@ export default function Chat() {
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
-            // Limpia TODOS los placeholders “…” sobrantes
+            // Limpia cualquier placeholder “…” sobrante
             setMessages((prev) => {
-              const next = prev.filter(
-                (m: any) => !(m.role === 'assistant' && m.parts?.[0]?.text === '…')
+              const next = [...prev];
+              const idx = next.findIndex(
+                (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
               );
-              return [...next];
+              if (idx >= 0) next.splice(idx, 1);
+              return next;
             });
           }
         }
@@ -369,16 +320,14 @@ export default function Chat() {
       console.error('[CV][chat] stream error', err);
       setIsLoading(false);
       setMessages((prev) => {
-        // Si hay algún placeholder, muéstrale error
         const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          const m: any = next[i];
-          if (m.role === 'assistant' && m.parts?.[0]?.text === '…') {
-            (next[i] as any).parts = [
-              { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
-            ];
-            break;
-          }
+        const idx = next.findIndex(
+          (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
+        );
+        if (idx >= 0) {
+          (next[idx] as any).parts = [
+            { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
+          ];
         }
         return next;
       });
