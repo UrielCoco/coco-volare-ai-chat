@@ -34,7 +34,7 @@ function guessLang(msgs: ChatMessage[]): 'es' | 'en' {
     }
   }
   return 'es';
-};
+}
 
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
@@ -131,7 +131,7 @@ export default function Messages({
     else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
   }, [isLoading, showLoader]);
 
-  // Dedupe per render: evita duplicados idénticos de itinerario/cotización
+  // Dedupe por render
   const seenItin = new Set<string>();
   const seenQuote = new Set<string>();
 
@@ -141,7 +141,7 @@ export default function Messages({
         const role = (m as any).role as 'user' | 'assistant' | 'system';
         const raw = getText(m) ?? '';
         const trimmed = raw.replace(/\u200B/g, '').trim();
-        // Oculta bloques secretos cv:kommo del texto visible
+        const hasKommoOnly = /```cv:kommo[\s\S]*?```/i.test(trimmed) && trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim().length === 0;
         const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         const stopped = (m as any)?.stopped === true;
 
@@ -156,8 +156,17 @@ export default function Messages({
         }
 
         if (role === 'assistant') {
-          // Evita burbuja doble cuando aún no hay tokens
-          if (!visible) return null;
+          // ⛑️ Si el mensaje trae SOLO cv:kommo (sin texto visible), mantenemos un "…" visible
+          if (!visible) {
+            if (hasKommoOnly) {
+              return (
+                <AssistantBubble key={(m as any).id || i}>
+                  <div className="opacity-70">…</div>
+                </AssistantBubble>
+              );
+            }
+            return null;
+          }
 
           // 1) Itinerario
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
