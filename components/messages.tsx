@@ -124,10 +124,6 @@ export default function Messages(props: Props) {
     else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
   }, [isLoading, showLoader]);
 
-  // Dedupe por render: evita tarjetas idénticas repetidas
-  const seenItin = new Set<string>();
-  const seenQuote = new Set<string>();
-
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
       {messages.map((m, i) => {
@@ -136,7 +132,6 @@ export default function Messages(props: Props) {
         const trimmed = raw.replace(/\u200B/g, '').trim();
         // Oculta bloques secretos cv:kommo del texto visible
         const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
-        const hasKommoOnly = /```cv:kommo[\s\S]*?```/i.test(trimmed) && visible.length === 0;
         const stopped = (m as any)?.stopped === true;
 
         if (role === 'system') return null;
@@ -150,25 +145,13 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // Si trae SOLO cv:kommo (sin visible), muestra una burbuja con "…"
-          if (!visible) {
-            if (hasKommoOnly) {
-              return (
-                <AssistantBubble key={(m as any).id || i}>
-                  <div className="opacity-70">…</div>
-                </AssistantBubble>
-              );
-            }
-            return null;
-          }
+          // Evita burbuja doble cuando aún no hay tokens
+          if (!visible) return null;
 
           // 1) Itinerario
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
           if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
-            const k = JSON.stringify(it.data);
-            if (seenItin.has(k)) return null;
-            seenItin.add(k);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <ItineraryCard data={it.data} />
@@ -180,9 +163,6 @@ export default function Messages(props: Props) {
           const q = extractLabeledJson(trimmed, 'cv:quote');
           if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
-            const kq = JSON.stringify(q.data);
-            if (seenQuote.has(kq)) return null;
-            seenQuote.add(kq);
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
                 <QuoteCard data={q.data} />
