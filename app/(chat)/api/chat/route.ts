@@ -7,11 +7,9 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-// ---------- Logs ----------
+// ---------- Logs (una sola salida para evitar duplicados en Vercel) ----------
 function log(event: string, meta: Record<string, any> = {}) {
-  const payload = { tag: '[CV][server]', event, ...meta };
-  try { console.log(JSON.stringify(payload)); } catch {}
-  try { console.info(JSON.stringify(payload)); } catch {}
+  try { console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta })); } catch {}
 }
 
 // ---------- SSE helper (IMPORTANTE: incluye cabecera event:) ----------
@@ -47,6 +45,7 @@ const hasVisibleBlock = (t: string) => /```cv:(itinerary|quote)\b/.test(t || '')
 const WAIT_PATTERNS = [
   /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
   /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
+  /d[eé]jame\b/i, /d[eé]jame preparar/i, /deja que/i,
   /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
   /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
 ];
@@ -195,11 +194,10 @@ export async function POST(req: NextRequest) {
 
   const rs = new ReadableStream({
     async start(controller) {
-      // dedupe entre runs en este request
+      // Dedupe entre runs en este MISMO request
       let lastFenceKey: string | null = null;
 
       const send = (event: string, data: any) => {
-        // logs de todo lo que sale por SSE
         if (event === 'final' && data && typeof data.text === 'string') {
           const fences = findFences(data.text);
           if (fences.length) {
@@ -217,37 +215,45 @@ export async function POST(req: NextRequest) {
           log('sse.emit', { event, keys: Object.keys(data || {}) });
         }
 
-        controller.enqueue(encoder.encode(sse(event, data))); // <— event: + data:
+        controller.enqueue(encoder.encode(sse(event, data)));
       };
 
-      // meta: thread id para el cliente (lo persiste en sessionStorage)
+      // meta: thread id
       send('meta', { threadId });
 
-      // Heartbeat (para conexiones largas)
+      // Heartbeat
       const hb = setInterval(() => {
         try { controller.enqueue(encoder.encode(sse('hb', { t: Date.now() }))); } catch {}
       }, 8000);
 
       try {
-        // run 1
+        // Run 1
         const r1 = await runOnceWithStream(threadId, send);
 
-        // si fue “promesa” sin bloque visible → reprompt
-        const shouldReprompt = !!r1.fullText && !hasVisibleBlock(r1.fullText) && WAIT_PATTERNS.some(rx => rx.test(r1.fullText));
+        // Reprompt SI:
+        //  - no hay bloque visible, y (a) hay frase de espera o (b) simplemente no hubo bloque (fallback único)
+        const shouldReprompt =
+          !!r1.fullText &&
+          !hasVisibleBlock(r1.fullText) &&
+          (hasWaitPhrase(r1.fullText) || true); // fallback único
+
         if (shouldReprompt) {
-          log('auto.reprompt', { reason: 'wait-no-block', threadId });
+          log('auto.reprompt', { reason: hasWaitPhrase(r1.fullText) ? 'wait-no-block' : 'no-block-fallback', threadId });
           await client.beta.threads.messages.create(threadId, { role: 'user', content: '?' });
           log('message.append.ok', { threadId, info: 'auto-?' });
 
-          // run 2
+          // Run 2
           const r2 = await runOnceWithStream(threadId, send);
 
+          // Fallback si aún no hubo texto
           if (!r2.sawText) {
             log('auto.reprompt.retry', { reason: 'r2-no-text', threadId });
             await client.beta.threads.messages.create(threadId, { role: 'user', content: 'continua' });
             log('message.append.ok', { threadId, info: 'auto-continue' });
             await runOnceWithStream(threadId, send);
           }
+        } else {
+          log('auto.reprompt.skip', { reason: 'has-visible-block-or-empty', threadId });
         }
 
         clearInterval(hb);
