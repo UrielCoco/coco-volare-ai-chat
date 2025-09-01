@@ -5,286 +5,150 @@ import OpenAI from 'openai';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+function log(event: string, data: Record<string, unknown> = {}) {
+  try { console.log(JSON.stringify({ tag: "[CV][server]", event, ...data })); } catch {}
+}
+
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
-type UiMessage = {
-  role: 'user' | 'assistant';
-  parts: Array<{ type: 'text'; text: string }>;
-};
-
-function asText(msg?: UiMessage) {
-  if (!msg?.parts?.length) return '';
-  return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
-}
-
-function sse(event: string, data: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
-}
-
-// ---------- Logs server ----------
-function slog(event: string, meta: Record<string, any> = {}) {
-  try {
-    console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
-  } catch {}
-}
-
-// ---------- Helpers OpenAI ----------
-function flattenAssistantTextFromMessage(message: any): string {
-  const out: string[] = [];
-  if (!message?.content) return '';
-  for (const c of message.content) {
-    if (c.type === 'text' && c.text?.value) out.push(c.text.value);
-  }
-  return out.join('\n');
-}
-
-function extractDeltaTextFromEvent(e: any): string {
-  try {
-    const content = e?.data?.delta?.content;
-    if (Array.isArray(content)) {
-      const parts: string[] = [];
-      for (const item of content) {
-        if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
-        if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
-      }
-      return parts.join('');
-    }
-  } catch {}
-  return '';
-}
-
-// ---------- Detección de disparador “te lo preparo / un momento” ----------
-const WAIT_PATTERNS = [
-  // ES
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  // EN
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
-  // IT
-  /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
-  // PT
-  /um momento/i, /deixa eu/i, /vou preparar/i, /estou preparando/i,
-  // FR
-  /un instant/i, /laisse(-|\s)?moi/i, /je vais pr[eé]parer/i, /je pr[eé]pare/i,
-  // DE
-  /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
-];
-function hasWaitPhrase(text: string) {
-  const t = text || '';
-  return WAIT_PATTERNS.some((rx) => rx.test(t));
-}
-function hasVisibleBlock(text: string) {
-  return /```cv:(itinerary|quote)\b/.test(text || '');
-}
-
-// ---------- Extrae ops de bloques ```cv:kommo ...``` en texto ----------
-function extractKommoOps(text: string): Array<any> {
-  const ops: any[] = [];
-  if (!text) return ops;
-  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
+type Fence = { type: string; raw: string; hash: string };
+const fenceRegex = /```([a-zA-Z0-9_-]*)(?:\\s+[\\w-]+)?\\s*\\n([\\s\\S]*?)\\n```/g;
+function extractFences(text: string): Fence[] {
+  const out: Fence[] = [];
   let m: RegExpExecArray | null;
-  while ((m = rxFence.exec(text))) {
-    try {
-      const json = JSON.parse((m[1] || '').trim());
-      if (json && Array.isArray(json.ops)) ops.push(...json.ops);
-    } catch {
-      // ignorar bloque malformado
-    }
+  while ((m = fenceRegex.exec(text)) !== null) {
+    const lang = (m[1] || "").trim().toLowerCase();
+    const body = (m[2] || "").trim();
+    const hash = Array.from(new TextEncoder().encode(body))
+      .reduce((a, b) => ((a << 5) - a + b) | 0, 0)
+      .toString(16);
+    out.push({ type: lang || "code", raw: body, hash });
   }
-  return ops;
+  return out;
 }
 
-/**
- * Ejecuta UN run con createAndStream y resuelve cuando termina.
- * Emite los mismos eventos que ya consume tu UI.
- * Devuelve el texto completo recibido en ese run.
- * (AHORA con logs de diagnóstico de fences).
- */
-async function runOnceWithStream(
-  tid: string,
-  send: (event: string, data: any) => void,
-): Promise<{ fullText: string; sawText: boolean }> {
-  // --- helpers locales de diagnóstico ---
-  const saw = { text: false, deltaChars: 0, fenceSeenInDelta: false };
-  const fenceStartRx = /```cv:(itinerary|quote)\b/i;
-  const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
+function encodeSSE(line: string) { return new TextEncoder().encode(line); }
+function sseJSON(event: string, payload: any) {
+  return `event: ${event}\\n` + `data: ${JSON.stringify(payload)}\\n\\n`;
+}
 
-  function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // SSE opcional para inspección en cliente
-    send('diag', { phase, threadId: tid, ...extra });
-    // Log persistente en Vercel
-    slog(
-      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
-      { threadId: tid, ...extra },
-    );
-  }
-
-  let fullText = '';
-  let runId: string | null = null;
-
-  const stream: any = await client.beta.threads.runs.createAndStream(tid, {
-    assistant_id: ASSISTANT_ID,
-  });
-
-  stream.on('event', (e: any) => {
-    const type = e?.event as string;
-
-    if (type === 'thread.run.created') {
-      runId = e?.data?.id ?? null;
-      slog('run.created', { runId, threadId: tid });
-      return;
-    }
-
-    if (type === 'thread.message.delta') {
-      const deltaText = extractDeltaTextFromEvent(e);
-      if (deltaText) {
-        saw.text = true;
-        saw.deltaChars += deltaText.length;
-        fullText += deltaText;
-        send('delta', { value: deltaText });
-
-        // DIAG: ¿apareció fence ya en delta?
-        if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
-          saw.fenceSeenInDelta = true;
-          emitDiag('delta', {
-            runId,
-            fenceSeenInDelta: true,
-            sample: deltaText.slice(0, 160),
-          });
-        }
-
-        if (saw.deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
-        }
-      }
-      return;
-    }
-
-    if (type === 'thread.message.completed') {
-      const complete = flattenAssistantTextFromMessage(e?.data);
-      if (complete) {
-        saw.text = true;
-        fullText += complete;
-
-        // DIAG final: contar fences y generar huellas
-        const fences = [...fullText.matchAll(allFencesRx)];
-        const fenceCount = fences.length;
-        const fenceTypes = fences.map(m => m[1]);
-        const hashes = fences.map(m => {
-          const raw = m[0]; // fence completo
-          let hash = 0;
-          for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
-          return hash.toString(16);
-        });
-        const unique = Array.from(new Set(hashes)).length;
-        emitDiag('final', {
-          runId,
-          fenceCount,
-          fenceTypes,
-          hashes,
-          unique,
-          fenceSeenInDelta: saw.fenceSeenInDelta,
-        });
-
-        // Emitimos lo que ya usas
-        send('final', { text: complete });
-
-        const ops = extractKommoOps(complete);
-        slog('message.completed', {
-          fullLen: complete.length,
-          kommoOps: ops.length,
-          runId,
-          threadId: tid,
-        });
-        if (ops.length) send('kommo', { ops });
-      }
-      return;
-    }
-
-    if (type === 'thread.run.failed') {
-      slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
-      send('error', { error: 'run_failed' });
-      return;
-    }
-
-    if (type === 'error') {
-      slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
-      send('error', { error: String(e?.data || 'unknown') });
-      return;
-    }
-  });
-
-  await new Promise<void>((resolve) => {
-    stream.on('end', () => {
-      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
-      resolve();
-    });
-    stream.on('error', (err: any) => {
-      slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
-      resolve();
-    });
-  });
-
-  return { fullText, sawText: saw.text };
+async function ensureThreadId(threadId?: string | null) {
+  if (threadId) { log("thread.reuse", { threadId }); return threadId; }
+  const t = await client.beta.threads.create();
+  log("thread.created", { threadId: t.id });
+  return t.id;
 }
 
 export async function POST(req: NextRequest) {
-  const { message, threadId } = await req.json();
-  const userText = asText(message);
-  slog('request.in', { hasThreadId: !!threadId, userTextLen: userText.length });
+  let body: any;
+  try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
+  const userText: string = (body?.text ?? "").toString();
+  const incomingThreadId: string | null = body?.threadId ?? null;
 
-  // 1) Asegurar thread
-  let tid = String(threadId || '');
-  if (!tid) {
-    const t = await client.beta.threads.create();
-    tid = t.id;
-    slog('thread.created', { threadId: tid });
-  } else {
-    slog('thread.reuse', { threadId: tid });
-  }
+  log("request.in", { hasThreadId: !!incomingThreadId, userTextLen: userText.length });
 
-  // 2) Adjuntar mensaje del usuario
-  await client.beta.threads.messages.create(tid, { role: 'user', content: userText });
-  slog('message.append.ok', { threadId: tid });
+  const threadId = await ensureThreadId(incomingThreadId);
+  await client.beta.threads.messages.create(threadId, { role: "user", content: userText || "…" });
+  log("message.append.ok", { threadId });
 
-  // 3) Abrir SSE
-  const encoder = new TextEncoder();
   const rs = new ReadableStream({
     async start(controller) {
-      const send = (event: string, data: any) =>
-        controller.enqueue(encoder.encode(sse(event, data)));
+      const send = (event: string, data: any) => controller.enqueue(encodeSSE(sseJSON(event, data)));
 
-      // meta con threadId (cliente lo guarda)
-      send('meta', { threadId: tid });
+      let full = "";
+      let deltaChars = 0;
+      let fenceSeenInDelta = false;
+      const fenceHashes = new Set<string>();
+      const fenceTypes = new Set<string>();
+      let currentRunId: string | undefined;
 
       try {
-        // ---- Run 1
-        const r1 = await runOnceWithStream(tid, send);
+        const stream = await client.beta.threads.runs.stream(threadId, { assistant_id: ASSISTANT_ID });
 
-        // ¿Dijo “un momento” y NO entregó bloque visible? → reprompt "?"
-        const shouldReprompt =
-          !!r1.fullText &&
-          !hasVisibleBlock(r1.fullText) &&
-          hasWaitPhrase(r1.fullText);
-
-        if (shouldReprompt) {
-          slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-          // Enviar "?" oculto en el MISMO hilo
-          await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
-          slog('message.append.ok', { threadId: tid, info: 'auto-?' });
-
-          // ---- Run 2
-          await runOnceWithStream(tid, send);
+        for await (const ev of stream) {
+          switch (ev.type) {
+            case "run.created": {
+              currentRunId = ev.data.id;
+              log("run.created", { runId: currentRunId, threadId });
+              break;
+            }
+            case "thread.message.delta": {
+              const parts = ev.data.delta?.content ?? [];
+              for (const p of parts) {
+                if (p.type === "text_delta") {
+                  const chunk = p.text?.value ?? "";
+                  if (!chunk) continue;
+                  full += chunk;
+                  deltaChars += chunk.length;
+                  if (deltaChars % 600 < chunk.length) {
+                    log("stream.delta.tick", { deltaChars, runId: currentRunId, threadId });
+                  }
+                  const fences = extractFences(chunk);
+                  if (fences.length) {
+                    fenceSeenInDelta = true;
+                    fences.forEach(f => { fenceHashes.add(f.hash); fenceTypes.add(f.type); });
+                    log("diag.fence.delta", {
+                      count: fences.length,
+                      types: fences.map(f => f.type),
+                      hashes: fences.map(f => f.hash),
+                    });
+                  }
+                  send("delta", { value: chunk });
+                }
+              }
+              break;
+            }
+            case "run.step.completed": {
+              // Si el asistente llamó una función, aparecerá aquí
+              const step = ev.data;
+              const details: any = (step as any).step_details;
+              if (details?.type === "tool_calls" && Array.isArray(details.tool_calls)) {
+                for (const tc of details.tool_calls) {
+                  if (tc?.type === "function" && tc.function?.name === "emit_itinerary") {
+                    try {
+                      const args = JSON.parse(tc.function.arguments ?? "{}");
+                      if (args?.title && Array.isArray(args?.days)) {
+                        send("itinerary", { payload: args });
+                      }
+                    } catch {}
+                  }
+                }
+              }
+              break;
+            }
+            case "run.failed": {
+              log("stream.error", { runId: currentRunId, threadId, error: "run_failed" });
+              send("error", { error: "run_failed" });
+              break;
+            }
+            case "run.completed": {
+              const finalFences = extractFences(full);
+              finalFences.forEach(f => { fenceHashes.add(f.hash); fenceTypes.add(f.type); });
+              log("diag.fence.final", {
+                fenceCount: finalFences.length,
+                fenceTypes: Array.from(fenceTypes),
+                hashes: Array.from(fenceHashes),
+                unique: Array.from(fenceHashes).length,
+                fenceSeenInDelta,
+              });
+              log("message.completed", { fullLen: full.length, kommoOps: 0, runId: currentRunId, threadId });
+              log("stream.end", { deltaChars, sawText: full.length > 0, runId: currentRunId, threadId });
+              send("done", { ok: true });
+              controller.close();
+              break;
+            }
+            case "error": {
+              log("stream.error", { runId: currentRunId, threadId, error: "stream_error" });
+              send("error", { error: "stream_error" });
+              controller.close();
+              break;
+            }
+          }
         }
-
-        send('done', {});
-        controller.close();
       } catch (e: any) {
-        slog('exception.createStream', { error: String(e?.message || e) });
-        send('error', { error: String(e?.message || e) });
+        log("stream.error", { error: "exception", detail: String(e?.message || e) });
+        send("error", { error: String(e?.message || e) });
         controller.close();
       }
     },
@@ -292,9 +156,9 @@ export async function POST(req: NextRequest) {
 
   return new Response(rs, {
     headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
     },
   });
 }
