@@ -389,9 +389,21 @@ export default function Chat() {
   };
 
   return (
-    <div className="flex flex-col h-full w-full">
-      <div ref={listRef} className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
+    <div className="flex flex-col min-h-[100svh] w-full">
+      <div ref={listRef} className="relative flex-1 overflow-y-auto">
+        {/* Capa de fondo con GIF, centrado y responsivo (máx 60% pantalla) */}
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+          <img
+            src="/images/Texts.gif"
+            alt="Coco Volare"
+            className="w-full h-auto max-w-[60vw] max-h-[60vh] opacity-30"
+            style={{ objectFit: 'contain' }}
+            draggable={false}
+          />
+        </div>
+
+        {/* Contenido de mensajes encima del fondo */}
+        <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
             isLoading={isLoading}
@@ -405,7 +417,7 @@ export default function Chat() {
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
-        className="sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
+        className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
         <div className="mx-auto max-w-3xl w-full px-4 py-3 flex items-center gap-2">
           <input
