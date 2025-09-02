@@ -10,7 +10,7 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
-// -------------------- Kommo helpers --------------------
+/* ==================== Helpers Kommo (legacy fence + json interno) ==================== */
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -59,15 +59,15 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
-// -------------------- Segmentación texto/JSON --------------------
+/* ==================== Segmentación texto/JSON (visible) ==================== */
 
-// Quita SOLO fences cv:kommo del texto visible
+// Quita SOLO fences cv:kommo del texto visible (legacy)
 function stripKommoFences(text: string): string {
   if (!text) return text;
   return text.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
 
-// Devuelve una lista ordenada de segmentos [{type:'text'|'json', text}], soporta múltiples fences y JSON balanceado "suelto"
+// Devuelve una lista ordenada de segmentos [{type:'text'|'json', text}]
 function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', text:string}> {
   const out: Array<{type:'text'|'json', text:string}> = [];
   if (!rawInput || !rawInput.trim()) return out;
@@ -75,7 +75,7 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
   // 1) quitar cv:kommo del render (sigue yendo a CRM por otra vía)
   let s = stripKommoFences(rawInput);
 
-  // 2) encontrar todas las fences (cv:itinerary | cv:quote | json)
+  // 2) fences explícitas
   const fenceRx = /```[ \t]*(cv:itinerary|cv:quote|json)[ \t]*\n?([\s\S]*?)```/gi;
   let cursor = 0;
   let m: RegExpExecArray | null;
@@ -91,14 +91,13 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
       const pretty = JSON.stringify(JSON.parse(rawJson), null, 2);
       out.push({ type: 'json', text: pretty });
     } catch {
-      // si la fence no parsea como JSON, la dejamos como texto literal
       out.push({ type: 'text', text: m[0] });
     }
 
     cursor = end;
   }
 
-  // 3) resto después de la última fence -> buscar JSON balanceado suelto (múltiples)
+  // 3) buscar JSON balanceado “suelto”
   s = s.slice(cursor);
 
   const pushText = (t: string) => { if (t && t.trim()) out.push({ type: 'text', text: t.trim() }); };
@@ -131,7 +130,7 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
           i = j;
           continue;
         } catch {
-          // no era JSON válido → seguir escaneando
+          // no era JSON válido → seguir
         }
       }
     }
@@ -153,6 +152,8 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
   return compact.filter(sg => sg.text.trim().length);
 }
 
+/* ==================== Chat ==================== */
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -163,7 +164,7 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // evita duplicar ejecuciones de kommo
+  // idempotencia: no duplicar ejecuciones de kommo
   const kommoHashesRef = useRef<Set<string>>(new Set());
   // cuenta de mensajes finalizados dentro del mismo RUN
   const runFinalsCountRef = useRef<number>(0);
@@ -210,9 +211,9 @@ export default function Chat() {
     }
   }, [messages]);
 
-  // ---- despacho CRM Kommo (interno, no visible) ----
+  /* ---- despacho CRM Kommo (interno, no visible) ---- */
   function dispatchKommoOps(ops: any[], rawKey: string) {
-    const key = 'k_' + rawKey.slice(0, 40);
+    const key = 'k_' + rawKey.slice(0, 64);
     if (kommoHashesRef.current.has(key)) return;
     kommoHashesRef.current.add(key);
     fetch('/api/kommo/dispatch', {
@@ -221,6 +222,50 @@ export default function Chat() {
       body: JSON.stringify({ ops, threadId: threadIdRef.current }),
       keepalive: true,
     }).catch(() => {});
+  }
+
+  function triggerClientDownload(name: string, content: string) {
+    try {
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {}
+  }
+
+  // procesa un segmento JSON ya aislado; retorna true si lo “consumió” (no renderizar)
+  function handleJsonSegment(jsonText: string): boolean {
+    try {
+      const obj = JSON.parse(jsonText);
+      // 1) Nuevo formato interno para CRM
+      if (obj && typeof obj === 'object' && String(obj.internal || '').toLowerCase() === 'kommo') {
+        const ops = Array.isArray(obj.ops) ? obj.ops : [];
+        if (ops.length) {
+          const rawKey = JSON.stringify(ops).slice(0, 256);
+          dispatchKommoOps(ops, rawKey);
+        }
+        if (obj.download && obj.download.name && obj.download.content) {
+          triggerClientDownload(String(obj.download.name), String(obj.download.content));
+        }
+        return true; // no renderizar en chat
+      }
+
+      // 2) Tarjetas: permitir que se rendericen (se mostrarán en Messages)
+      if (obj && typeof obj === 'object' && typeof obj.cardType === 'string') {
+        return false; // sí se debe mostrar
+      }
+
+      // 3) Cualquier otro JSON → ocultar
+      return true;
+    } catch {
+      // No era JSON válido → que lo procese como texto normal
+      return false;
+    }
   }
 
   async function handleStream(userText: string) {
@@ -275,12 +320,13 @@ export default function Chat() {
             continue;
           }
 
+          // evento dedicado (si tu backend lo usa)
           if (event === 'kommo') {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
               if (ops.length) {
-                const rawKey = JSON.stringify(ops).slice(0, 40);
+                const rawKey = JSON.stringify(ops).slice(0, 256);
                 dispatchKommoOps(ops, rawKey);
               }
             } catch {}
@@ -294,7 +340,7 @@ export default function Chat() {
                 currentMsgBuffer += data.value;
                 fullTextForKommo += data.value;
 
-                // Detectar y despachar cv:kommo durante streaming
+                // Detectar y despachar cv:kommo (legacy) durante streaming
                 const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
@@ -331,13 +377,18 @@ export default function Chat() {
                 };
 
                 for (const seg of segments) {
-                  pushAssistant(seg.text);
+                  if (seg.type === 'json') {
+                    const consumed = handleJsonSegment(seg.text);
+                    if (!consumed) pushAssistant(seg.text);
+                  } else {
+                    pushAssistant(seg.text);
+                  }
                 }
               }
 
               runFinalsCountRef.current += 1;
 
-              // Despachar Kommo si solo vino en el final
+              // Despachar Kommo si solo vino en el final (legacy fence)
               const kommoBlocks = extractKommoBlocksFromText(finalTextRaw);
               for (const b of kommoBlocks) {
                 try {
@@ -350,8 +401,29 @@ export default function Chat() {
             continue;
           }
 
-          if (event === 'done' || event === 'error') {
-            // loader off SOLO cuando terminó el RUN
+          // ⬇️ NUEVO: muestra mensaje de error si el run falla
+          if (event === 'error') {
+            setIsLoading(false);
+            let errText = '⚠️ Ocurrió un problema al generar la respuesta. Intenta nuevamente.';
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              if (typeof data?.error === 'string' && data.error.trim()) {
+                errText = `⚠️ ${data.error}`;
+              }
+            } catch {}
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a_err_${Date.now()}`,
+                role: 'assistant',
+                parts: [{ type: 'text', text: errText }] as any,
+                createdAt: new Date().toISOString(),
+              } as any,
+            ]);
+            continue;
+          }
+
+          if (event === 'done') {
             setIsLoading(false);
           }
         }
@@ -414,7 +486,6 @@ export default function Chat() {
           )}
         </div>
 
-        {/* Contenido de mensajes */}
         <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
@@ -431,7 +502,6 @@ export default function Chat() {
         onSubmit={handleSubmit}
         className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
-        {/* Contenedor del composer: respeta safe-areas y evita overflow */}
         <div
           className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
           style={{
