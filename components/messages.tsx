@@ -5,7 +5,7 @@ import type { ChatMessage } from '@/lib/types';
 import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 
-const RICH_CARDS_ENABLED = true; // ACTIVADAS 😎
+const RICH_CARDS_ENABLED = true;
 
 type Props = {
   messages: ChatMessage[];
@@ -67,15 +67,33 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
 
 /* ===================== Helpers ===================== */
 
-// quita bloques internos de CRM
-function stripKommo(text: string) {
-  return (text || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
+// quita fences internos del texto visible (no las tarjetas)
+function stripFencesForTextFallback(text: string) {
+  if (!text) return '';
+  return text
+    // quita cualquier bloque cv:kommo / cv:itinerary / cv:quote
+    .replace(/```[ \t]*(cv:kommo|cv:itinerary|cv:quote)[\t ]*[\r\n]+([\s\S]*?)```/gi, '')
+    // y fences json genéricos
+    .replace(/```[ \t]*json[\t ]*[\r\n]+([\s\S]*?)```/gi, '')
+    .trim();
 }
 
-function extractBalancedJson(src: string, startIdx: number): string | null {
+// busca el primer fence etiquetado y regresa su contenido
+function extractLabeledFence(text: string): { label: 'cv:itinerary'|'cv:quote'|null; inner?: string } {
+  const rx = /```[ \t]*(cv:itinerary|cv:quote)[\t ]*[\r\n]+([\s\S]*?)```/i;
+  const m = rx.exec(text || '');
+  if (m) return { label: m[1].toLowerCase() as any, inner: m[2] || '' };
+  return { label: null };
+}
+
+// intenta parsear el primer JSON balanceado dentro de un string
+function extractBalancedJson(src: string): string | null {
+  if (!src) return null;
+  const i = src.indexOf('{');
+  if (i < 0) return null;
   let inString = false, escape = false, depth = 0, first = -1;
-  for (let i = startIdx; i < src.length; i++) {
-    const ch = src[i];
+  for (let j = i; j < src.length; j++) {
+    const ch = src[j];
     if (inString) {
       if (escape) { escape = false; continue; }
       if (ch === '\\') { escape = true; continue; }
@@ -83,29 +101,23 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
       continue;
     }
     if (ch === '"') { inString = true; continue; }
-    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
+    if (ch === '{') { if (depth === 0) first = j; depth++; continue; }
+    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, j + 1); }
   }
   return null;
 }
 
-// toma el primer JSON que aparezca (fence ```json o crudo balanceado)
-function parseFirstJson(text: string): any | null {
+// parsea el primer JSON del texto (fence json o balanceado crudo)
+function parseFirstJsonAnywhere(text: string): any | null {
   if (!text) return null;
-
-  // 1) fence ```json ... ```
-  const m = text.match(/```[ \t]*json[ \t]*\n?([\s\S]*?)```/i);
-  if (m) {
-    try { return JSON.parse(m[1] || ''); } catch {}
+  const mf = text.match(/```[ \t]*json[\t ]*[\r\n]+([\s\S]*?)```/i);
+  if (mf) {
+    const payload = mf[1] || '';
+    try { return JSON.parse(payload); } catch {}
   }
-
-  // 2) balanceado "crudo"
-  const i = text.indexOf('{');
-  if (i >= 0) {
-    const chunk = extractBalancedJson(text, i);
-    if (chunk) {
-      try { return JSON.parse(chunk); } catch {}
-    }
+  const balanced = extractBalancedJson(text);
+  if (balanced) {
+    try { return JSON.parse(balanced); } catch {}
   }
   return null;
 }
@@ -128,8 +140,6 @@ export default function Messages(props: Props) {
         const role = (m as any).role as string;
         const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
 
-        // Nunca renderizar cv:kommo (interno)
-        const visible = stripKommo(raw);
         if (role === 'system') return null;
 
         if (role === 'user') {
@@ -142,6 +152,7 @@ export default function Messages(props: Props) {
 
         if (role === 'assistant') {
           if (!RICH_CARDS_ENABLED) {
+            const visible = stripFencesForTextFallback(raw);
             if (!visible) return null;
             return (
               <AssistantBubble key={(m as any).id || i}>
@@ -150,26 +161,64 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 1) INTENTO PRINCIPAL: el mensaje ya viene dividido; si este segmento es JSON con cardType, pintamos tarjeta
-          const obj = parseFirstJson(visible);
-          const cardType = typeof obj?.cardType === 'string' ? obj.cardType.toLowerCase() : '';
+          // 1) Prioridad: fence etiquetado (cv:itinerary / cv:quote)
+          const labeled = extractLabeledFence(raw);
+          if (labeled.label && labeled.inner) {
+            const balanced = extractBalancedJson(labeled.inner) || labeled.inner;
+            try {
+              const obj = JSON.parse(balanced);
+              // si no trae cardType, lo inferimos por la etiqueta
+              const cardType = (typeof obj.cardType === 'string' ? obj.cardType.toLowerCase() : '') ||
+                               (labeled.label === 'cv:itinerary' ? 'itinerary' : 'quote');
 
-          if (cardType === 'itinerary') {
-            return (
-              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <ItineraryCard data={obj} />
-              </div>
-            );
-          }
-          if (cardType === 'quote') {
-            return (
-              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <QuoteCard data={obj} />
-              </div>
-            );
+              if (cardType === 'itinerary') {
+                return (
+                  <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                    <ItineraryCard data={{ ...obj, cardType }} />
+                  </div>
+                );
+              }
+              if (cardType === 'quote') {
+                return (
+                  <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                    <QuoteCard data={{ ...obj, cardType }} />
+                  </div>
+                );
+              }
+            } catch {
+              // JSON inválido dentro del fence → NO muestres el bloque crudo (lo ocultamos)
+              const onlyText = stripFencesForTextFallback(raw);
+              if (!onlyText) return null;
+              return (
+                <AssistantBubble key={(m as any).id || i}>
+                  <div className="whitespace-pre-wrap break-words">{onlyText}</div>
+                </AssistantBubble>
+              );
+            }
           }
 
-          // 2) FALLBACK: si no es JSON con cardType, lo mostramos como texto normal
+          // 2) Fallback: JSON en fence genérico o crudo en el mismo mensaje
+          const obj = parseFirstJsonAnywhere(raw);
+          if (obj && typeof obj === 'object') {
+            const cardType = typeof obj.cardType === 'string' ? obj.cardType.toLowerCase() : '';
+            if (cardType === 'itinerary') {
+              return (
+                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                  <ItineraryCard data={obj} />
+                </div>
+              );
+            }
+            if (cardType === 'quote') {
+              return (
+                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                  <QuoteCard data={obj} />
+                </div>
+              );
+            }
+          }
+
+          // 3) Texto normal (sin fences visibles)
+          const visible = stripFencesForTextFallback(raw);
           if (!visible) return null;
           return (
             <AssistantBubble key={(m as any).id || i}>
