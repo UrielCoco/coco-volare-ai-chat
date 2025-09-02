@@ -49,15 +49,13 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   // Fallback: fence sin cerrar pero JSON balanceado
   const at = text.toLowerCase().indexOf('```cv:kommo');
   if (at >= 0) {
-    const openBrace = text.indexOf('{', at);
-    if (openBrace >= 0) {
-      const jsonSlice = extractBalancedJson(text, openBrace);
-      if (jsonSlice) {
-        try {
-          const json = JSON.parse(jsonSlice);
-          if (json && Array.isArray(json.ops)) blocks.push({ raw: jsonSlice, json });
-        } catch {}
-      }
+    const rest = text.slice(at + '```cv:kommo'.length);
+    const json = extractBalancedJson(rest, rest.indexOf('{'));
+    if (json) {
+      try {
+        const parsed = JSON.parse(json);
+        if (parsed && Array.isArray(parsed.ops)) blocks.push({ raw: json, json: parsed });
+      } catch {}
     }
   }
   return blocks;
@@ -78,7 +76,7 @@ export default function Chat() {
 
   // manejar múltiples mensajes del assistant en un mismo run
   const runFinalsCountRef = useRef<number>(0);
-  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje "en curso"
+  const activeAssistantIdRef = useRef<string | null>(null); // reservado (no usamos placeholder)
 
   // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
@@ -93,7 +91,7 @@ export default function Chat() {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // restaurar thread
+  // restaurar thread desde sessionStorage
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -138,20 +136,8 @@ export default function Chat() {
     }).catch(() => {});
   }
 
-  // crea un mensaje placeholder con “…” (typing)
-  function ensureTypingPlaceholder(): string {
-    const id = `a_typing_${Date.now()}`;
-    const placeholder: ChatMessage = {
-      id,
-      role: 'assistant',
-      parts: [{ type: 'text', text: '…' }] as any,
-      createdAt: new Date().toISOString(),
-    } as any;
-    setMessages((prev) => [...prev, placeholder]);
-    return id;
-  }
-
   async function handleStream(userText: string) {
+    // Encendemos loader desde que inicia el RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
     activeAssistantIdRef.current = null;
@@ -171,39 +157,10 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let fullText = ''; // acumulado del mensaje “en curso”
-
-      // typing placeholder desde el arranque
-      let typingId = ensureTypingPlaceholder();
-      activeAssistantIdRef.current = typingId;
-
-      // helpers para escribir en el mensaje ACTIVO (placeholder o el último)
-      const applyText = (chunk: string, replace = false) => {
-        setMessages((prev) => {
-          const next = [...prev];
-          const aid = activeAssistantIdRef.current;
-          const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
-          if (idx >= 0) {
-            const curr = next[idx] as any;
-            const before = curr.parts?.[0]?.text ?? '';
-            curr.parts = [{ type: 'text', text: replace ? chunk : before + chunk }];
-            next[idx] = curr;
-          }
-          return next;
-        });
-      };
-
-      // intenta despachar Kommo si ya llegó un bloque (en delta/final)
-      const maybeDispatchKommo = () => {
-        const blocks = extractKommoBlocksFromText(fullText);
-        for (const b of blocks) {
-          try {
-            if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
-              dispatchKommoOps(b.json.ops, b.raw);
-            }
-          } catch {}
-        }
-      };
+      // Buffer local por-mensaje (no visible hasta 'final')
+      let currentMsgBuffer = '';
+      // Acumulado total solo para detectar y despachar cv:kommo
+      let fullTextForKommo = '';
 
       while (true) {
         const { value, done } = await reader.read();
@@ -231,68 +188,30 @@ export default function Chat() {
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
               }
             } catch {}
-          } else if (event === 'kommo') {
+            continue;
+          }
+
+          if (event === 'kommo') {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
-              ulog('sse.kommo', { count: ops.length });
               if (ops.length) {
                 const rawKey = JSON.stringify(ops).slice(0, 40);
                 dispatchKommoOps(ops, rawKey);
               }
             } catch {}
             continue;
-          } else if (event === 'delta') {
+          }
+
+          if (event === 'delta') {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
-                if (fullText.length === 0) {
-                  // primer delta: limpia el “…”
-                  applyText('', true);
-                }
-                fullText += data.value;
-                applyText(data.value);
-                maybeDispatchKommo();
-              }
-            } catch {}
-          } else if (event === 'final') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.text === 'string') {
-                const text = data.text;
+                currentMsgBuffer += data.value;
+                fullTextForKommo += data.value;
 
-                // ¿incluye bloque visible?
-                const hasBlock = /```cv:(itinerary|quote)\b/.test(text);
-
-                // reinicia buffer para el siguiente mensaje potencial
-                fullText = '';
-
-                if (runFinalsCountRef.current === 0) {
-                  // Reemplaza el primer typing por el texto final corto
-                  applyText(text, true);
-
-                  // Si NO hay bloque visible, dejamos un 2º placeholder “pensando…”
-                  if (!hasBlock) {
-                    const id2 = ensureTypingPlaceholder();
-                    activeAssistantIdRef.current = id2;
-                  }
-                } else {
-                  // Final adicional → NUEVO mensaje
-                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                  const newMsg: ChatMessage = {
-                    id,
-                    role: 'assistant',
-                    parts: [{ type: 'text', text }] as any,
-                    createdAt: new Date().toISOString(),
-                  } as any;
-                  setMessages((prev) => [...prev, newMsg]);
-                  activeAssistantIdRef.current = id;
-                }
-
-                runFinalsCountRef.current += 1;
-
-                // Despacho Kommo si vino en este final
-                const blocks = extractKommoBlocksFromText(text);
+                // Detecta y despacha cv:kommo durante el streaming (sin render)
+                const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
                     if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
@@ -302,35 +221,61 @@ export default function Chat() {
                 }
               }
             } catch {}
-          } else if (event === 'done' || event === 'error') {
+            continue;
+          }
+
+          if (event === 'final') {
+            try {
+              const data = JSON.parse(dataLine || '{}');
+              const text = String(data?.text ?? '');
+              // Si no hubo deltas, `text` ya trae el final completo
+              const finalText = text || currentMsgBuffer;
+              if (finalText && finalText.trim().length) {
+                const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                const newMsg: ChatMessage = {
+                  id,
+                  role: 'assistant',
+                  parts: [{ type: 'text', text: finalText }] as any,
+                  createdAt: new Date().toISOString(),
+                } as any;
+                setMessages((prev) => [...prev, newMsg]);
+              }
+              // Reinicia buffer para el siguiente mensaje dentro del RUN
+              currentMsgBuffer = '';
+              runFinalsCountRef.current += 1;
+
+              // Despacha Kommo por si vino solo en el 'final'
+              const blocks = extractKommoBlocksFromText(text);
+              for (const b of blocks) {
+                try {
+                  if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
+                    dispatchKommoOps(b.json.ops, b.raw);
+                  }
+                } catch {}
+              }
+            } catch {}
+            continue;
+          }
+
+          if (event === 'done' || event === 'error') {
+            // Apaga loader ÚNICAMENTE cuando terminó el RUN
             setIsLoading(false);
-            // Limpia cualquier placeholder “…” sobrante
-            setMessages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex(
-                (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
-              );
-              if (idx >= 0) next.splice(idx, 1);
-              return next;
-            });
           }
         }
       }
     } catch (err) {
       console.error('[CV][chat] stream error', err);
       setIsLoading(false);
-      setMessages((prev) => {
-        const next = [...prev];
-        const idx = next.findIndex(
-          (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
-        );
-        if (idx >= 0) {
-          (next[idx] as any).parts = [
-            { type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' },
-          ];
-        }
-        return next;
-      });
+      // Mensaje de error visible para el usuario
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a_err_${Date.now()}`,
+          role: 'assistant',
+          parts: [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }] as any,
+          createdAt: new Date().toISOString(),
+        } as any,
+      ]);
     }
   }
 
@@ -354,32 +299,21 @@ export default function Chat() {
   };
 
   return (
-    <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
-      {/* lista scrolleable */}
-      <div
-        ref={listRef}
-        className="flex-1 overflow-y-auto"
-        style={{ paddingBottom: `${composerH + 24}px` }}
-      >
-        <div className="mx-auto max-w-3xl w-full px-4">
+    <div className="flex flex-col h-full w-full">
+      <div ref={listRef} className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
             isLoading={isLoading}
-            setMessages={({ messages }) => setMessages(messages)}
+            setMessages={(p: any) => setMessages(p.messages)}
             regenerate={async () => {}}
           />
-          <div ref={endRef} />
+          <div ref={endRef} className="h-6" />
         </div>
       </div>
 
-      {/* composer */}
-      <form
-        ref={composerRef}
-        onSubmit={handleSubmit}
-        className="sticky bottom-0 left-0 right-0 w-full bg-background/70 backdrop-blur"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-      >
-        <div className="mx-auto max-w-3xl flex items-center gap-2 px-3 py-4">
+      <form ref={composerRef} onSubmit={handleSubmit} className="sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t">
+        <div className="mx-auto max-w-3xl w-full px-4 py-3 flex items-center gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

@@ -5,6 +5,8 @@ import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 import type { ChatMessage } from '@/lib/types';
 
+const RICH_CARDS_ENABLED = false; // desactivado temporalmente para ver mensajes 'tal cual'
+
 // ---------------- Helpers ----------------
 type Props = {
   messages: ChatMessage[];
@@ -16,19 +18,32 @@ type Props = {
   votes?: any[];
 };
 
-function getText(m: any) {
-  try {
-    return (m?.parts || [{ type: 'text', text: '' }])
-      .filter((p: any) => p?.type === 'text')
-      .map((p: any) => p?.text || '')
-      .join('');
-  } catch { return ''; }
+function UserBubble({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="w-full flex justify-end my-3 cv-appear">
+      <div className="max-w-[80%] rounded-2xl px-4 py-3 shadow bg-[#bba36d] text-black whitespace-pre-wrap break-words">
+        {children}
+      </div>
+    </div>
+  );
 }
 
-function guessLang(msgs: ChatMessage[]): 'es' | 'en' {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if ((msgs[i] as any).role === 'user') {
-      const t = getText(msgs[i]).toLowerCase();
+function AssistantBubble({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="w-full flex justify-start my-3 cv-appear">
+      <div className="max-w-[80%] rounded-2xl px-4 py-3 shadow bg-black/80 text-white whitespace-pre-wrap break-words">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function guessLang(messages: ChatMessage[]) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    const t = (m as any)?.parts?.[0]?.text || '';
+    if (typeof t === 'string' && t.trim()) {
       const looksEn = /\b(the|and|to|please|when|how|where|days?)\b/.test(t) && !/[áéíóúñ¿¡]/.test(t);
       return looksEn ? 'en' : 'es';
     }
@@ -59,44 +74,28 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
   if (idx === -1) return { found: false, complete: false };
 
   // Fenced
-  const re = new RegExp("```\\s*" + label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + "\\s*([\\s\\S]*?)```", "i");
-  const fenced = text.match(re);
+  const fenced = text.match(new RegExp("```\\s*" + label.replace(':','\\:') + "\\s*([\\s\\S]*?)```", "i"));
   if (fenced) {
-    try { return { found: true, complete: true, data: JSON.parse(fenced[1]) }; }
-    catch { return { found: true, complete: false }; }
+    try {
+      const json = JSON.parse(fenced[1] || '');
+      return { found: true, complete: true, data: json };
+    } catch {}
   }
 
-  // Plain JSON after label
-  const braceIdx = text.indexOf('{', idx);
-  if (braceIdx === -1) return { found: true, complete: false };
-  const jsonSlice = extractBalancedJson(text, braceIdx);
-  if (!jsonSlice) return { found: true, complete: false };
-  try { return { found: true, complete: true, data: JSON.parse(jsonSlice) }; }
-  catch { return { found: true, complete: false }; }
+  // No fenced → intenta JSON balanceado
+  const after = text.slice(idx + label.length);
+  const json = extractBalancedJson(after, after.indexOf('{'));
+  if (json) {
+    try {
+      const parsed = JSON.parse(json);
+      return { found: true, complete: true, data: parsed };
+    } catch {}
+  }
+
+  return { found: true, complete: false };
 }
 
-// -------------- UI bits ------------------
-function UserBubble({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="w-full flex justify-end my-2 cv-appear">
-      <div className="max-w-[80%] rounded-2xl bg-[#bba36d] text-black px-4 py-3 shadow">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function AssistantBubble({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="w-full flex justify-start my-2 cv-appear">
-      <div className="max-w-[80%] rounded-2xl bg-neutral-900 text-white px-4 py-3 shadow">
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
+function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
   const label = lang === 'en' ? 'thinking' : 'pensando';
   return (
     <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
@@ -111,7 +110,7 @@ function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   );
 }
 
-// -------------- Main ---------------------
+// ------------------
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
@@ -127,10 +126,11 @@ export default function Messages(props: Props) {
   return (
     <div className="mx-auto max-w-3xl w-full px-4 py-6">
       {messages.map((m, i) => {
-        const role = (m as any).role as 'user' | 'assistant' | 'system';
-        const raw = getText(m) ?? '';
-        const trimmed = raw.replace(/\u200B/g, '').trim();
-        // Oculta bloques secretos cv:kommo del texto visible
+        const role = (m as any).role as string;
+        const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
+
+        // Oculta cv:kommo en render (interno)
+        const trimmed = raw || '';
         const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         const stopped = (m as any)?.stopped === true;
 
@@ -147,6 +147,16 @@ export default function Messages(props: Props) {
         if (role === 'assistant') {
           // Evita burbuja doble cuando aún no hay tokens
           if (!visible) return null;
+
+          // Mostrar como texto plano mientras desactivamos tarjetas ricas
+          if (!RICH_CARDS_ENABLED) {
+            return (
+              <AssistantBubble key={(m as any).id || i}>
+                <div className="whitespace-pre-wrap break-words">{visible}</div>
+                {stopped && <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>}
+              </AssistantBubble>
+            );
+          }
 
           // 1) Itinerario
           const it = extractLabeledJson(trimmed, 'cv:itinerary');
