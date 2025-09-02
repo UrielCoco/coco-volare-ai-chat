@@ -1,171 +1,162 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
-import type { NextRequest } from 'next/server';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+export const runtime = 'edge';
 
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
-if (!ASSISTANT_ID) {
-  console.error('[CV][api] FALTA OPENAI_ASSISTANT_ID');
+// --- Util: logging wrapper (shows nicely in Vercel) ---
+function log(event: string, meta: Record<string, any> = {}) {
+  try {
+    // Using console.info to keep a single level in Vercel logs
+    console.info(`[CV][api] ${event}`, meta);
+  } catch {}
 }
 
-const enc = new TextEncoder();
-const sse = (event: string, data?: any) =>
-  enc.encode(`event: ${event}\n${data !== undefined ? `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n` : ''}\n`);
-
-// --- Extractores correctos para Assistants v2 ---
-function extractDeltaText(e: any): string {
-  // e.delta.content = [{ type: "output_text.delta" | "input_text.delta" | "tool_call.delta", text?: string, ...}, ...]
-  const parts = e?.delta?.content;
-  if (!Array.isArray(parts)) return '';
-  let out = '';
-  for (const p of parts) {
-    if (typeof p?.text === 'string' && typeof p?.type === 'string' && p.type.endsWith('.delta')) {
-      out += p.text;
-    }
-  }
-  return out;
+// --- Util: send SSE frame ---
+function sseFrame(event: string, data: any) {
+  const payload = typeof data === 'string' ? data : JSON.stringify(data);
+  return `event: ${event}\n` + `data: ${payload}\n\n`;
 }
 
-function extractCompletedText(e: any): string {
-  // e.data.content = [{ type: "output_text" | "input_text" | ..., text?: string }, ...]
-  const parts = e?.data?.content;
-  if (!Array.isArray(parts)) return '';
-  let out = '';
-  for (const p of parts) {
-    if (p?.type === 'output_text' && typeof p?.text === 'string') out += p.text;
+// --- Kommo fence extraction (optional server hint) ---
+function extractKommoOps(text: string): any[] {
+  if (!text) return [];
+  const out: any[] = [];
+  const fence = /```\\s*cv:kommo\\s*([\\s\\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(text))) {
+    const raw = (m[1] || '').trim();
+    try {
+      const json = JSON.parse(raw);
+      if (json && Array.isArray(json.ops)) {
+        out.push(...json.ops);
+      }
+    } catch {}
   }
   return out;
 }
 
 export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const threadId: string | null = body?.threadId ?? null;
-    const userText: string = body?.message?.parts?.[0]?.text ?? '';
+  const encoder = new TextEncoder();
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const stream = new ReadableStream<Uint8Array>({
+    start: async (controller) => {
+      const write = (event: string, data: any) => {
+        controller.enqueue(encoder.encode(sseFrame(event, data)));
+      };
 
-    // 1) Crear/usar thread
-    const thread =
-      threadId
-        ? { id: threadId }
-        : await client.beta.threads.create({ metadata: { app: 'coco-volare' } });
+      try {
+        const body = await req.json().catch(() => ({}));
+        const { message, threadId } = body || {};
 
-    console.log('[CV][api] thread', { threadId: thread.id });
+        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || '' });
 
-    // 2) Mensaje del usuario
-    await client.beta.threads.messages.create(thread.id, {
-      role: 'user',
-      content: userText,
-    });
-    console.log('[CV][api] user.message.created', { len: userText?.length });
+        // Ensure thread
+        let tId = threadId as string | null;
+        if (!tId) {
+          const t = await client.beta.threads.create({});
+          tId = t.id;
+        }
+        log('thread', { threadId: tId });
+        write('meta', { threadId: tId });
 
-    // 3) Stream del run
-    const stream: any = await client.beta.threads.runs.stream(thread.id, {
-      assistant_id: ASSISTANT_ID,
-      metadata: { ui: 'embed', source: 'web' },
-    });
+        // Add user message (text-only)
+        let userText = '';
+        if (message?.parts?.[0]?.text) userText = String(message.parts[0].text);
+        else if (typeof message === 'string') userText = message;
+        await client.beta.threads.messages.create(tId!, {
+          role: 'user',
+          content: userText || '',
+        });
+        log('user.message.created', { len: (userText || '').length });
 
-    let anyText = false;
+        // Start streamed run
+        const runStream: any = await client.beta.threads.runs.stream(tId!, {
+          assistant_id: process.env.OPENAI_ASSISTANT_ID || '',
+          // You can add additional_instructions or tool_choice if needed
+        });
 
-    const rs = new ReadableStream({
-      start(controller) {
-        controller.enqueue(sse('meta', { threadId: thread.id }));
+        // --- Attach event listeners ---
+        runStream
+          .on('run.created', (ev: any) => log('run.created', { id: ev?.data?.id }))
+          .on('run.queued', () => log('run.queued'))
+          .on('run.in_progress', () => log('run.in_progress'))
+          .on('run.completed', () => log('run.completed'))
+          .on('run.failed', (ev: any) => log('run.failed', { error: ev?.data?.last_error }))
+          .on('run.step.created', (ev: any) => log('run.step.created', { id: ev?.data?.id }))
+          .on('run.step.in_progress', (ev: any) => log('run.step.in_progress', { id: ev?.data?.id }))
+          .on('run.step.completed', (ev: any) => log('run.step.completed', { id: ev?.data?.id, type: ev?.data?.type }))
+          .on('run.step.failed', (ev: any) => log('run.step.failed', { id: ev?.data?.id }))
+          .on('message.delta', (ev: any) => {
+            // Stream textual deltas to UI
+            try {
+              const parts = ev?.data?.delta?.content || [];
+              let acc = '';
+              for (const p of parts) {
+                if (p?.type === 'output_text.delta' && typeof p?.text === 'string') {
+                  acc += p.text;
+                }
+              }
+              log('messageDelta', { len: acc.length });
+              if (acc.length) write('delta', { value: acc });
+              else write('delta', { len: 0 });
+            } catch (err) {
+              log('message.delta.parse.error', { err: String(err) });
+            }
+          })
+          .on('message.completed', (ev: any) => {
+            // Send final full text
+            try {
+              let text = '';
+              const content = ev?.data?.content || [];
+              for (const c of content) {
+                if (c?.type === 'output_text' && c?.text?.value) text += c.text.value;
+              }
+              log('message.completed', { len: text.length });
 
-        const on = (event: string, cb: (payload: any) => void) => {
-          stream.on?.(event, (e: any) => {
-            try { cb(e); } catch (err) { console.error('[CV][api] on-handler error', event, err); }
+              // Optional: server-side Kommo hint
+              const ops = extractKommoOps(text);
+              if (ops.length) {
+                write('kommo', { ops });
+              }
+
+              write('final', { text });
+            } catch (err) {
+              log('message.completed.parse.error', { err: String(err) });
+            }
+          })
+          .on('end', () => {
+            log('stream.end');
+            // Ensure client turns off "pensando"
+            write('done', { ok: true });
+            controller.close();
+          })
+          .on('error', (err: any) => {
+            log('stream.error', { err: String(err?.message || err) });
+            write('error', { message: String(err?.message || err) });
+            controller.close();
           });
-        };
 
-        // Deltas (nombres viejos y nuevos por compat)
-        on('message.delta', (e) => {
-          const t = extractDeltaText(e);
-          console.log('[CV][api] message.delta', { len: t.length });
-          if (t) {
-            anyText = true;
-            controller.enqueue(sse('delta', { value: t }));
-          }
-        });
-        on('messageDelta', (e) => {
-          const t = extractDeltaText(e);
-          console.log('[CV][api] messageDelta', { len: t.length });
-          if (t) {
-            anyText = true;
-            controller.enqueue(sse('delta', { value: t }));
-          }
-        });
+      } catch (err: any) {
+        log('fatal', { err: String(err?.message || err) });
+        try {
+          controller.enqueue(encoder.encode(sseFrame('error', { message: String(err?.message || err) })));
+          controller.enqueue(encoder.encode(sseFrame('done', { ok: false })));
+        } catch {}
+        controller.close();
+      }
+    },
+    cancel() {
+      log('stream.cancelled');
+    },
+  });
 
-        // Final de cada mensaje del assistant
-        on('message.completed', (e) => {
-          const t = extractCompletedText(e);
-          console.log('[CV][api] message.completed', { len: t.length });
-          if (t) {
-            anyText = true;
-            controller.enqueue(sse('final', { text: t }));
-          }
-        });
-        on('messageCompleted', (e) => {
-          const t = extractCompletedText(e);
-          console.log('[CV][api] messageCompleted', { len: t.length });
-          if (t) {
-            anyText = true;
-            controller.enqueue(sse('final', { text: t }));
-          }
-        });
-
-        // Paso a paso (solo logs para Vercel)
-        on('run.step.created', (e) => console.log('[CV][api] step.created', e?.data?.id));
-        on('run.step.in_progress', (e) => console.log('[CV][api] step.in_progress', e?.data?.id));
-        on('run.step.completed', (e) => console.log('[CV][api] step.completed', e?.data?.id));
-        on('run.step.failed', (e) => console.log('[CV][api] step.failed', e?.data?.id));
-
-        on('run.completed', () => {
-          console.log('[CV][api] run.completed', { anyText });
-          controller.enqueue(sse('done', { anyText }));
-          controller.close();
-        });
-        on('runCompleted', () => {
-          console.log('[CV][api] runCompleted', { anyText });
-          controller.enqueue(sse('done', { anyText }));
-          controller.close();
-        });
-
-        on('run.failed', (e) => {
-          console.error('[CV][api] run.failed', e?.data);
-          controller.enqueue(sse('error', { message: 'run.failed' }));
-          controller.close();
-        });
-        on('error', (e) => {
-          console.error('[CV][api] stream.error', e);
-          controller.enqueue(sse('error', { message: 'stream.error' }));
-          controller.close();
-        });
-
-        stream.on?.('end', () => {
-          console.log('[CV][api] stream.end');
-          try { controller.enqueue(sse('done', { anyText })); } catch {}
-          controller.close();
-        });
-      },
-      cancel() {
-        try { stream.abort?.(); } catch {}
-      },
-    });
-
-    return new Response(rs, {
-      headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      },
-    });
-  } catch (err: any) {
-    console.error('[CV][api] fatal', err);
-    return new Response(JSON.stringify({ error: 'internal_error', detail: String(err?.message ?? err) }), { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
 }
