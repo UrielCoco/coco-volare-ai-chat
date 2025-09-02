@@ -5,7 +5,7 @@ import type { ChatMessage } from '@/lib/types';
 import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 
-const RICH_CARDS_ENABLED = true; // ACTIVADAS 😎
+const RICH_CARDS_ENABLED = true; // tarjetas activas
 
 type Props = {
   messages: ChatMessage[];
@@ -65,7 +65,13 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
   );
 }
 
-// ---------- Helpers para extraer JSON etiquetado o balanceado ----------
+/* ===================== Helpers ===================== */
+
+// quita bloques internos de CRM
+function stripKommo(text: string) {
+  return (text || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
+}
+
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -83,31 +89,28 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
   return null;
 }
 
-function extractLabeledJson(text: string, label: string): { found: boolean; complete: boolean; data?: any } {
-  const lower = text.toLowerCase();
-  const idx = lower.indexOf(label.toLowerCase());
-  if (idx === -1) return { found: false, complete: false };
+// toma el primer JSON que aparezca (fence ```json o crudo balanceado)
+function parseFirstJson(text: string): any | null {
+  if (!text) return null;
 
-  const fenced = text.match(new RegExp("```\\s*" + label.replace(':','\\:') + "\\s*([\\s\\S]*?)```", "i"));
-  if (fenced) {
-    try {
-      const json = JSON.parse(fenced[1] || '');
-      return { found: true, complete: true, data: json };
-    } catch {}
+  // 1) fence ```json
+  const m = text.match(/```[ \t]*json[ \t]*\n?([\s\S]*?)```/i);
+  if (m) {
+    try { return JSON.parse(m[1] || ''); } catch {}
   }
 
-  const after = text.slice(idx + label.length);
-  const json = extractBalancedJson(after, after.indexOf('{'));
-  if (json) {
-    try {
-      const parsed = JSON.parse(json);
-      return { found: true, complete: true, data: parsed };
-    } catch {}
+  // 2) balanceado crudo
+  const i = text.indexOf('{');
+  if (i >= 0) {
+    const chunk = extractBalancedJson(text, i);
+    if (chunk) {
+      try { return JSON.parse(chunk); } catch {}
+    }
   }
-
-  return { found: true, complete: false };
+  return null;
 }
 
+/* ===================== Componente ===================== */
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
@@ -126,8 +129,6 @@ export default function Messages(props: Props) {
         const role = (m as any).role as string;
         const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
 
-        // Nunca renderizar cv:kommo (interno)
-        const visible = (raw || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         if (role === 'system') return null;
 
         if (role === 'user') {
@@ -140,6 +141,8 @@ export default function Messages(props: Props) {
 
         if (role === 'assistant') {
           if (!RICH_CARDS_ENABLED) {
+            // modo texto crudo (debug)
+            const visible = stripKommo(raw);
             if (!visible) return null;
             return (
               <AssistantBubble key={(m as any).id || i}>
@@ -148,35 +151,29 @@ export default function Messages(props: Props) {
             );
           }
 
-          // Itinerary
-          const it = extractLabeledJson(raw, 'cv:itinerary');
-          if (it.found && !it.complete) return null; // espera a que esté completo
-          if (it.complete && it.data) {
+          // NUEVO: solo mostramos si hay JSON con cardType
+          const visible = stripKommo(raw);
+          const obj = parseFirstJson(visible);
+          const cardType = typeof obj?.cardType === 'string' ? obj.cardType.toLowerCase() : '';
+
+          if (cardType === 'itinerary') {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <ItineraryCard data={it.data} />
+                <ItineraryCard data={obj} />
               </div>
             );
           }
 
-          // Quote
-          const q = extractLabeledJson(raw, 'cv:quote');
-          if (q.found && !q.complete) return null;
-          if (q.complete && q.data) {
+          if (cardType === 'quote') {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <QuoteCard data={q.data} />
+                <QuoteCard data={obj} />
               </div>
             );
           }
 
-          // Texto normal
-          if (!visible) return null;
-          return (
-            <AssistantBubble key={(m as any).id || i}>
-              <div className="whitespace-pre-wrap break-words">{visible}</div>
-            </AssistantBubble>
-          );
+          // Si no trae cardType → oculto (no pintamos nada)
+          return null;
         }
 
         return null;
