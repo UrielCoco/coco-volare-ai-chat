@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import type { ChatMessage } from '@/lib/types';
 import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
-import type { ChatMessage } from '@/lib/types';
 
-const RICH_CARDS_ENABLED = false; // seguimos desactivadas temporalmente
+const RICH_CARDS_ENABLED = true; // ACTIVADAS 😎
 
 type Props = {
   messages: ChatMessage[];
@@ -50,6 +50,22 @@ function guessLang(messages: ChatMessage[]) {
   return 'es';
 }
 
+function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
+  const label = lang === 'en' ? 'thinking' : 'pensando';
+  return (
+    <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
+      <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
+      <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
+        <span className="opacity-90">{label}</span>
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '0ms', background: 'rgba(255,255,255,.8)' }} />
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '150ms', background: 'rgba(255,255,255,.6)' }} />
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '300ms', background: 'rgba(255,255,255,.4)' }} />
+      </div>
+    </div>
+  );
+}
+
+// ---------- Helpers para extraer JSON etiquetado o balanceado ----------
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -92,21 +108,6 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
   return { found: true, complete: false };
 }
 
-function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
-  const label = lang === 'en' ? 'thinking' : 'pensando';
-  return (
-    <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
-      <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
-      <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
-        <span className="opacity-90">{label}</span>
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '0ms', background: 'rgba(255,255,255,.8)' }} />
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '150ms', background: 'rgba(255,255,255,.6)' }} />
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '300ms', background: 'rgba(255,255,255,.4)' }} />
-      </div>
-    </div>
-  );
-}
-
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
@@ -125,10 +126,8 @@ export default function Messages(props: Props) {
         const role = (m as any).role as string;
         const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
 
-        // Oculta cv:kommo en render
+        // Nunca renderizar cv:kommo (interno)
         const visible = (raw || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
-        const stopped = (m as any)?.stopped === true;
-
         if (role === 'system') return null;
 
         if (role === 'user') {
@@ -140,19 +139,18 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          if (!visible) return null;
-
           if (!RICH_CARDS_ENABLED) {
+            if (!visible) return null;
             return (
               <AssistantBubble key={(m as any).id || i}>
                 <div className="whitespace-pre-wrap break-words">{visible}</div>
-                {stopped && <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>}
               </AssistantBubble>
             );
           }
 
-          const it = extractLabeledJson(visible, 'cv:itinerary');
-          if (it.found && !it.complete) return null;
+          // Itinerary
+          const it = extractLabeledJson(raw, 'cv:itinerary');
+          if (it.found && !it.complete) return null; // espera a que esté completo
           if (it.complete && it.data) {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
@@ -161,7 +159,8 @@ export default function Messages(props: Props) {
             );
           }
 
-          const q = extractLabeledJson(visible, 'cv:quote');
+          // Quote
+          const q = extractLabeledJson(raw, 'cv:quote');
           if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
             return (
@@ -171,10 +170,11 @@ export default function Messages(props: Props) {
             );
           }
 
+          // Texto normal
+          if (!visible) return null;
           return (
             <AssistantBubble key={(m as any).id || i}>
               <div className="whitespace-pre-wrap break-words">{visible}</div>
-              {stopped && <div className="text-xs opacity-70 mt-1">⏹️ Respuesta detenida por el usuario</div>}
             </AssistantBubble>
           );
         }

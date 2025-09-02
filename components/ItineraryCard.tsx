@@ -1,286 +1,378 @@
 'use client';
 
-import { useState } from 'react';
+import React from 'react';
 
-function ulog(event: string, meta: any = {}) {
-  try { console.debug('[CV][ui][itin]', event, meta); } catch {}
-}
-
-const isISODate = (s?: string) => !!(s && /^\d{4}-\d{2}-\d{2}$/.test(s));
-
+type Pax = { adults: number; children?: number; infants?: number };
+type Budget = { currency: string; amountMin?: number; amountMax?: number };
+type Location = { city: string; country?: string };
 type Weather = {
   tempCmin?: number; tempCmax?: number;
   tempFmin?: number; tempFmax?: number;
   humidity?: number; icon?: string; summary?: string;
 };
 
-type Location = { city?: string; country?: string };
-type Hotel = { name?: string; area?: string; style?: string };
+type Flight = {
+  carrier?: string;
+  code?: string;
+  from?: string;
+  to?: string;
+  depart?: string; // ISO datetime
+  arrive?: string; // ISO datetime
+  baggage?: string;
+  pnr?: string;
+  notes?: string;
+};
 
-type TimelineItem = {
+type Transport = {
+  mode: 'car'|'van'|'bus'|'train'|'boat'|'helicopter'|'other';
+  provider?: string;
+  from?: string;
+  to?: string;
+  time?: string;      // HH:mm
+  duration?: string;  // ISO 8601 duration
+  notes?: string;
+};
+
+type ActivityOption = { title: string; notes?: string };
+
+type Activity = {
   time?: string;
-  category?: 'activity' | 'transport' | 'hotel' | string;
-  title?: string;
+  category: 'activity'|'meal'|'transfer'|'flight'|'hotel'|'free'|'other';
+  title: string;
   location?: string;
-  duration?: string;
+  duration?: string; // ISO 8601
   optional?: boolean;
   notes?: string;
-  options?: { title?: string; notes?: string }[];
-  transport?: {
-    mode?: 'air' | 'land' | 'sea' | string;
-    from?: Location; to?: Location;
-    carrier?: string; code?: string;
-    duration?: string;
-    isInternational?: boolean;
-    bookedByClient?: boolean;
-  };
+  options?: ActivityOption[];
+};
+
+type Hotel = {
+  name?: string;
+  area?: string;
+  style?: string;
+  checkIn?: string;
+  checkOut?: string;
+  confirmation?: string;
 };
 
 type Day = {
-  day?: number;
+  day: number;
   date?: string;
   title?: string;
   locations?: Location[];
   weather?: Weather;
+  flightsInternational?: Flight[];
+  flightsDomestic?: Flight[];
+  transports?: Transport[];
+  hotel?: Hotel;
   hotelOptions?: Hotel[];
-  timeline?: TimelineItem[];
-  notes?: string;
+  activities?: Activity[]; // (antes "timeline")
+  timeline?: Activity[];   // retro-compatibilidad
+  addOns?: { title: string; description?: string; provider?: string; time?: string; duration?: string; note?: string }[];
+};
+
+type Summary = {
+  destination?: string;
+  startDate?: string;
+  endDate?: string;
+  nights?: number;
+  pax?: Pax;
+  theme?: string[];
+  budget?: Budget;
+  overview?: string;
 };
 
 type Itinerary = {
-  lang?: 'es' | 'en' | string;
+  lang?: 'es'|'en'|string;
   tripTitle?: string;
-  title?: string; // compat
   clientBooksLongHaulFlights?: boolean;
   disclaimer?: string;
-  days?: Day[];
-  price?: number;
-  currency?: string;
-  notes?: string;
+  summary?: Summary;
+  days: Day[];
 };
 
-function DaySection({ d, index }: { d: Day; index: number }) {
-  const locs = (d.locations || []).filter(Boolean);
-  const tl = (d.timeline || []).filter(Boolean);
-  const showWeather =
-    !!d.weather &&
-    (d.weather.tempCmin != null ||
-      d.weather.tempCmax != null ||
-      d.weather.tempFmin != null ||
-      d.weather.tempFmax != null ||
-      d.weather.humidity != null ||
-      d.weather.icon ||
-      d.weather.summary);
-  const showDate = isISODate(d.date);
+function safe<T>(v: any, fallback: T): T {
+  return (v === undefined || v === null) ? fallback : v;
+}
 
+function fmtDate(d?: string) {
+  if (!d) return '';
+  try {
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return d;
+    return dt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch {
+    return d;
+  }
+}
+
+function fmtDateTime(d?: string) {
+  if (!d) return '';
+  try {
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return d;
+    return dt.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+  } catch {
+    return d;
+  }
+}
+
+function fmtDurationISO(iso?: string) {
+  if (!iso) return '';
+  // MUY simple: PT#H#M
+  const m = /^P(T(?:(\d+)H)?(?:(\d+)M)?)$/i.exec(iso);
+  if (!m) return iso;
+  const h = m[2] ? parseInt(m[2]) : 0;
+  const min = m[3] ? parseInt(m[3]) : 0;
+  if (h && min) return `${h}h ${min}m`;
+  if (h) return `${h}h`;
+  if (min) return `${min}m`;
+  return '0m';
+}
+
+function Chip({ children }: { children: React.ReactNode }) {
+  return <span className="inline-flex items-center rounded-full bg-neutral-800/80 text-white px-2 py-1 text-xs mr-2 mb-2">{children}</span>;
+}
+
+function Section({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl bg-neutral-50 shadow-sm">
-      <div className="px-4 py-3">
-        <div className="text-sm text-neutral-500">
-          Día {d.day ?? index + 1}{showDate ? ` • ${d.date}` : ''}
-        </div>
-        {d.title && <div className="font-semibold">{d.title}</div>}
-
-        {locs.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {locs.map((l, j) => (
-              <span key={j} className="text-xs px-2 py-1 rounded-full bg-white shadow">
-                {l.city || ''}{l.city && l.country ? ', ' : ''}{l.country || ''}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {showWeather && (
-          <div className="mt-2 text-sm text-neutral-700 flex items-center gap-2">
-            <span>{d.weather?.icon || '🌤️'}</span>
-            <span>
-              {d.weather?.summary || ''}
-              {d.weather?.tempCmin != null || d.weather?.tempCmax != null ? (
-                <> • min {d.weather?.tempCmin ?? '-'}°C / max {d.weather?.tempCmax ?? '-'}°C</>
-              ) : null}
-              {d.weather?.tempFmin != null || d.weather?.tempFmax != null ? (
-                <> ({d.weather?.tempFmin ?? '-'}–{d.weather?.tempFmax ?? '-'}°F)</>
-              ) : null}
-              {d.weather?.humidity != null ? <> • hum {d.weather?.humidity}%</> : null}
-            </span>
-          </div>
-        )}
+    <div className="mt-4">
+      <div className="flex items-center gap-2 text-[15px] font-semibold text-white">
+        <span>{icon}</span>
+        <span>{title}</span>
       </div>
-
-      {Array.isArray(d.hotelOptions) && d.hotelOptions.length > 0 && (
-        <div className="px-4 pb-3">
-          <div className="text-sm font-medium mb-2">Hoteles sugeridos</div>
-          <ul className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {d.hotelOptions.map((h, j) => (
-              <li key={j} className="rounded-lg bg-white p-3 shadow">
-                <div className="font-medium">{h.name}</div>
-                {(h.area || h.style) && (
-                  <div className="text-xs text-neutral-600">
-                    {h.area ? `${h.area}` : ''}{h.area && h.style ? ' • ' : ''}{h.style || ''}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {tl.length > 0 && (
-        <div className="px-4 pb-4">
-          <div className="text-sm font-medium mb-2">Plan del día</div>
-          <ul className="space-y-2">
-            {tl.map((item, k) => (
-              <li key={k} className="rounded-lg bg-white p-3 shadow">
-                <div className="text-xs text-neutral-500">
-                  {(item.time || '--:--')}{item.category ? ` • ${item.category}` : ''}
-                </div>
-                {item.title && <div className="font-medium">{item.title}</div>}
-                {item.location && <div className="text-sm text-neutral-700">{item.location}</div>}
-                {item.duration && <div className="text-xs text-neutral-600 mt-1">Duración: {item.duration}</div>}
-                {item.optional ? <div className="text-xs text-neutral-600">Opcional</div> : null}
-                {item.notes && <div className="text-xs text-neutral-700 mt-1">{item.notes}</div>}
-
-                {Array.isArray(item.options) && item.options.length > 0 && (
-                  <ul className="mt-2 list-disc pl-5 text-sm">
-                    {item.options.map((op, z) => (
-                      <li key={z}>
-                        {op.title && <span className="font-medium">{op.title}</span>}
-                        {op.title && op.notes ? ' — ' : ''}
-                        {op.notes || ''}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {item.category === 'transport' && item.transport && (
-                  <div className="mt-2 text-xs text-neutral-700 space-y-0.5">
-                    {item.transport.mode && <div>Modo: {item.transport.mode}</div>}
-                    {(item.transport.from || item.transport.to) && (
-                      <div>
-                        Ruta:{' '}
-                        {(item.transport.from?.city || '')}
-                        {item.transport.from?.country ? `, ${item.transport.from.country}` : ''}
-                        {' → '}
-                        {(item.transport.to?.city || '')}
-                        {item.transport.to?.country ? `, ${item.transport.to.country}` : ''}
-                      </div>
-                    )}
-                    {item.transport.carrier && <div>Compañía: {item.transport.carrier}</div>}
-                    {item.transport.code && <div>Código: {item.transport.code}</div>}
-                    {item.transport.duration && <div>Duración: {item.transport.duration}</div>}
-                    {item.transport.isInternational != null && <div>Internacional: {item.transport.isInternational ? 'sí' : 'no'}</div>}
-                    {item.transport.bookedByClient != null && <div>Reserva por cliente: {item.transport.bookedByClient ? 'sí' : 'no'}</div>}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {d.notes && <div className="px-4 pb-4 text-sm text-neutral-700">{d.notes}</div>}
+      <div className="mt-2">{children}</div>
     </div>
   );
 }
 
-export default function ItineraryCard({ data }: { data: Itinerary }) {
-  const title = data?.tripTitle || data?.title || 'Itinerario';
-  const days = Array.isArray(data?.days) ? data.days : [];
-  const [dayIdx, setDayIdx] = useState(0);
+function KVP({ k, v }: { k: string; v?: React.ReactNode }) {
+  if (!v && v !== 0) return null;
+  return (
+    <div className="flex items-start gap-2 text-sm text-neutral-200">
+      <div className="min-w-[110px] text-neutral-400">{k}</div>
+      <div className="flex-1">{v}</div>
+    </div>
+  );
+}
 
-  const lang = (data?.lang === 'en' ? 'en' : 'es') as 'es' | 'en';
-  const t = {
-    prev: lang === 'en' ? 'Previous day' : 'Día anterior',
-    next: lang === 'en' ? 'Next day'     : 'Siguiente día',
-    of:   lang === 'en' ? 'of'           : 'de',
-  };
+function Divider() {
+  return <div className="h-px bg-neutral-800 my-4" />;
+}
 
-  const prev = () => setDayIdx((i) => Math.max(0, i - 1));
-  const next = () => setDayIdx((i) => Math.min(days.length - 1, i + 1));
-
-  ulog('render.simple-nav', { title, days: days.length, dayIdx, lang });
-
-  const baseBtn =
-    'rounded-full h-9 px-3 shadow transition-all duration-200 ' +
-    'hover:-translate-y-0.5 hover:shadow-md active:scale-95 focus:outline-none ' +
-    'focus:ring-2 focus:ring-[#bba36d] focus:ring-offset-2';
-
-  const btnEnabled = 'bg-black text-white';
-  const btnDisabled = 'bg-neutral-300 text-neutral-600 cursor-not-allowed';
+export default function ItineraryCard({ data }: { data: Itinerary | any }) {
+  // Permitir string JSON
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch {}
+  }
+  const it: Itinerary = data || { days: [] };
+  const summary = it.summary || {};
+  const days: Day[] = safe(it.days, []);
 
   return (
-    <div className="w-full flex justify-start">
-      {/* Sin bordes, con sombra y LOGO MÁS GRANDE */}
-      <div className="relative w-full max-w-3xl rounded-2xl bg-white text-black shadow-lg p-4 space-y-4 overflow-hidden">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h3 className="text-lg md:text-xl font-semibold leading-tight truncate">{title}</h3>
-            {data?.disclaimer && (
-              <p className="text-xs text-neutral-600 mt-1 line-clamp-3">{data.disclaimer}</p>
-            )}
-          </div>
-
-          <div className="flex items-start gap-3 shrink-0">
-            {data?.price != null && (
-              <div className="text-sm font-medium whitespace-nowrap mt-2">
-                {data.price} {data.currency || ''}
-              </div>
-            )}
-            <img
-              src="/images/logo-coco-volare.png"
-              alt="Coco Volare"
-              className="h-14 md:h-16 lg:h-20 w-auto select-none drop-shadow-sm"
-              draggable={false}
-            />
-          </div>
+    <div className="rounded-2xl bg-neutral-900 text-neutral-100 shadow-lg border border-neutral-800 overflow-hidden">
+      {/* HEADER */}
+      <div className="px-5 py-4 border-b border-neutral-800 bg-neutral-900/70">
+        <div className="text-lg font-semibold text-white">{it.tripTitle || summary.destination || 'Itinerario'}</div>
+        {summary.overview && <div className="text-sm text-neutral-300 mt-1 whitespace-pre-wrap">{summary.overview}</div>}
+        <div className="flex flex-wrap gap-3 mt-3 text-sm">
+          {summary.startDate && summary.endDate && (
+            <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
+          )}
+          {summary.pax && (
+            <Chip>👥 {summary.pax.adults} adultos{summary.pax.children ? `, ${summary.pax.children} niños` : ''}{summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}</Chip>
+          )}
+          {summary.theme && summary.theme.length > 0 && (
+            <Chip>🎯 {summary.theme.join(' · ')}</Chip>
+          )}
+          {summary.budget && (
+            <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>
+          )}
+          {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
         </div>
+      </div>
 
-        {/* Navegación simple por días */}
-        {days.length > 0 && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={prev}
-              disabled={dayIdx === 0}
-              aria-disabled={dayIdx === 0}
-              className={`${baseBtn} ${dayIdx === 0 ? btnDisabled : btnEnabled}`}
-              aria-label={t.prev}
-            >
-              ‹ {t.prev}
-            </button>
+      {/* DISCLAIMER */}
+      {it.disclaimer && (
+        <div className="px-5 py-2 text-xs text-neutral-400 border-b border-neutral-800 bg-neutral-900/60">
+          {it.disclaimer}
+        </div>
+      )}
 
-            <div className="mx-auto text-sm text-neutral-600">
-              {lang === 'en'
-                ? `Day ${dayIdx + 1} ${t.of} ${days.length}`
-                : `Día ${dayIdx + 1} ${t.of} ${days.length}`}
+      {/* BODY: DAYS */}
+      <div className="px-5 py-5">
+        {days.length === 0 && <div className="text-sm text-neutral-400">Sin días cargados.</div>}
+
+        {days.map((d, idx) => {
+          const activities: Activity[] = d.activities || d.timeline || [];
+          return (
+            <div key={`day-${idx}`} className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 mb-5">
+              <div className="flex items-center justify-between">
+                <div className="text-base font-semibold text-white">Día {d.day}{d.title ? ` · ${d.title}` : ''}</div>
+                <div className="text-xs text-neutral-400">{fmtDate(d.date)}</div>
+              </div>
+
+              {/* chips de ubicación / clima */}
+              <div className="mt-2 flex flex-wrap">
+                {(d.locations || []).map((loc, i) => (
+                  <Chip key={i}>📍 {loc.city}{loc.country ? `, ${loc.country}` : ''}</Chip>
+                ))}
+                {d.weather && (d.weather.summary || d.weather.icon) && (
+                  <Chip>{d.weather.icon || '⛅'} {d.weather.summary}</Chip>
+                )}
+              </div>
+
+              {/* Vuelos internacionales */}
+              {d.flightsInternational && d.flightsInternational.length > 0 && (
+                <Section title="Vuelos internacionales" icon="🛫">
+                  <div className="space-y-2">
+                    {d.flightsInternational.map((f, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
+                        <div className="text-sm font-medium text-white">{f.carrier} {f.code}</div>
+                        <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
+                        <KVP k="Salida" v={fmtDateTime(f.depart)} />
+                        <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
+                        <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+                          {f.baggage && <Chip>🧳 {f.baggage}</Chip>}
+                          {f.pnr && <Chip>🔖 PNR {f.pnr}</Chip>}
+                        </div>
+                        {f.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{f.notes}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Vuelos domésticos */}
+              {d.flightsDomestic && d.flightsDomestic.length > 0 && (
+                <Section title="Vuelos domésticos" icon="🛩️">
+                  <div className="space-y-2">
+                    {d.flightsDomestic.map((f, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
+                        <div className="text-sm font-medium text-white">{f.carrier} {f.code}</div>
+                        <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
+                        <KVP k="Salida" v={fmtDateTime(f.depart)} />
+                        <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
+                        {f.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{f.notes}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Transportes */}
+              {d.transports && d.transports.length > 0 && (
+                <Section title="Transportes" icon="🚐">
+                  <div className="space-y-2">
+                    {d.transports.map((t, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
+                        <div className="font-medium text-white">{t.mode.toUpperCase()}</div>
+                        <KVP k="Ruta" v={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`} />
+                        <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+                          {t.time && <Chip>🕒 {t.time}</Chip>}
+                          {t.duration && <Chip>⏱ {fmtDurationISO(t.duration)}</Chip>}
+                          {t.provider && <Chip>🏷 {t.provider}</Chip>}
+                        </div>
+                        {t.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{t.notes}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Hotel principal */}
+              {d.hotel && (d.hotel.name || d.hotel.style || d.hotel.checkIn || d.hotel.checkOut) && (
+                <Section title="Hotel" icon="🏨">
+                  <div className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
+                    <div className="font-medium text-white">{d.hotel.name}</div>
+                    <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+                      {d.hotel.area && <Chip>📍 {d.hotel.area}</Chip>}
+                      {d.hotel.style && <Chip>🏷 {d.hotel.style}</Chip>}
+                      {d.hotel.checkIn && <Chip>🛎 Check-in {fmtDateTime(d.hotel.checkIn)}</Chip>}
+                      {d.hotel.checkOut && <Chip>🔔 Check-out {fmtDateTime(d.hotel.checkOut)}</Chip>}
+                      {d.hotel.confirmation && <Chip>✅ {d.hotel.confirmation}</Chip>}
+                    </div>
+                  </div>
+                </Section>
+              )}
+
+              {/* Opciones de hotel */}
+              {d.hotelOptions && d.hotelOptions.length > 0 && (
+                <Section title="Opciones de hotel" icon="🛏️">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {d.hotelOptions.map((h, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
+                        <div className="font-medium text-white">{h.name}</div>
+                        <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+                          {h.area && <Chip>📍 {h.area}</Chip>}
+                          {h.style && <Chip>🏷 {h.style}</Chip>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Actividades (timeline) */}
+              {activities && activities.length > 0 && (
+                <Section title="Plan del día" icon="🧭">
+                  <div className="space-y-2">
+                    {activities.map((a, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
+                        <div className="flex flex-wrap gap-2 items-center">
+                          {a.time && <Chip>🕒 {a.time}</Chip>}
+                          <Chip>🏷 {a.category}</Chip>
+                          {a.duration && <Chip>⏱ {fmtDurationISO(a.duration)}</Chip>}
+                          {a.optional && <Chip>⚪ Opcional</Chip>}
+                        </div>
+                        <div className="mt-1 text-white font-medium">{a.title}</div>
+                        {a.location && <div className="text-xs text-neutral-300 mt-1">📍 {a.location}</div>}
+                        {a.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{a.notes}</div>}
+                        {a.options && a.options.length > 0 && (
+                          <div className="mt-2 pl-2 border-l border-neutral-700">
+                            {a.options.map((op, j) => (
+                              <div key={j} className="text-xs text-neutral-300">• <span className="font-medium text-neutral-200">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+
+              {/* Servicios Adicionales */}
+              {d.addOns && d.addOns.length > 0 && (
+                <Section title="Servicios adicionales" icon="✨">
+                  <div className="space-y-2">
+                    {d.addOns.map((s, i) => (
+                      <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
+                        <div className="text-white font-medium">{s.title}</div>
+                        <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+                          {s.time && <Chip>🕒 {s.time}</Chip>}
+                          {s.duration && <Chip>⏱ {fmtDurationISO(s.duration)}</Chip>}
+                          {s.provider && <Chip>🏷 {s.provider}</Chip>}
+                        </div>
+                        {(s.description || s.note) && (
+                          <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">
+                            {s.description}{s.description && s.note ? ' — ' : ''}{s.note}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
             </div>
+          );
+        })}
 
-            <button
-              onClick={next}
-              disabled={dayIdx === days.length - 1}
-              aria-disabled={dayIdx === days.length - 1}
-              className={`${baseBtn} ${dayIdx === days.length - 1 ? btnDisabled : btnEnabled}`}
-              aria-label={t.next}
-            >
-              {t.next} ›
-            </button>
-          </div>
-        )}
-
-        {/* Contenido del día seleccionado */}
-        {days[dayIdx] && <DaySection d={days[dayIdx]} index={dayIdx} />}
-
-        {data?.notes && <div className="text-sm text-neutral-700">{data.notes}</div>}
-
-        {/* Marca de agua sutil */}
-        <div className="pointer-events-none absolute -bottom-2 -right-2 opacity-[0.06] select-none">
-          <img
-            src="/images/logo-coco-volare.png"
-            alt=""
-            className="h-24 md:h-28 w-auto"
-            draggable={false}
-          />
+        <Divider />
+        <div className="text-[11px] text-neutral-500">
+          *Fechas, horarios y proveedores sujetos a disponibilidad y cambios sin previo aviso.
         </div>
       </div>
     </div>
