@@ -5,7 +5,7 @@ import type { ChatMessage } from '@/lib/types';
 import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 
-const RICH_CARDS_ENABLED = true; // ACTIVADAS 😎
+const RICH_CARDS_ENABLED = true; // Tarjetas ACTIVAS
 
 type Props = {
   messages: ChatMessage[];
@@ -65,7 +65,7 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
   );
 }
 
-// ---------- Helpers para extraer JSON etiquetado o balanceado ----------
+/** ===================== Helpers de parseo ===================== **/
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -84,10 +84,6 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
 }
 
 function extractLabeledJson(text: string, label: string): { found: boolean; complete: boolean; data?: any } {
-  const lower = text.toLowerCase();
-  const idx = lower.indexOf(label.toLowerCase());
-  if (idx === -1) return { found: false, complete: false };
-
   const fenced = text.match(new RegExp("```\\s*" + label.replace(':','\\:') + "\\s*([\\s\\S]*?)```", "i"));
   if (fenced) {
     try {
@@ -95,7 +91,11 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
       return { found: true, complete: true, data: json };
     } catch {}
   }
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(label.toLowerCase());
+  if (idx === -1) return { found: false, complete: false };
 
+  // etiqueta detectada pero sin fence completo
   const after = text.slice(idx + label.length);
   const json = extractBalancedJson(after, after.indexOf('{'));
   if (json) {
@@ -104,10 +104,35 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
       return { found: true, complete: true, data: parsed };
     } catch {}
   }
-
+  // Halló etiqueta, pero no pudo cerrar → found=true, complete=false
   return { found: true, complete: false };
 }
 
+function looksLikeItinerary(obj: any) {
+  return obj && typeof obj === 'object' && Array.isArray(obj.days) && (obj.tripTitle || obj.summary);
+}
+function looksLikeQuote(obj: any) {
+  return obj && typeof obj === 'object' && Array.isArray(obj.lineItems) && (obj.currency || obj.summary);
+}
+
+function tryParseAnyJson(text: string): any | null {
+  // 1) intenta fence genérico ```json
+  const fj = text.match(/```[\t ]*json[\t ]*([\s\S]*?)```/i);
+  if (fj) {
+    try { return JSON.parse(fj[1] || ''); } catch {}
+  }
+  // 2) intenta primer bloque balanceado
+  const brace = text.indexOf('{');
+  if (brace >= 0) {
+    const balanced = extractBalancedJson(text, brace);
+    if (balanced) {
+      try { return JSON.parse(balanced); } catch {}
+    }
+  }
+  return null;
+}
+
+/** ===================== Componente ===================== **/
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
@@ -128,6 +153,7 @@ export default function Messages(props: Props) {
 
         // Nunca renderizar cv:kommo (interno)
         const visible = (raw || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
+
         if (role === 'system') return null;
 
         if (role === 'user') {
@@ -148,9 +174,8 @@ export default function Messages(props: Props) {
             );
           }
 
-          // Itinerary
+          /** ---- 1) Intento estricto: fences etiquetados ---- **/
           const it = extractLabeledJson(raw, 'cv:itinerary');
-          if (it.found && !it.complete) return null; // espera a que esté completo
           if (it.complete && it.data) {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
@@ -158,10 +183,7 @@ export default function Messages(props: Props) {
               </div>
             );
           }
-
-          // Quote
           const q = extractLabeledJson(raw, 'cv:quote');
-          if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
@@ -170,7 +192,39 @@ export default function Messages(props: Props) {
             );
           }
 
-          // Texto normal
+          /** ---- 2) Fallback robusto: si etiqueta detectada pero incompleta, NO ocultes ---- **/
+          if ((it.found && !it.complete) || (q.found && !q.complete)) {
+            // Renderiza texto crudo mientras llega el fence completo
+            if (!visible) return null;
+            return (
+              <AssistantBubble key={(m as any).id || i}>
+                <div className="whitespace-pre-wrap break-words">{visible}</div>
+              </AssistantBubble>
+            );
+          }
+
+          /** ---- 3) Fallback heurístico: JSON sin etiqueta pero con "forma" ---- **/
+          const maybe = tryParseAnyJson(raw);
+          if (maybe) {
+            try {
+              if (looksLikeItinerary(maybe)) {
+                return (
+                  <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                    <ItineraryCard data={maybe} />
+                  </div>
+                );
+              }
+              if (looksLikeQuote(maybe)) {
+                return (
+                  <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                    <QuoteCard data={maybe} />
+                  </div>
+                );
+              }
+            } catch { /* si falla, cae a texto */ }
+          }
+
+          /** ---- 4) Texto plano (default) ---- **/
           if (!visible) return null;
           return (
             <AssistantBubble key={(m as any).id || i}>
