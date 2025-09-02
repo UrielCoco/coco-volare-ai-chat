@@ -388,18 +388,32 @@ export default function Chat() {
     await handleStream(text);
   };
 
+  const hasMessages = messages.length > 0;
+
   return (
     <div className="flex flex-col min-h-[100svh] w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
-        {/* Capa de fondo con GIF, centrado y responsivo (máx 60% pantalla) */}
+        {/* Fondo dinámico:
+            - Chat vacío  -> Texts.gif centrado sin opacidad
+            - Con mensajes -> Intelligence.gif sutil */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-          <img
-            src="/images/Texts.gif"
-            alt="Coco Volare"
-            className="w-full h-auto max-w-[60vw] max-h-[60vh] opacity-30"
-            style={{ objectFit: 'contain' }}
-            draggable={false}
-          />
+          {!hasMessages ? (
+            <img
+              src="/images/Texts.gif"
+              alt="Coco Volare"
+              className="w-full h-auto max-w-[60vw] max-h-[60vh]"
+              style={{ objectFit: 'contain' }}
+              draggable={false}
+            />
+          ) : (
+            <img
+              src="/images/Intelligence.gif"
+              alt="Coco Volare"
+              className="w-full h-auto max-w-[60vw] max-h-[60vh] opacity-30"
+              style={{ objectFit: 'contain' }}
+              draggable={false}
+            />
+          )}
         </div>
 
         {/* Contenido de mensajes encima del fondo */}
