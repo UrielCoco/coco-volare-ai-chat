@@ -5,7 +5,7 @@ import type { ChatMessage } from '@/lib/types';
 import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 
-const RICH_CARDS_ENABLED = true; // ACTIVADAS 😎
+const RICH_CARDS_ENABLED = true;
 
 type Props = {
   messages: ChatMessage[];
@@ -67,7 +67,7 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
 
 /* ===================== Helpers ===================== */
 
-// quita bloques internos de CRM
+// quitar fences legacy cv:kommo
 function stripKommo(text: string) {
   return (text || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
@@ -93,13 +93,13 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
 function parseFirstJson(text: string): any | null {
   if (!text) return null;
 
-  // 1) fence ```json ... ```
+  // fence ```json ... ```
   const m = text.match(/```[ \t]*json[ \t]*\n?([\s\S]*?)```/i);
   if (m) {
     try { return JSON.parse(m[1] || ''); } catch {}
   }
 
-  // 2) balanceado "crudo"
+  // balanceado crudo
   const i = text.indexOf('{');
   if (i >= 0) {
     const chunk = extractBalancedJson(text, i);
@@ -128,7 +128,7 @@ export default function Messages(props: Props) {
         const role = (m as any).role as string;
         const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
 
-        // Nunca renderizar cv:kommo (interno)
+        // Nunca renderizar cv:kommo (legacy)
         const visible = stripKommo(raw);
         if (role === 'system') return null;
 
@@ -141,35 +141,32 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          if (!RICH_CARDS_ENABLED) {
-            if (!visible) return null;
-            return (
-              <AssistantBubble key={(m as any).id || i}>
-                <div className="whitespace-pre-wrap break-words">{visible}</div>
-              </AssistantBubble>
-            );
-          }
-
-          // 1) INTENTO PRINCIPAL: el mensaje ya viene dividido; si este segmento es JSON con cardType, pintamos tarjeta
+          // Si viene JSON interno o JSON sin cardType → NO se muestra
           const obj = parseFirstJson(visible);
-          const cardType = typeof obj?.cardType === 'string' ? obj.cardType.toLowerCase() : '';
-
-          if (cardType === 'itinerary') {
-            return (
-              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <ItineraryCard data={obj} />
-              </div>
-            );
+          if (obj && typeof obj === 'object') {
+            const internal = String(obj.internal || '').toLowerCase();
+            if (internal === 'kommo') return null;
+            const cardType = typeof obj.cardType === 'string' ? obj.cardType.toLowerCase() : '';
+            if (!cardType) return null; // ocultar cualquier JSON sin cardType
+            if (cardType === 'itinerary') {
+              return (
+                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                  <ItineraryCard data={obj} />
+                </div>
+              );
+            }
+            if (cardType === 'quote') {
+              return (
+                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                  <QuoteCard data={obj} />
+                </div>
+              );
+            }
+            // cardType desconocido → no renderizar
+            return null;
           }
-          if (cardType === 'quote') {
-            return (
-              <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <QuoteCard data={obj} />
-              </div>
-            );
-          }
 
-          // 2) FALLBACK: si no es JSON con cardType, lo mostramos como texto normal
+          // Texto plano normal
           if (!visible) return null;
           return (
             <AssistantBubble key={(m as any).id || i}>
