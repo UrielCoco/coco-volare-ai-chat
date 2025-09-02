@@ -154,7 +154,7 @@ export default function Messages(props: Props) {
           if (it.complete && it.data) {
             return (
               <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
-                <ItineraryCard itinerary={it.data} />
+                <ItineraryCard data={it.data} />
               </div>
             );
           }
