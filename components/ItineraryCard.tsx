@@ -59,13 +59,16 @@ function fmtDate(d?: string) {
     return dt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
   } catch { return d; }
 }
-function fmtTime(d?: string) {
-  if (!d) return '';
-  try {
-    const dt = new Date(d);
-    if (isNaN(dt.getTime())) return d;
+function fmtTime(input?: string) {
+  if (!input) return '';
+  // soporta HH:mm o ISO
+  const tryIso = Date.parse(input);
+  if (!isNaN(tryIso)) {
+    const dt = new Date(tryIso);
     return dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  } catch { return d; }
+  }
+  const m = /^(\d{1,2}):(\d{2})$/.exec(input);
+  return m ? `${m[1].padStart(2,'0')}:${m[2]}` : input;
 }
 function fmtDateTime(d?: string) {
   if (!d) return '';
@@ -95,7 +98,7 @@ function formatMoney(currency: string = 'USD', value?: number) {
   }
 }
 
-/** ================== Chips & helpers UI ================== **/
+/** ================== Chips ================== **/
 function Chip({ children, dark = false }: { children: React.ReactNode; dark?: boolean }) {
   return (
     <span
@@ -106,20 +109,9 @@ function Chip({ children, dark = false }: { children: React.ReactNode; dark?: bo
     </span>
   );
 }
-
 function Divider() { return <div className="h-px my-4" style={{ background: '#e7e5e4' }} />; }
 
-function KVP({ k, v }: { k: string; v?: React.ReactNode }) {
-  if (!v && v !== 0) return null;
-  return (
-    <div className={`flex items-start gap-2 text-sm ${TEXT_DIM}`}>
-      <div className="min-w-[110px] text-neutral-500">{k}</div>
-      <div className="flex-1">{v}</div>
-    </div>
-  );
-}
-
-/** =============== Helpers layout =============== **/
+/** ================== Pager ================== **/
 function usePager(total: number) {
   const [page, setPage] = useState(0);
   const next = () => setPage(p => Math.min(total - 1, p + 1));
@@ -138,6 +130,7 @@ function usePager(total: number) {
   return { page, next, prev, goto, setPage };
 }
 
+/** ================== Helpers Summary ================== **/
 function uniqueCities(days: Day[]): number {
   const set = new Set<string>();
   for (const d of days) {
@@ -146,52 +139,7 @@ function uniqueCities(days: Day[]): number {
   return set.size;
 }
 
-/** =============== Banner Cards para el look “imagen 2” =============== **/
-function BannerCard({
-  image = '/images/Palms.jpg',
-  title,
-  subtitle,
-  tags = [],
-  rightTag,
-  onClick,
-}: {
-  image?: string;
-  title: string;
-  subtitle?: string;
-  tags?: React.ReactNode[];
-  rightTag?: React.ReactNode;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full overflow-hidden rounded-xl shadow-sm hover:shadow transition"
-      style={{ border: `1px solid ${GOLD}33`, background: '#fff' }}
-    >
-      <div className="relative w-full h-36 md:h-40 rounded-xl overflow-hidden">
-        <img src={image} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
-        <div className="absolute left-3 right-3 bottom-3">
-          <div className="text-white text-sm opacity-90">{subtitle}</div>
-          <div className="text-white text-lg font-semibold leading-tight">{title}</div>
-          <div className="mt-1 flex flex-wrap items-center gap-1">
-            {tags.map((t, i) => (
-              <Chip key={i} dark>{t}</Chip>
-            ))}
-            {rightTag && (
-              <span className="ml-auto inline-flex items-center px-2 py-1 text-xs rounded-full bg-white/90 text-neutral-900">
-                {rightTag}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-/** ================== Páginas ================== **/
+/** ================== Summary (curva + dorado) ================== **/
 function SummaryPage({ it }: { it: Itinerary }) {
   const summary = it.summary || {};
   const daysCount = safe(it.days, []).length || (summary.nights ? summary.nights + 1 : 0);
@@ -201,46 +149,72 @@ function SummaryPage({ it }: { it: Itinerary }) {
 
   return (
     <div className="pb-5">
-      {/* HERO */}
-      <div className="relative w-full overflow-hidden rounded-t-2xl">
-        <div className="relative w-full aspect-[16/9] md:aspect-[21/9]">
-          <img
-            src="/images/Palms.jpg"
-            alt="Destino"
-            className="absolute inset-0 w-full h-full object-cover"
-            draggable={false}
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+      {/* Hero con recorte curvo y logo destacado */}
+      <div className="relative rounded-t-2xl overflow-hidden">
+        {/* Imagen */}
+        <img
+          src="/images/Palms.jpg"
+          alt="Destino"
+          className="w-full h-64 md:h-80 object-cover"
+          draggable={false}
+        />
 
-          {/* Overlay inferior (texto como en referencia 1) */}
-          <div className="absolute left-4 right-4 bottom-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Chip dark>🛏 {daysCount || '—'} {daysCount === 1 ? 'DÍA' : 'DÍAS'}</Chip>
-              <Chip dark>📍 {cities || '—'} {cities === 1 ? 'CIUDAD' : 'CIUDADES'}</Chip>
-            </div>
-            <div className="text-white text-2xl md:text-3xl font-semibold leading-tight drop-shadow">
-              {it.tripTitle || summary.destination || 'Itinerary'}
-            </div>
-            {summary.overview && (
-              <div className="text-white/90 text-sm md:text-base mt-1 max-w-2xl">
-                {summary.overview}
-              </div>
-            )}
+        {/* Curva blanca inferior (SVG) */}
+        <svg
+          className="absolute bottom-0 left-0 w-full h-24"
+          viewBox="0 0 1440 320"
+          preserveAspectRatio="none"
+        >
+          <path d="M0,192 C240,256 480,288 720,272 C960,256 1200,192 1440,224 L1440,360 L0,360 Z" fill="#ffffff" />
+        </svg>
 
-            {estimate !== undefined && (
-              <div className="absolute right-0 -bottom-2 translate-y-full md:translate-y-0 md:static md:mt-2">
-                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold shadow"
-                     style={{ background: GOLD, color: '#111827' }}>
-                  Estimado {formatMoney(currency, estimate)}
-                </div>
-              </div>
-            )}
+        {/* Logo pill */}
+        <div className="absolute top-3 left-3">
+          <div
+            className="flex items-center gap-2 rounded-full px-3 py-1 shadow bg-white/90"
+            style={{ border: `1px solid ${GOLD}` }}
+          >
+            <img
+              src="/images/logo-coco-volare.png"
+              alt="Coco Volare"
+              className="h-6 w-auto select-none"
+              draggable={false}
+            />
+            <span className="text-xs font-medium text-neutral-800">Coco Volare Intelligence</span>
           </div>
         </div>
+
+        {/* Overlay de texto como la referencia */}
+        <div className="absolute left-4 md:left-6 bottom-6 md:bottom-8 text-white drop-shadow">
+          <div className="flex items-center gap-2 mb-2">
+            <Chip dark>🛏 {daysCount || '—'} {daysCount === 1 ? 'DÍA' : 'DÍAS'}</Chip>
+            <Chip dark>📍 {cities || '—'} {cities === 1 ? 'CIUDAD' : 'CIUDADES'}</Chip>
+          </div>
+          <div className="text-2xl md:text-3xl font-semibold">
+            {it.tripTitle || summary.destination || 'Itinerary'}
+          </div>
+          {summary.overview && (
+            <div className="text-sm md:text-base mt-1 max-w-xl opacity-90">
+              {summary.overview}
+            </div>
+          )}
+        </div>
+
+        {/* Precio estimado (dorado) */}
+        {estimate !== undefined && (
+          <div className="absolute right-4 bottom-6">
+            <div
+              className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold shadow"
+              style={{ background: GOLD, color: '#111827' }}
+            >
+              Estimado {formatMoney(currency, estimate)}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Meta + disclaimer en tarjeta blanca */}
-      <div className="px-5 -mt-3">
+      <div className="px-5 -mt-6">
         <div className="rounded-xl border bg-white p-4 shadow-sm" style={{ borderColor: '#eceae6' }}>
           <div className="flex flex-wrap gap-2 text-sm">
             {summary.startDate && summary.endDate && (
@@ -267,25 +241,167 @@ function SummaryPage({ it }: { it: Itinerary }) {
   );
 }
 
-function DayPage({ d }: { d: Day }) {
-  const activities: Activity[] = d.activities || d.timeline || [];
-  const loc = (d.locations && d.locations[0]) || undefined;
+/** ================== Timeline (diseño estilo referencia) ================== **/
+type TItem = {
+  timeSort: number;
+  timeText?: string;
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+  note?: string;
+};
 
+function timeToMinutes(t?: string) {
+  if (!t) return Number.POSITIVE_INFINITY;
+  // ISO
+  const ms = Date.parse(t);
+  if (!isNaN(ms)) {
+    const d = new Date(ms);
+    return d.getHours() * 60 + d.getMinutes();
+  }
+  // HH:mm
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (m) return parseInt(m[1]) * 60 + parseInt(m[2]);
+  return Number.POSITIVE_INFINITY;
+}
+
+function collectTimeline(d: Day): TItem[] {
+  const items: TItem[] = [];
+
+  // Flights (depart & arrive)
+  const addFlight = (f: Flight) => {
+    if (f.depart) {
+      items.push({
+        timeSort: timeToMinutes(f.depart),
+        timeText: fmtTime(f.depart),
+        title: `${f.carrier || 'Vuelo'} ${f.code || ''} · Salida`,
+        subtitle: `${f.from || ''} → ${f.to || ''}`,
+        right: (
+          <div className="text-[10px] text-neutral-500">
+            {f.baggage && `🧳 ${f.baggage}`} {f.pnr && ` · PNR ${f.pnr}`}
+          </div>
+        ),
+        note: f.notes,
+      });
+    }
+    if (f.arrive) {
+      items.push({
+        timeSort: timeToMinutes(f.arrive),
+        timeText: fmtTime(f.arrive),
+        title: `${f.carrier || 'Vuelo'} ${f.code || ''} · Llegada`,
+        subtitle: `${f.to || ''}`,
+      });
+    }
+  };
+  (d.flightsInternational || []).forEach(addFlight);
+  (d.flightsDomestic || []).forEach(addFlight);
+
+  // Transports
+  (d.transports || []).forEach(t => {
+    items.push({
+      timeSort: timeToMinutes(t.time),
+      timeText: fmtTime(t.time),
+      title: `${(t.mode || 'Transporte').toUpperCase()}${t.provider ? ` · ${t.provider}` : ''}`,
+      subtitle: `${t.from || ''}${t.to ? ` → ${t.to}` : ''}${t.duration ? ` · ${fmtDurationISO(t.duration)}` : ''}`,
+      note: t.notes,
+    });
+  });
+
+  // Hotel
+  if (d.hotel?.checkIn) {
+    items.push({
+      timeSort: timeToMinutes(d.hotel.checkIn),
+      timeText: fmtTime(d.hotel.checkIn),
+      title: `Check-in · ${d.hotel.name || 'Hotel'}`,
+      subtitle: `${d.hotel.area || ''}${d.hotel.style ? ` · ${d.hotel.style}` : ''}`,
+      right: d.hotel.confirmation ? <span className="text-[10px] text-neutral-500">Conf: {d.hotel.confirmation}</span> : undefined,
+    });
+  }
+  if (d.hotel?.checkOut) {
+    items.push({
+      timeSort: timeToMinutes(d.hotel.checkOut),
+      timeText: fmtTime(d.hotel.checkOut),
+      title: `Check-out · ${d.hotel.name || 'Hotel'}`,
+      subtitle: `${d.hotel.area || ''}`,
+    });
+  }
+
+  // Activities
+  const acts: Activity[] = d.activities || d.timeline || [];
+  acts.forEach(a => {
+    items.push({
+      timeSort: timeToMinutes(a.time),
+      timeText: fmtTime(a.time),
+      title: `${a.title}${a.category ? ` · ${a.category}` : ''}${a.duration ? ` · ${fmtDurationISO(a.duration)}` : ''}${a.optional ? ' · Opcional' : ''}`,
+      subtitle: a.location,
+      note: a.notes,
+    });
+  });
+
+  // AddOns
+  (d.addOns || []).forEach(s => {
+    items.push({
+      timeSort: timeToMinutes(s.time),
+      timeText: fmtTime(s.time),
+      title: `${s.title}${s.duration ? ` · ${fmtDurationISO(s.duration)}` : ''}`,
+      subtitle: s.provider,
+      note: s.description || s.note,
+    });
+  });
+
+  // Orden
+  items.sort((a, b) => a.timeSort - b.timeSort);
+  return items;
+}
+
+function TimelineItem({ it }: { it: TItem }) {
+  return (
+    <div className="relative flex gap-4">
+      {/* Hora */}
+      <div className="w-14 shrink-0 text-right text-xs font-medium text-neutral-800 pt-3">
+        {it.timeText || '—'}
+      </div>
+
+      {/* Línea vertical */}
+      <div className="relative">
+        <div className="absolute left-1.5 top-0 bottom-0 w-[2px]" style={{ background: GOLD }} />
+        <div className="absolute -left-1 top-3 h-3 w-3 rounded-full border-2" style={{ background: GOLD, borderColor: 'white' }} />
+      </div>
+
+      {/* Tarjeta */}
+      <div className="flex-1">
+        <div className="rounded-xl border bg-white p-3 shadow-sm" style={{ borderColor: '#eceae6' }}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[15px] font-semibold text-neutral-900">{it.title}</div>
+              {it.subtitle && <div className="text-xs text-neutral-600 mt-0.5">{it.subtitle}</div>}
+            </div>
+            {it.right}
+          </div>
+          {it.note && <div className="text-xs text-neutral-600 mt-2">{it.note}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DayPage({ d }: { d: Day }) {
+  const items = collectTimeline(d);
   return (
     <div className="px-5 py-5">
-      {/* Encabezado del día (look compacto) */}
-      <div className="flex items-center justify-between mb-2">
+      {/* Encabezado del día */}
+      <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-[11px] tracking-wider text-neutral-500">DÍA {d.day}</div>
           <div className="text-base md:text-lg font-semibold text-neutral-900">
-            {d.title || (loc ? `${loc.city}${loc.country ? `, ${loc.country}` : ''}` : 'Plan del día')}
+            {d.title || 'Plan del día'}
           </div>
         </div>
         <div className="text-xs text-neutral-500">{fmtDate(d.date)}</div>
       </div>
 
-      {/* Chips de ubicación / clima */}
-      <div className="mb-3 flex flex-wrap">
+      {/* Chips ubicación y clima */}
+      <div className="mb-4 flex flex-wrap">
         {(d.locations || []).map((l, i) => (
           <Chip key={i}>📍 {l.city}{l.country ? `, ${l.country}` : ''}</Chip>
         ))}
@@ -294,145 +410,14 @@ function DayPage({ d }: { d: Day }) {
         )}
       </div>
 
-      {/* Vuelos internacionales en formato “banner” */}
-      {(d.flightsInternational && d.flightsInternational.length > 0) && (
-        <div className="mb-3">
-          <div className="text-sm font-semibold mb-2">Vuelos internacionales</div>
-          <div className="space-y-2">
-            {d.flightsInternational.map((f, i) => (
-              <BannerCard
-                key={i}
-                title={`${f.carrier || 'Aerolínea'} ${f.code || ''}`.trim()}
-                subtitle={`${f.from || ''} → ${f.to || ''}`}
-                tags={[
-                  f.depart ? <>Salida {fmtTime(f.depart)}</> : null,
-                  f.arrive ? <>Llegada {fmtTime(f.arrive)}</> : null,
-                  f.baggage ? <>🧳 {f.baggage}</> : null,
-                  f.pnr ? <>🔖 {f.pnr}</> : null,
-                ].filter(Boolean) as React.ReactNode[]}
-                rightTag={d.weather?.icon}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Vuelos domésticos */}
-      {(d.flightsDomestic && d.flightsDomestic.length > 0) && (
-        <div className="mb-3">
-          <div className="text-sm font-semibold mb-2">Vuelos domésticos</div>
-          <div className="space-y-2">
-            {d.flightsDomestic.map((f, i) => (
-              <BannerCard
-                key={i}
-                title={`${f.carrier || 'Aerolínea'} ${f.code || ''}`.trim()}
-                subtitle={`${f.from || ''} → ${f.to || ''}`}
-                tags={[
-                  f.depart ? <>Salida {fmtTime(f.depart)}</> : null,
-                  f.arrive ? <>Llegada {fmtTime(f.arrive)}</> : null,
-                ].filter(Boolean) as React.ReactNode[]}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Transportes */}
-      {(d.transports && d.transports.length > 0) && (
-        <div className="mb-3">
-          <div className="text-sm font-semibold mb-2">Transportes</div>
-          <div className="space-y-2">
-            {d.transports.map((t, i) => (
-              <BannerCard
-                key={i}
-                title={`${t.mode?.toUpperCase() || 'Transporte'}${t.provider ? ` · ${t.provider}` : ''}`}
-                subtitle={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`}
-                tags={[
-                  t.time ? <>🕒 {t.time}</> : null,
-                  t.duration ? <>⏱ {fmtDurationISO(t.duration)}</> : null,
-                ].filter(Boolean) as React.ReactNode[]}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Hotel (tarjeta simple) */}
-      {d.hotel && (d.hotel.name || d.hotel.style || d.hotel.checkIn || d.hotel.checkOut) && (
-        <div className="mb-3">
-          <div className="text-sm font-semibold mb-2">Hotel</div>
-          <div className="rounded-xl border p-3 bg-white shadow-sm" style={{ borderColor: '#eceae6' }}>
-            <div className="font-medium text-neutral-900">{d.hotel.name}</div>
-            <div className="flex flex-wrap gap-2 text-xs text-neutral-600 mt-1">
-              {d.hotel.area && <Chip>📍 {d.hotel.area}</Chip>}
-              {d.hotel.style && <Chip>🏷 {d.hotel.style}</Chip>}
-              {d.hotel.checkIn && <Chip>🛎 Check-in {fmtDateTime(d.hotel.checkIn)}</Chip>}
-              {d.hotel.checkOut && <Chip>🔔 Check-out {fmtDateTime(d.hotel.checkOut)}</Chip>}
-              {d.hotel.confirmation && <Chip>✅ {d.hotel.confirmation}</Chip>}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Actividades como banners */}
-      {(activities && activities.length > 0) && (
-        <div className="mb-1">
-          <div className="text-sm font-semibold mb-2">Plan del día</div>
-          <div className="space-y-2">
-            {activities.map((a, i) => (
-              <BannerCard
-                key={i}
-                title={a.title}
-                subtitle={a.location || ''}
-                tags={[
-                  a.time ? <>🕒 {a.time}</> : null,
-                  a.category ? <>🏷 {a.category}</> : null,
-                  a.duration ? <>⏱ {fmtDurationISO(a.duration)}</> : null,
-                  a.optional ? <>⚪ Opcional</> : null,
-                ].filter(Boolean) as React.ReactNode[]}
-                rightTag={d.weather?.icon}
-              />
-            ))}
-          </div>
-          {/* Notas y opciones (debajo de cada banner para no alargar) */}
-          {activities.some(a => a.notes || (a.options && a.options.length)) && (
-            <div className="mt-3 rounded-lg border p-3 text-xs bg-white" style={{ borderColor: '#eceae6' }}>
-              {activities.map((a, i) => (
-                <div key={`n-${i}`} className="mb-2 last:mb-0">
-                  {a.notes && <div className="text-neutral-700">• <span className="font-medium">{a.title}:</span> {a.notes}</div>}
-                  {a.options && a.options.length > 0 && (
-                    <div className="text-neutral-600 mt-1 ml-3">
-                      {a.options.map((op, j) => (
-                        <div key={j}>◦ <span className="font-medium">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Add-ons */}
-      {d.addOns && d.addOns.length > 0 && (
-        <div className="mt-2">
-          <div className="text-sm font-semibold mb-2">Servicios adicionales</div>
-          <div className="space-y-2">
-            {d.addOns.map((s, i) => (
-              <BannerCard
-                key={i}
-                title={s.title}
-                subtitle={s.provider || ''}
-                tags={[
-                  s.time ? <>🕒 {s.time}</> : null,
-                  s.duration ? <>⏱ {fmtDurationISO(s.duration)}</> : null,
-                ].filter(Boolean) as React.ReactNode[]}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Timeline */}
+      <div className="space-y-3">
+        {items.length === 0 ? (
+          <div className={`text-sm ${TEXT_DIM}`}>Sin actividades registradas para este día.</div>
+        ) : (
+          items.map((ti, i) => <TimelineItem key={i} it={ti} />)
+        )}
+      </div>
     </div>
   );
 }
@@ -469,7 +454,7 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
           <img
             src="/images/logo-coco-volare.png"
             alt="Coco Volare"
-            className="h-7 w-auto select-none"
+            className="h-8 w-auto select-none"
             draggable={false}
           />
           <div>
