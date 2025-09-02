@@ -39,12 +39,16 @@ type Summary = {
 };
 
 type Itinerary = {
-  cardType?: string; // ignoramos si llega
+  cardType?: string;
   lang?: 'es'|'en'|string; tripTitle?: string; clientBooksLongHaulFlights?: boolean;
   disclaimer?: string; summary?: Summary; days: Day[];
 };
 
 /** ================== Utilidades ================== **/
+const GOLD = '#bba36d';
+const GOLD_SOFT_BG = '#f7f2e2';
+const TEXT_DIM = 'text-neutral-600';
+
 function safe<T>(v: any, fallback: T): T { return (v === undefined || v === null) ? fallback : v; }
 
 function fmtDate(d?: string) {
@@ -76,30 +80,59 @@ function fmtDurationISO(iso?: string) {
 }
 
 function Chip({ children }: { children: React.ReactNode }) {
-  return <span className="inline-flex items-center rounded-full bg-neutral-800/80 text-white px-2 py-1 text-xs mr-2 mb-2">{children}</span>;
-}
-function Section({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) {
   return (
-    <div className="mt-4">
-      <div className="flex items-center gap-2 text-[15px] font-semibold text-white">
-        <span>{icon}</span><span>{title}</span>
-      </div>
-      <div className="mt-2">{children}</div>
-    </div>
+    <span
+      className="inline-flex items-center px-2 py-1 text-xs mr-2 mb-2 rounded-full border"
+      style={{ borderColor: GOLD, background: GOLD_SOFT_BG, color: '#5d4f25' }}
+    >
+      {children}
+    </span>
   );
 }
+
+function Divider() { return <div className="h-px my-4" style={{ background: '#e7e5e4' }} />; }
+
 function KVP({ k, v }: { k: string; v?: React.ReactNode }) {
   if (!v && v !== 0) return null;
   return (
-    <div className="flex items-start gap-2 text-sm text-neutral-200">
-      <div className="min-w-[110px] text-neutral-400">{k}</div>
+    <div className={`flex items-start gap-2 text-sm ${TEXT_DIM}`}>
+      <div className="min-w-[110px] text-neutral-500">{k}</div>
       <div className="flex-1">{v}</div>
     </div>
   );
 }
-function Divider() { return <div className="h-px bg-neutral-800 my-4" />; }
 
-/** ================== Paginación ================== **/
+/** =============== Helpers UI para “menos largo” =============== **/
+function ExpandableSection({
+  title, icon, children, defaultOpen = false,
+}: { title: string; icon?: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="mt-3">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between py-2"
+      >
+        <div className="flex items-center gap-2 font-semibold text-[15px]">
+          {icon && <span>{icon}</span>}
+          <span className="text-neutral-900">{title}</span>
+        </div>
+        <span
+          className="h-6 w-6 rounded-full flex items-center justify-center border"
+          style={{ borderColor: GOLD, color: '#1f2937' }}
+        >
+          {open ? '–' : '+'}
+        </span>
+      </button>
+      {open && (
+        <div className="rounded-xl border p-3" style={{ borderColor: '#eceae6' }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function usePager(total: number) {
   const [page, setPage] = useState(0);
   const next = () => setPage(p => Math.min(total - 1, p + 1));
@@ -118,31 +151,132 @@ function usePager(total: number) {
   return { page, next, prev, goto, setPage };
 }
 
-/** ================== Vista de páginas ================== **/
+/** ================== Páginas ================== **/
 function SummaryPage({ it }: { it: Itinerary }) {
   const summary = it.summary || {};
   return (
-    <div className="px-5 py-5">
-      <div className="text-xl font-semibold text-white">{it.tripTitle || summary.destination || 'Itinerario'}</div>
-      {summary.overview && <div className="text-sm text-neutral-300 mt-2 whitespace-pre-wrap">{summary.overview}</div>}
-
-      <div className="flex flex-wrap gap-3 mt-3 text-sm">
-        {summary.startDate && summary.endDate && (
-          <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
-        )}
-        {summary.pax && (
-          <Chip>👥 {summary.pax.adults} adultos{summary.pax.children ? `, ${summary.pax.children} niños` : ''}{summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}</Chip>
-        )}
-        {summary.theme && summary.theme.length > 0 && <Chip>🎯 {summary.theme.join(' · ')}</Chip>}
-        {summary.budget && <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>}
-        {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
+    <div className="pb-5">
+      {/* Hero responsivo */}
+      <div className="w-full overflow-hidden rounded-t-2xl">
+        <div className="relative w-full aspect-[16/9] md:aspect-[21/9]">
+          <img
+            src="/images/Palms.jpg"
+            alt="Destino"
+            className="absolute inset-0 w-full h-full object-cover"
+            draggable={false}
+          />
+          {/* Overlay sutil para legibilidad */}
+          <div className="absolute inset-0 bg-gradient-to-t from-white/90 via-white/40 to-transparent" />
+        </div>
       </div>
 
-      <Divider />
+      {/* Info principal */}
+      <div className="px-5 -mt-10">
+        <div className="rounded-xl border bg-white p-4 shadow-sm" style={{ borderColor: '#eceae6' }}>
+          <div className="text-xl font-semibold text-neutral-900">
+            {it.tripTitle || summary.destination || 'Itinerario'}
+          </div>
+          {summary.overview && (
+            <div className="text-sm text-neutral-600 mt-2 whitespace-pre-wrap">
+              {summary.overview}
+            </div>
+          )}
 
-      <div className="text-[13px] text-neutral-400">
-        {it.disclaimer || '*Fechas, horarios y proveedores sujetos a disponibilidad y cambios sin previo aviso.'}
+          <div className="flex flex-wrap gap-3 mt-3 text-sm">
+            {summary.startDate && summary.endDate && (
+              <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
+            )}
+            {summary.pax && (
+              <Chip>👥 {summary.pax.adults} adultos{summary.pax.children ? `, ${summary.pax.children} niños` : ''}{summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}</Chip>
+            )}
+            {summary.theme && summary.theme.length > 0 && <Chip>🎯 {summary.theme.join(' · ')}</Chip>}
+            {summary.budget && <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>}
+            {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
+          </div>
+
+          <Divider />
+
+          <div className="text-[13px] text-neutral-500">
+            {it.disclaimer || '*Fechas, horarios y proveedores sujetos a disponibilidad y cambios sin previo aviso.'}
+          </div>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function LimitedList<T>({ items, render, limit = 3, emptyText }: {
+  items: T[]; render: (item: T, i: number) => React.ReactNode; limit?: number; emptyText?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const show = open ? items : items.slice(0, limit);
+  if (!items || items.length === 0) return emptyText ? <div className={`text-sm ${TEXT_DIM}`}>{emptyText}</div> : null;
+  return (
+    <div>
+      <div className="space-y-2">{show.map(render)}</div>
+      {items.length > limit && (
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="mt-2 text-sm underline"
+          style={{ color: GOLD }}
+        >
+          {open ? 'Ver menos' : 'Ver más'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FlightCard({ f }: { f: Flight }) {
+  return (
+    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
+      <div className="font-medium text-neutral-900">{f.carrier} {f.code}</div>
+      <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
+      <KVP k="Salida" v={fmtDateTime(f.depart)} />
+      <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
+      <div className="flex flex-wrap gap-3 text-xs text-neutral-500 mt-1">
+        {f.baggage && <Chip>🧳 {f.baggage}</Chip>}
+        {f.pnr && <Chip>🔖 PNR {f.pnr}</Chip>}
+      </div>
+      {f.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{f.notes}</div>}
+    </div>
+  );
+}
+
+function TransportCard({ t }: { t: Transport }) {
+  return (
+    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
+      <div className="font-medium text-neutral-900">{t.mode.toUpperCase()}</div>
+      <KVP k="Ruta" v={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`} />
+      <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
+        {t.time && <Chip>🕒 {t.time}</Chip>}
+        {t.duration && <Chip>⏱ {fmtDurationISO(t.duration)}</Chip>}
+        {t.provider && <Chip>🏷 {t.provider}</Chip>}
+      </div>
+      {t.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{t.notes}</div>}
+    </div>
+  );
+}
+
+function ActivityCard({ a }: { a: Activity }) {
+  return (
+    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
+      <div className="flex flex-wrap gap-2 items-center">
+        {a.time && <Chip>🕒 {a.time}</Chip>}
+        <Chip>🏷 {a.category}</Chip>
+        {a.duration && <Chip>⏱ {fmtDurationISO(a.duration)}</Chip>}
+        {a.optional && <Chip>⚪ Opcional</Chip>}
+      </div>
+      <div className="mt-1 text-neutral-900 font-medium">{a.title}</div>
+      {a.location && <div className="text-xs text-neutral-600 mt-1">📍 {a.location}</div>}
+      {a.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{a.notes}</div>}
+      {a.options && a.options.length > 0 && (
+        <div className="mt-2 pl-2 border-l" style={{ borderColor: '#e7e5e4' }}>
+          {a.options.map((op, j) => (
+            <div key={j} className="text-xs text-neutral-600">• <span className="font-medium text-neutral-800">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -151,12 +285,13 @@ function DayPage({ d }: { d: Day }) {
   const activities: Activity[] = d.activities || d.timeline || [];
   return (
     <div className="px-5 py-5">
+      {/* Encabezado de día */}
       <div className="flex items-center justify-between">
-        <div className="text-base font-semibold text-white">Día {d.day}{d.title ? ` · ${d.title}` : ''}</div>
-        <div className="text-xs text-neutral-400">{fmtDate(d.date)}</div>
+        <div className="text-base font-semibold text-neutral-900">Día {d.day}{d.title ? ` · ${d.title}` : ''}</div>
+        <div className={`text-xs ${TEXT_DIM}`}>{fmtDate(d.date)}</div>
       </div>
 
-      {/* chips de ubicación / clima */}
+      {/* chips ubic/clima */}
       <div className="mt-2 flex flex-wrap">
         {(d.locations || []).map((loc, i) => (
           <Chip key={i}>📍 {loc.city}{loc.country ? `, ${loc.country}` : ''}</Chip>
@@ -166,70 +301,30 @@ function DayPage({ d }: { d: Day }) {
         )}
       </div>
 
-      {/* Vuelos internacionales */}
+      {/* Secciones compactas y colapsables */}
       {d.flightsInternational && d.flightsInternational.length > 0 && (
-        <Section title="Vuelos internacionales" icon="🛫">
-          <div className="space-y-2">
-            {d.flightsInternational.map((f, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
-                <div className="text-sm font-medium text-white">{f.carrier} {f.code}</div>
-                <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
-                <KVP k="Salida" v={fmtDateTime(f.depart)} />
-                <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
-                  {f.baggage && <Chip>🧳 {f.baggage}</Chip>}
-                  {f.pnr && <Chip>🔖 PNR {f.pnr}</Chip>}
-                </div>
-                {f.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{f.notes}</div>}
-              </div>
-            ))}
-          </div>
-        </Section>
+        <ExpandableSection title="Vuelos internacionales" icon="🛫" defaultOpen={false}>
+          <LimitedList items={d.flightsInternational} render={(f, i) => <FlightCard key={i} f={f} />} />
+        </ExpandableSection>
       )}
 
-      {/* Vuelos domésticos */}
       {d.flightsDomestic && d.flightsDomestic.length > 0 && (
-        <Section title="Vuelos domésticos" icon="🛩️">
-          <div className="space-y-2">
-            {d.flightsDomestic.map((f, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3">
-                <div className="text-sm font-medium text-white">{f.carrier} {f.code}</div>
-                <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
-                <KVP k="Salida" v={fmtDateTime(f.depart)} />
-                <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
-                {f.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{f.notes}</div>}
-              </div>
-            ))}
-          </div>
-        </Section>
+        <ExpandableSection title="Vuelos domésticos" icon="🛩️" defaultOpen={false}>
+          <LimitedList items={d.flightsDomestic} render={(f, i) => <FlightCard key={i} f={f} />} />
+        </ExpandableSection>
       )}
 
-      {/* Transportes */}
       {d.transports && d.transports.length > 0 && (
-        <Section title="Transportes" icon="🚐">
-          <div className="space-y-2">
-            {d.transports.map((t, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
-                <div className="font-medium text-white">{t.mode.toUpperCase()}</div>
-                <KVP k="Ruta" v={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`} />
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
-                  {t.time && <Chip>🕒 {t.time}</Chip>}
-                  {t.duration && <Chip>⏱ {fmtDurationISO(t.duration)}</Chip>}
-                  {t.provider && <Chip>🏷 {t.provider}</Chip>}
-                </div>
-                {t.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{t.notes}</div>}
-              </div>
-            ))}
-          </div>
-        </Section>
+        <ExpandableSection title="Transportes" icon="🚐" defaultOpen={false}>
+          <LimitedList items={d.transports} render={(t, i) => <TransportCard key={i} t={t} />} />
+        </ExpandableSection>
       )}
 
-      {/* Hotel principal */}
       {d.hotel && (d.hotel.name || d.hotel.style || d.hotel.checkIn || d.hotel.checkOut) && (
-        <Section title="Hotel" icon="🏨">
-          <div className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
-            <div className="font-medium text-white">{d.hotel.name}</div>
-            <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+        <ExpandableSection title="Hotel" icon="🏨" defaultOpen={true}>
+          <div className="rounded-lg border p-3 bg-white" style={{ borderColor: '#eceae6' }}>
+            <div className="font-medium text-neutral-900">{d.hotel.name}</div>
+            <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
               {d.hotel.area && <Chip>📍 {d.hotel.area}</Chip>}
               {d.hotel.style && <Chip>🏷 {d.hotel.style}</Chip>}
               {d.hotel.checkIn && <Chip>🛎 Check-in {fmtDateTime(d.hotel.checkIn)}</Chip>}
@@ -237,75 +332,52 @@ function DayPage({ d }: { d: Day }) {
               {d.hotel.confirmation && <Chip>✅ {d.hotel.confirmation}</Chip>}
             </div>
           </div>
-        </Section>
+        </ExpandableSection>
       )}
 
-      {/* Opciones de hotel */}
       {d.hotelOptions && d.hotelOptions.length > 0 && (
-        <Section title="Opciones de hotel" icon="🛏️">
+        <ExpandableSection title="Opciones de hotel" icon="🛏️" defaultOpen={false}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {d.hotelOptions.map((h, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
-                <div className="font-medium text-white">{h.name}</div>
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+              <div key={i} className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
+                <div className="font-medium text-neutral-900">{h.name}</div>
+                <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
                   {h.area && <Chip>📍 {h.area}</Chip>}
                   {h.style && <Chip>🏷 {h.style}</Chip>}
                 </div>
               </div>
             ))}
           </div>
-        </Section>
+        </ExpandableSection>
       )}
 
-      {/* Actividades */}
       {activities && activities.length > 0 && (
-        <Section title="Plan del día" icon="🧭">
-          <div className="space-y-2">
-            {activities.map((a, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
-                <div className="flex flex-wrap gap-2 items-center">
-                  {a.time && <Chip>🕒 {a.time}</Chip>}
-                  <Chip>🏷 {a.category}</Chip>
-                  {a.duration && <Chip>⏱ {fmtDurationISO(a.duration)}</Chip>}
-                  {a.optional && <Chip>⚪ Opcional</Chip>}
-                </div>
-                <div className="mt-1 text-white font-medium">{a.title}</div>
-                {a.location && <div className="text-xs text-neutral-300 mt-1">📍 {a.location}</div>}
-                {a.notes && <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">{a.notes}</div>}
-                {a.options && a.options.length > 0 && (
-                  <div className="mt-2 pl-2 border-l border-neutral-700">
-                    {a.options.map((op, j) => (
-                      <div key={j} className="text-xs text-neutral-300">• <span className="font-medium text-neutral-200">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </Section>
+        <ExpandableSection title="Plan del día" icon="🧭" defaultOpen={true}>
+          <LimitedList items={activities} limit={3} render={(a, i) => <ActivityCard key={i} a={a} />} />
+        </ExpandableSection>
       )}
 
-      {/* Servicios Adicionales */}
       {d.addOns && d.addOns.length > 0 && (
-        <Section title="Servicios adicionales" icon="✨">
-          <div className="space-y-2">
-            {d.addOns.map((s, i) => (
-              <div key={i} className="rounded-lg bg-neutral-900/50 border border-neutral-800 p-3 text-sm">
-                <div className="text-white font-medium">{s.title}</div>
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-300 mt-1">
+        <ExpandableSection title="Servicios adicionales" icon="✨" defaultOpen={false}>
+          <LimitedList
+            items={d.addOns}
+            render={(s, i) => (
+              <div key={i} className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
+                <div className="text-neutral-900 font-medium">{s.title}</div>
+                <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
                   {s.time && <Chip>🕒 {s.time}</Chip>}
                   {s.duration && <Chip>⏱ {fmtDurationISO(s.duration)}</Chip>}
                   {s.provider && <Chip>🏷 {s.provider}</Chip>}
                 </div>
                 {(s.description || s.note) && (
-                  <div className="text-xs text-neutral-300 mt-2 whitespace-pre-wrap">
+                  <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">
                     {s.description}{s.description && s.note ? ' — ' : ''}{s.note}
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        </Section>
+            )}
+          />
+        </ExpandableSection>
       )}
     </div>
   );
@@ -313,7 +385,6 @@ function DayPage({ d }: { d: Day }) {
 
 /** ================== Componente principal ================== **/
 export default function ItineraryCard({ data }: { data: Itinerary | any }) {
-  // Permitir string JSON
   if (typeof data === 'string') {
     try { data = JSON.parse(data); } catch {}
   }
@@ -331,22 +402,28 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
   }, [page, days]);
 
   return (
-    <div className="rounded-2xl bg-neutral-900 text-neutral-100 shadow-lg border border-neutral-800 overflow-hidden">
+    <div
+      className="rounded-2xl bg-white shadow-xl overflow-hidden"
+      style={{ border: `2px solid ${GOLD}` }}
+    >
       {/* HEADER con logo y paginador */}
-      <div className="px-5 py-4 border-b border-neutral-800 bg-neutral-900/70 flex items-center justify-between">
+      <div
+        className="px-5 py-4 flex items-center justify-between"
+        style={{ borderBottom: `1px solid ${GOLD}` }}
+      >
         <div className="flex items-center gap-3">
           <img
             src="/images/logo-coco-volare.png"
             alt="Coco Volare"
-            className="h-6 w-auto select-none"
+            className="h-7 w-auto select-none"
             draggable={false}
           />
           <div>
-            <div className="text-lg font-semibold text-white leading-tight">
+            <div className="text-lg font-semibold text-neutral-900 leading-tight">
               {it.tripTitle || summary.destination || 'Itinerario'}
             </div>
             {summary.startDate && summary.endDate && (
-              <div className="text-xs text-neutral-400">
+              <div className={`text-xs ${TEXT_DIM}`}>
                 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}
                 {summary.nights ? ` • ${summary.nights} noches` : ''}
               </div>
@@ -358,21 +435,22 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
         <div className="flex items-center gap-2">
           <button
             onClick={prev}
-            className="h-8 w-8 rounded-full bg-neutral-800 text-white/90 hover:bg-neutral-700 transition flex items-center justify-center"
+            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow border text-neutral-700"
+            style={{ borderColor: GOLD, background: 'white' }}
             aria-label="Anterior"
           >‹</button>
-          <div className="text-sm text-neutral-300 min-w-[8rem] text-center">{pageLabel}</div>
+          <div className="text-sm text-neutral-700 min-w-[8rem] text-center">{pageLabel}</div>
           <button
             onClick={next}
-            className="h-8 w-8 rounded-full bg-neutral-800 text-white/90 hover:bg-neutral-700 transition flex items-center justify-center"
+            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow border text-neutral-700"
+            style={{ borderColor: GOLD, background: 'white' }}
             aria-label="Siguiente"
           >›</button>
         </div>
       </div>
 
-      {/* BODY: páginas */}
+      {/* BODY: carrusel por páginas */}
       <div className="relative">
-        {/* carrusel simple (slide) */}
         <div
           className="whitespace-nowrap transition-transform duration-300 ease-out"
           style={{ transform: `translateX(-${page * 100}%)` }}
@@ -390,11 +468,16 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
           ))}
         </div>
 
-        {/* Dots / pills de navegación */}
-        <div className="px-5 pb-4 flex flex-wrap gap-2 items-center justify-center">
+        {/* Pills de navegación */}
+        <div className="px-5 pb-5 flex flex-wrap gap-2 items-center justify-center">
           <button
             onClick={() => goto(0)}
-            className={`px-3 py-1 rounded-full text-xs border ${page === 0 ? 'bg-white text-black border-white' : 'bg-neutral-900 border-neutral-700 text-neutral-200 hover:bg-neutral-800'}`}
+            className="px-3 py-1 rounded-full text-xs border shadow-sm"
+            style={{
+              borderColor: GOLD,
+              background: page === 0 ? GOLD : 'white',
+              color: page === 0 ? 'white' : '#1f2937',
+            }}
           >
             Resumen
           </button>
@@ -402,8 +485,13 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
             <button
               key={i}
               onClick={() => goto(i + 1)}
-              className={`px-3 py-1 rounded-full text-xs border ${page === i + 1 ? 'bg-white text-black border-white' : 'bg-neutral-900 border-neutral-700 text-neutral-200 hover:bg-neutral-800'}`}
+              className="px-3 py-1 rounded-full text-xs border shadow-sm"
               title={d.title || `Día ${d.day}`}
+              style={{
+                borderColor: GOLD,
+                background: page === i + 1 ? GOLD : 'white',
+                color: page === i + 1 ? 'white' : '#1f2937',
+              }}
             >
               Día {d.day || i + 1}
             </button>
