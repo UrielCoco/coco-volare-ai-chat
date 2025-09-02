@@ -7,12 +7,10 @@ import type { ChatMessage } from '@/lib/types';
 const THREAD_KEY = 'cv_thread_id_session';
 
 function ulog(event: string, meta: any = {}) {
-  try {
-    console.debug('[CV][ui]', event, meta);
-  } catch {}
+  try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
-// ---------- Helpers de extracción (respaldos para cv:kommo en texto) ----------
+// ---------- Helpers ----------
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -33,8 +31,6 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
 function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any }> {
   const blocks: Array<{ raw: string; json: any }> = [];
   if (!text) return blocks;
-
-  // Fence completa
   const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
   while ((m = rxFence.exec(text))) {
@@ -46,7 +42,6 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   }
   if (blocks.length) return blocks;
 
-  // Fallback: fence sin cerrar pero JSON balanceado
   const at = text.toLowerCase().indexOf('```cv:kommo');
   if (at >= 0) {
     const rest = text.slice(at + '```cv:kommo'.length);
@@ -61,6 +56,58 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
+// Quita SOLO las fences cv:kommo del texto visible
+function stripKommoFences(text: string): string {
+  if (!text) return text;
+  return text.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
+}
+
+// Intenta detectar un bloque JSON visible (no-kommo) y separar texto+json
+function splitTextAndJsonForUser(rawInput: string): { mode: 'onlyText'|'onlyJson'|'textAndJson', textPart?: string, jsonText?: string } {
+  if (!rawInput || !rawInput.trim()) return { mode: 'onlyText', textPart: '' };
+
+  const input = stripKommoFences(rawInput);
+
+  // 1) Fences específicas con JSON
+  const fences = [
+    { label: 'cv:itinerary', rx: /```[\t ]*cv:itinerary[\t ]*([\s\S]*?)```/i },
+    { label: 'cv:quote',     rx: /```[\t ]*cv:quote[\t ]*([\s\S]*?)```/i },
+    { label: 'json',         rx: /```[\t ]*json[\t ]*([\s\S]*?)```/i },
+  ];
+
+  for (const f of fences) {
+    const m = f.rx.exec(input);
+    if (m && m[0]) {
+      const rawJson = (m[1] || '').trim();
+      let pretty = rawJson;
+      try { pretty = JSON.stringify(JSON.parse(rawJson), null, 2); } catch {}
+      const textPart = (input.slice(0, m.index) + input.slice(m.index + m[0].length)).trim();
+      if (textPart && pretty) return { mode: 'textAndJson', textPart, jsonText: pretty };
+      if (pretty) return { mode: 'onlyJson', jsonText: pretty };
+      return { mode: 'onlyText', textPart };
+    }
+  }
+
+  // 2) JSON balanceado "suelto" en el texto
+  const brace = input.indexOf('{');
+  if (brace >= 0) {
+    const balanced = extractBalancedJson(input, brace);
+    if (balanced) {
+      let pretty = balanced;
+      try { pretty = JSON.stringify(JSON.parse(balanced), null, 2); } catch {}
+      const before = input.slice(0, brace);
+      const after = input.slice(brace + balanced.length);
+      const textPart = (before + after).trim();
+      if (textPart && pretty) return { mode: 'textAndJson', textPart, jsonText: pretty };
+      if (pretty) return { mode: 'onlyJson', jsonText: pretty };
+      return { mode: 'onlyText', textPart };
+    }
+  }
+
+  // 3) Solo texto
+  return { mode: 'onlyText', textPart: input };
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -71,17 +118,10 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
-
-  // manejar múltiples mensajes del assistant en un mismo run
   const runFinalsCountRef = useRef<number>(0);
-  const activeAssistantIdRef = useRef<string | null>(null); // reservado (no usamos placeholder)
 
-  // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
-
-  // auto-scroll: solo en NUEVO mensaje
   const lastMsgIdRef = useRef<string | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -123,7 +163,6 @@ export default function Chat() {
     }
   }, [messages]);
 
-  // --- despacho a Kommo ---
   function dispatchKommoOps(ops: any[], rawKey: string) {
     const key = 'k_' + rawKey.slice(0, 40);
     if (kommoHashesRef.current.has(key)) return;
@@ -137,10 +176,8 @@ export default function Chat() {
   }
 
   async function handleStream(userText: string) {
-    // Encendemos loader desde que inicia el RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
-    activeAssistantIdRef.current = null;
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -157,9 +194,7 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      // Buffer local por-mensaje (no visible hasta 'final')
       let currentMsgBuffer = '';
-      // Acumulado total solo para detectar y despachar cv:kommo
       let fullTextForKommo = '';
 
       while (true) {
@@ -210,7 +245,6 @@ export default function Chat() {
                 currentMsgBuffer += data.value;
                 fullTextForKommo += data.value;
 
-                // Detecta y despacha cv:kommo durante el streaming (sin render)
                 const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
@@ -228,25 +262,39 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               const text = String(data?.text ?? '');
-              // Si no hubo deltas, `text` ya trae el final completo
-              const finalText = text || currentMsgBuffer;
-              if (finalText && finalText.trim().length) {
-                const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                const newMsg: ChatMessage = {
-                  id,
-                  role: 'assistant',
-                  parts: [{ type: 'text', text: finalText }] as any,
-                  createdAt: new Date().toISOString(),
-                } as any;
-                setMessages((prev) => [...prev, newMsg]);
-              }
-              // Reinicia buffer para el siguiente mensaje dentro del RUN
+              const finalTextRaw = text || currentMsgBuffer;
               currentMsgBuffer = '';
+
+              if (finalTextRaw && finalTextRaw.trim().length) {
+                // ---- SPLIT TEXTO + JSON EN DOS MENSAJES ----
+                const split = splitTextAndJsonForUser(finalTextRaw);
+
+                const pushAssistant = (txt: string) => {
+                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+                  const newMsg: ChatMessage = {
+                    id,
+                    role: 'assistant',
+                    parts: [{ type: 'text', text: txt }] as any,
+                    createdAt: new Date().toISOString(),
+                  } as any;
+                  setMessages((prev) => [...prev, newMsg]);
+                };
+
+                if (split.mode === 'textAndJson') {
+                  if (split.textPart && split.textPart.trim()) pushAssistant(split.textPart.trim());
+                  if (split.jsonText && split.jsonText.trim()) pushAssistant(split.jsonText.trim());
+                } else if (split.mode === 'onlyJson') {
+                  pushAssistant(split.jsonText || '');
+                } else {
+                  pushAssistant(split.textPart || '');
+                }
+              }
+
               runFinalsCountRef.current += 1;
 
-              // Despacha Kommo por si vino solo en el 'final'
-              const blocks = extractKommoBlocksFromText(text);
-              for (const b of blocks) {
+              // también despacha cv:kommo si vino sólo en el final
+              const kommoBlocks = extractKommoBlocksFromText(finalTextRaw);
+              for (const b of kommoBlocks) {
                 try {
                   if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
                     dispatchKommoOps(b.json.ops, b.raw);
@@ -258,7 +306,6 @@ export default function Chat() {
           }
 
           if (event === 'done' || event === 'error') {
-            // Apaga loader ÚNICAMENTE cuando terminó el RUN
             setIsLoading(false);
           }
         }
@@ -266,7 +313,6 @@ export default function Chat() {
     } catch (err) {
       console.error('[CV][chat] stream error', err);
       setIsLoading(false);
-      // Mensaje de error visible para el usuario
       setMessages((prev) => [
         ...prev,
         {
@@ -285,7 +331,6 @@ export default function Chat() {
     if (!text || isLoading) return;
 
     const userId = `u_${Date.now()}`;
-
     const userMsg: ChatMessage = {
       id: userId,
       role: 'user',

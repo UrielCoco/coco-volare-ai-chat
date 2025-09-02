@@ -5,9 +5,8 @@ import ItineraryCard from './ItineraryCard';
 import QuoteCard from './QuoteCard';
 import type { ChatMessage } from '@/lib/types';
 
-const RICH_CARDS_ENABLED = false; // desactivado temporalmente para ver mensajes 'tal cual'
+const RICH_CARDS_ENABLED = false; // seguimos desactivadas temporalmente
 
-// ---------------- Helpers ----------------
 type Props = {
   messages: ChatMessage[];
   isLoading: boolean;
@@ -49,7 +48,7 @@ function guessLang(messages: ChatMessage[]) {
     }
   }
   return 'es';
-};
+}
 
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
@@ -73,7 +72,6 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
   const idx = lower.indexOf(label.toLowerCase());
   if (idx === -1) return { found: false, complete: false };
 
-  // Fenced
   const fenced = text.match(new RegExp("```\\s*" + label.replace(':','\\:') + "\\s*([\\s\\S]*?)```", "i"));
   if (fenced) {
     try {
@@ -82,7 +80,6 @@ function extractLabeledJson(text: string, label: string): { found: boolean; comp
     } catch {}
   }
 
-  // No fenced → intenta JSON balanceado
   const after = text.slice(idx + label.length);
   const json = extractBalancedJson(after, after.indexOf('{'));
   if (json) {
@@ -102,15 +99,14 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
       <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
         <span className="opacity-90">{label}</span>
-        <span className="w-1.5 h-1.5 rounded-full bg-white/80 animate-bounce" style={{ animationDelay: '0ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-white/60 animate-bounce" style={{ animationDelay: '150ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-white/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '0ms', background: 'rgba(255,255,255,.8)' }} />
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '150ms', background: 'rgba(255,255,255,.6)' }} />
+        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '300ms', background: 'rgba(255,255,255,.4)' }} />
       </div>
     </div>
   );
 }
 
-// ------------------
 export default function Messages(props: Props) {
   const { messages, isLoading } = props;
   const lang = guessLang(messages);
@@ -129,9 +125,8 @@ export default function Messages(props: Props) {
         const role = (m as any).role as string;
         const raw = ((m as any)?.parts?.[0]?.text ?? '') as string;
 
-        // Oculta cv:kommo en render (interno)
-        const trimmed = raw || '';
-        const visible = trimmed.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
+        // Oculta cv:kommo en render
+        const visible = (raw || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
         const stopped = (m as any)?.stopped === true;
 
         if (role === 'system') return null;
@@ -145,10 +140,8 @@ export default function Messages(props: Props) {
         }
 
         if (role === 'assistant') {
-          // Evita burbuja doble cuando aún no hay tokens
           if (!visible) return null;
 
-          // Mostrar como texto plano mientras desactivamos tarjetas ricas
           if (!RICH_CARDS_ENABLED) {
             return (
               <AssistantBubble key={(m as any).id || i}>
@@ -158,8 +151,7 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 1) Itinerario
-          const it = extractLabeledJson(trimmed, 'cv:itinerary');
+          const it = extractLabeledJson(visible, 'cv:itinerary');
           if (it.found && !it.complete) return null;
           if (it.complete && it.data) {
             return (
@@ -169,8 +161,7 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 2) Quote (cotización)
-          const q = extractLabeledJson(trimmed, 'cv:quote');
+          const q = extractLabeledJson(visible, 'cv:quote');
           if (q.found && !q.complete) return null;
           if (q.complete && q.data) {
             return (
@@ -180,7 +171,6 @@ export default function Messages(props: Props) {
             );
           }
 
-          // 3) Texto normal (sin mostrar cv:kommo)
           return (
             <AssistantBubble key={(m as any).id || i}>
               <div className="whitespace-pre-wrap break-words">{visible}</div>
