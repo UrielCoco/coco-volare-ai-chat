@@ -44,7 +44,7 @@ type Itinerary = {
   disclaimer?: string; summary?: Summary; days: Day[];
 };
 
-/** ================== Utilidades ================== **/
+/** ================== Estilos/base ================== **/
 const GOLD = '#bba36d';
 const GOLD_SOFT_BG = '#f7f2e2';
 const TEXT_DIM = 'text-neutral-600';
@@ -57,6 +57,14 @@ function fmtDate(d?: string) {
     const dt = new Date(d);
     if (isNaN(dt.getTime())) return d;
     return dt.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch { return d; }
+}
+function fmtTime(d?: string) {
+  if (!d) return '';
+  try {
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return d;
+    return dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   } catch { return d; }
 }
 function fmtDateTime(d?: string) {
@@ -78,12 +86,21 @@ function fmtDurationISO(iso?: string) {
   if (min) return `${min}m`;
   return '0m';
 }
+function formatMoney(currency: string = 'USD', value?: number) {
+  if (value === undefined || value === null || isNaN(value)) return '';
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
+  } catch {
+    return `${currency} ${value}`;
+  }
+}
 
-function Chip({ children }: { children: React.ReactNode }) {
+/** ================== Chips & helpers UI ================== **/
+function Chip({ children, dark = false }: { children: React.ReactNode; dark?: boolean }) {
   return (
     <span
-      className="inline-flex items-center px-2 py-1 text-xs mr-2 mb-2 rounded-full border"
-      style={{ borderColor: GOLD, background: GOLD_SOFT_BG, color: '#5d4f25' }}
+      className={`inline-flex items-center px-2 py-1 text-xs mr-2 mb-2 rounded-full border ${dark ? 'bg-black/50 text-white/90 border-white/30' : ''}`}
+      style={!dark ? { borderColor: GOLD, background: GOLD_SOFT_BG, color: '#5d4f25' } : {}}
     >
       {children}
     </span>
@@ -102,37 +119,7 @@ function KVP({ k, v }: { k: string; v?: React.ReactNode }) {
   );
 }
 
-/** =============== Helpers UI para “menos largo” =============== **/
-function ExpandableSection({
-  title, icon, children, defaultOpen = false,
-}: { title: string; icon?: string; children: React.ReactNode; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="mt-3">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between py-2"
-      >
-        <div className="flex items-center gap-2 font-semibold text-[15px]">
-          {icon && <span>{icon}</span>}
-          <span className="text-neutral-900">{title}</span>
-        </div>
-        <span
-          className="h-6 w-6 rounded-full flex items-center justify-center border"
-          style={{ borderColor: GOLD, color: '#1f2937' }}
-        >
-          {open ? '–' : '+'}
-        </span>
-      </button>
-      {open && (
-        <div className="rounded-xl border p-3" style={{ borderColor: '#eceae6' }}>
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
+/** =============== Helpers layout =============== **/
 function usePager(total: number) {
   const [page, setPage] = useState(0);
   const next = () => setPage(p => Math.min(total - 1, p + 1));
@@ -151,13 +138,71 @@ function usePager(total: number) {
   return { page, next, prev, goto, setPage };
 }
 
+function uniqueCities(days: Day[]): number {
+  const set = new Set<string>();
+  for (const d of days) {
+    for (const l of (d.locations || [])) set.add(`${l.city || ''}|${l.country || ''}`);
+  }
+  return set.size;
+}
+
+/** =============== Banner Cards para el look “imagen 2” =============== **/
+function BannerCard({
+  image = '/images/Palms.jpg',
+  title,
+  subtitle,
+  tags = [],
+  rightTag,
+  onClick,
+}: {
+  image?: string;
+  title: string;
+  subtitle?: string;
+  tags?: React.ReactNode[];
+  rightTag?: React.ReactNode;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full overflow-hidden rounded-xl shadow-sm hover:shadow transition"
+      style={{ border: `1px solid ${GOLD}33`, background: '#fff' }}
+    >
+      <div className="relative w-full h-36 md:h-40 rounded-xl overflow-hidden">
+        <img src={image} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
+        <div className="absolute left-3 right-3 bottom-3">
+          <div className="text-white text-sm opacity-90">{subtitle}</div>
+          <div className="text-white text-lg font-semibold leading-tight">{title}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {tags.map((t, i) => (
+              <Chip key={i} dark>{t}</Chip>
+            ))}
+            {rightTag && (
+              <span className="ml-auto inline-flex items-center px-2 py-1 text-xs rounded-full bg-white/90 text-neutral-900">
+                {rightTag}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
 /** ================== Páginas ================== **/
 function SummaryPage({ it }: { it: Itinerary }) {
   const summary = it.summary || {};
+  const daysCount = safe(it.days, []).length || (summary.nights ? summary.nights + 1 : 0);
+  const cities = uniqueCities(safe(it.days, []));
+  const currency = summary.budget?.currency || 'USD';
+  const estimate = summary.budget?.amountMax ?? summary.budget?.amountMin;
+
   return (
     <div className="pb-5">
-      {/* Hero responsivo */}
-      <div className="w-full overflow-hidden rounded-t-2xl">
+      {/* HERO */}
+      <div className="relative w-full overflow-hidden rounded-t-2xl">
         <div className="relative w-full aspect-[16/9] md:aspect-[21/9]">
           <img
             src="/images/Palms.jpg"
@@ -165,24 +210,39 @@ function SummaryPage({ it }: { it: Itinerary }) {
             className="absolute inset-0 w-full h-full object-cover"
             draggable={false}
           />
-          {/* Overlay sutil para legibilidad */}
-          <div className="absolute inset-0 bg-gradient-to-t from-white/90 via-white/40 to-transparent" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+
+          {/* Overlay inferior (texto como en referencia 1) */}
+          <div className="absolute left-4 right-4 bottom-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Chip dark>🛏 {daysCount || '—'} {daysCount === 1 ? 'DÍA' : 'DÍAS'}</Chip>
+              <Chip dark>📍 {cities || '—'} {cities === 1 ? 'CIUDAD' : 'CIUDADES'}</Chip>
+            </div>
+            <div className="text-white text-2xl md:text-3xl font-semibold leading-tight drop-shadow">
+              {it.tripTitle || summary.destination || 'Itinerary'}
+            </div>
+            {summary.overview && (
+              <div className="text-white/90 text-sm md:text-base mt-1 max-w-2xl">
+                {summary.overview}
+              </div>
+            )}
+
+            {estimate !== undefined && (
+              <div className="absolute right-0 -bottom-2 translate-y-full md:translate-y-0 md:static md:mt-2">
+                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold shadow"
+                     style={{ background: GOLD, color: '#111827' }}>
+                  Estimado {formatMoney(currency, estimate)}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Info principal */}
-      <div className="px-5 -mt-10">
+      {/* Meta + disclaimer en tarjeta blanca */}
+      <div className="px-5 -mt-3">
         <div className="rounded-xl border bg-white p-4 shadow-sm" style={{ borderColor: '#eceae6' }}>
-          <div className="text-xl font-semibold text-neutral-900">
-            {it.tripTitle || summary.destination || 'Itinerario'}
-          </div>
-          {summary.overview && (
-            <div className="text-sm text-neutral-600 mt-2 whitespace-pre-wrap">
-              {summary.overview}
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-3 mt-3 text-sm">
+          <div className="flex flex-wrap gap-2 text-sm">
             {summary.startDate && summary.endDate && (
               <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
             )}
@@ -190,7 +250,9 @@ function SummaryPage({ it }: { it: Itinerary }) {
               <Chip>👥 {summary.pax.adults} adultos{summary.pax.children ? `, ${summary.pax.children} niños` : ''}{summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}</Chip>
             )}
             {summary.theme && summary.theme.length > 0 && <Chip>🎯 {summary.theme.join(' · ')}</Chip>}
-            {summary.budget && <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>}
+            {summary.budget && (summary.budget.amountMin || summary.budget.amountMax) && (
+              <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>
+            )}
             {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
           </div>
 
@@ -205,126 +267,103 @@ function SummaryPage({ it }: { it: Itinerary }) {
   );
 }
 
-function LimitedList<T>({ items, render, limit = 3, emptyText }: {
-  items: T[]; render: (item: T, i: number) => React.ReactNode; limit?: number; emptyText?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const show = open ? items : items.slice(0, limit);
-  if (!items || items.length === 0) return emptyText ? <div className={`text-sm ${TEXT_DIM}`}>{emptyText}</div> : null;
-  return (
-    <div>
-      <div className="space-y-2">{show.map(render)}</div>
-      {items.length > limit && (
-        <button
-          onClick={() => setOpen(o => !o)}
-          className="mt-2 text-sm underline"
-          style={{ color: GOLD }}
-        >
-          {open ? 'Ver menos' : 'Ver más'}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function FlightCard({ f }: { f: Flight }) {
-  return (
-    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
-      <div className="font-medium text-neutral-900">{f.carrier} {f.code}</div>
-      <KVP k="Ruta" v={`${f.from || ''} → ${f.to || ''}`} />
-      <KVP k="Salida" v={fmtDateTime(f.depart)} />
-      <KVP k="Llegada" v={fmtDateTime(f.arrive)} />
-      <div className="flex flex-wrap gap-3 text-xs text-neutral-500 mt-1">
-        {f.baggage && <Chip>🧳 {f.baggage}</Chip>}
-        {f.pnr && <Chip>🔖 PNR {f.pnr}</Chip>}
-      </div>
-      {f.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{f.notes}</div>}
-    </div>
-  );
-}
-
-function TransportCard({ t }: { t: Transport }) {
-  return (
-    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
-      <div className="font-medium text-neutral-900">{t.mode.toUpperCase()}</div>
-      <KVP k="Ruta" v={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`} />
-      <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
-        {t.time && <Chip>🕒 {t.time}</Chip>}
-        {t.duration && <Chip>⏱ {fmtDurationISO(t.duration)}</Chip>}
-        {t.provider && <Chip>🏷 {t.provider}</Chip>}
-      </div>
-      {t.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{t.notes}</div>}
-    </div>
-  );
-}
-
-function ActivityCard({ a }: { a: Activity }) {
-  return (
-    <div className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
-      <div className="flex flex-wrap gap-2 items-center">
-        {a.time && <Chip>🕒 {a.time}</Chip>}
-        <Chip>🏷 {a.category}</Chip>
-        {a.duration && <Chip>⏱ {fmtDurationISO(a.duration)}</Chip>}
-        {a.optional && <Chip>⚪ Opcional</Chip>}
-      </div>
-      <div className="mt-1 text-neutral-900 font-medium">{a.title}</div>
-      {a.location && <div className="text-xs text-neutral-600 mt-1">📍 {a.location}</div>}
-      {a.notes && <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">{a.notes}</div>}
-      {a.options && a.options.length > 0 && (
-        <div className="mt-2 pl-2 border-l" style={{ borderColor: '#e7e5e4' }}>
-          {a.options.map((op, j) => (
-            <div key={j} className="text-xs text-neutral-600">• <span className="font-medium text-neutral-800">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function DayPage({ d }: { d: Day }) {
   const activities: Activity[] = d.activities || d.timeline || [];
+  const loc = (d.locations && d.locations[0]) || undefined;
+
   return (
     <div className="px-5 py-5">
-      {/* Encabezado de día */}
-      <div className="flex items-center justify-between">
-        <div className="text-base font-semibold text-neutral-900">Día {d.day}{d.title ? ` · ${d.title}` : ''}</div>
-        <div className={`text-xs ${TEXT_DIM}`}>{fmtDate(d.date)}</div>
+      {/* Encabezado del día (look compacto) */}
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-[11px] tracking-wider text-neutral-500">DÍA {d.day}</div>
+          <div className="text-base md:text-lg font-semibold text-neutral-900">
+            {d.title || (loc ? `${loc.city}${loc.country ? `, ${loc.country}` : ''}` : 'Plan del día')}
+          </div>
+        </div>
+        <div className="text-xs text-neutral-500">{fmtDate(d.date)}</div>
       </div>
 
-      {/* chips ubic/clima */}
-      <div className="mt-2 flex flex-wrap">
-        {(d.locations || []).map((loc, i) => (
-          <Chip key={i}>📍 {loc.city}{loc.country ? `, ${loc.country}` : ''}</Chip>
+      {/* Chips de ubicación / clima */}
+      <div className="mb-3 flex flex-wrap">
+        {(d.locations || []).map((l, i) => (
+          <Chip key={i}>📍 {l.city}{l.country ? `, ${l.country}` : ''}</Chip>
         ))}
         {d.weather && (d.weather.summary || d.weather.icon) && (
           <Chip>{d.weather.icon || '⛅'} {d.weather.summary}</Chip>
         )}
       </div>
 
-      {/* Secciones compactas y colapsables */}
-      {d.flightsInternational && d.flightsInternational.length > 0 && (
-        <ExpandableSection title="Vuelos internacionales" icon="🛫" defaultOpen={false}>
-          <LimitedList items={d.flightsInternational} render={(f, i) => <FlightCard key={i} f={f} />} />
-        </ExpandableSection>
+      {/* Vuelos internacionales en formato “banner” */}
+      {(d.flightsInternational && d.flightsInternational.length > 0) && (
+        <div className="mb-3">
+          <div className="text-sm font-semibold mb-2">Vuelos internacionales</div>
+          <div className="space-y-2">
+            {d.flightsInternational.map((f, i) => (
+              <BannerCard
+                key={i}
+                title={`${f.carrier || 'Aerolínea'} ${f.code || ''}`.trim()}
+                subtitle={`${f.from || ''} → ${f.to || ''}`}
+                tags={[
+                  f.depart ? <>Salida {fmtTime(f.depart)}</> : null,
+                  f.arrive ? <>Llegada {fmtTime(f.arrive)}</> : null,
+                  f.baggage ? <>🧳 {f.baggage}</> : null,
+                  f.pnr ? <>🔖 {f.pnr}</> : null,
+                ].filter(Boolean) as React.ReactNode[]}
+                rightTag={d.weather?.icon}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
-      {d.flightsDomestic && d.flightsDomestic.length > 0 && (
-        <ExpandableSection title="Vuelos domésticos" icon="🛩️" defaultOpen={false}>
-          <LimitedList items={d.flightsDomestic} render={(f, i) => <FlightCard key={i} f={f} />} />
-        </ExpandableSection>
+      {/* Vuelos domésticos */}
+      {(d.flightsDomestic && d.flightsDomestic.length > 0) && (
+        <div className="mb-3">
+          <div className="text-sm font-semibold mb-2">Vuelos domésticos</div>
+          <div className="space-y-2">
+            {d.flightsDomestic.map((f, i) => (
+              <BannerCard
+                key={i}
+                title={`${f.carrier || 'Aerolínea'} ${f.code || ''}`.trim()}
+                subtitle={`${f.from || ''} → ${f.to || ''}`}
+                tags={[
+                  f.depart ? <>Salida {fmtTime(f.depart)}</> : null,
+                  f.arrive ? <>Llegada {fmtTime(f.arrive)}</> : null,
+                ].filter(Boolean) as React.ReactNode[]}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
-      {d.transports && d.transports.length > 0 && (
-        <ExpandableSection title="Transportes" icon="🚐" defaultOpen={false}>
-          <LimitedList items={d.transports} render={(t, i) => <TransportCard key={i} t={t} />} />
-        </ExpandableSection>
+      {/* Transportes */}
+      {(d.transports && d.transports.length > 0) && (
+        <div className="mb-3">
+          <div className="text-sm font-semibold mb-2">Transportes</div>
+          <div className="space-y-2">
+            {d.transports.map((t, i) => (
+              <BannerCard
+                key={i}
+                title={`${t.mode?.toUpperCase() || 'Transporte'}${t.provider ? ` · ${t.provider}` : ''}`}
+                subtitle={`${t.from || ''}${t.to ? ` → ${t.to}` : ''}`}
+                tags={[
+                  t.time ? <>🕒 {t.time}</> : null,
+                  t.duration ? <>⏱ {fmtDurationISO(t.duration)}</> : null,
+                ].filter(Boolean) as React.ReactNode[]}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
+      {/* Hotel (tarjeta simple) */}
       {d.hotel && (d.hotel.name || d.hotel.style || d.hotel.checkIn || d.hotel.checkOut) && (
-        <ExpandableSection title="Hotel" icon="🏨" defaultOpen={true}>
-          <div className="rounded-lg border p-3 bg-white" style={{ borderColor: '#eceae6' }}>
+        <div className="mb-3">
+          <div className="text-sm font-semibold mb-2">Hotel</div>
+          <div className="rounded-xl border p-3 bg-white shadow-sm" style={{ borderColor: '#eceae6' }}>
             <div className="font-medium text-neutral-900">{d.hotel.name}</div>
-            <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
+            <div className="flex flex-wrap gap-2 text-xs text-neutral-600 mt-1">
               {d.hotel.area && <Chip>📍 {d.hotel.area}</Chip>}
               {d.hotel.style && <Chip>🏷 {d.hotel.style}</Chip>}
               {d.hotel.checkIn && <Chip>🛎 Check-in {fmtDateTime(d.hotel.checkIn)}</Chip>}
@@ -332,52 +371,67 @@ function DayPage({ d }: { d: Day }) {
               {d.hotel.confirmation && <Chip>✅ {d.hotel.confirmation}</Chip>}
             </div>
           </div>
-        </ExpandableSection>
+        </div>
       )}
 
-      {d.hotelOptions && d.hotelOptions.length > 0 && (
-        <ExpandableSection title="Opciones de hotel" icon="🛏️" defaultOpen={false}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {d.hotelOptions.map((h, i) => (
-              <div key={i} className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
-                <div className="font-medium text-neutral-900">{h.name}</div>
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
-                  {h.area && <Chip>📍 {h.area}</Chip>}
-                  {h.style && <Chip>🏷 {h.style}</Chip>}
-                </div>
-              </div>
+      {/* Actividades como banners */}
+      {(activities && activities.length > 0) && (
+        <div className="mb-1">
+          <div className="text-sm font-semibold mb-2">Plan del día</div>
+          <div className="space-y-2">
+            {activities.map((a, i) => (
+              <BannerCard
+                key={i}
+                title={a.title}
+                subtitle={a.location || ''}
+                tags={[
+                  a.time ? <>🕒 {a.time}</> : null,
+                  a.category ? <>🏷 {a.category}</> : null,
+                  a.duration ? <>⏱ {fmtDurationISO(a.duration)}</> : null,
+                  a.optional ? <>⚪ Opcional</> : null,
+                ].filter(Boolean) as React.ReactNode[]}
+                rightTag={d.weather?.icon}
+              />
             ))}
           </div>
-        </ExpandableSection>
-      )}
-
-      {activities && activities.length > 0 && (
-        <ExpandableSection title="Plan del día" icon="🧭" defaultOpen={true}>
-          <LimitedList items={activities} limit={3} render={(a, i) => <ActivityCard key={i} a={a} />} />
-        </ExpandableSection>
-      )}
-
-      {d.addOns && d.addOns.length > 0 && (
-        <ExpandableSection title="Servicios adicionales" icon="✨" defaultOpen={false}>
-          <LimitedList
-            items={d.addOns}
-            render={(s, i) => (
-              <div key={i} className="rounded-lg border p-3 text-sm bg-white" style={{ borderColor: '#eceae6' }}>
-                <div className="text-neutral-900 font-medium">{s.title}</div>
-                <div className="flex flex-wrap gap-3 text-xs text-neutral-600 mt-1">
-                  {s.time && <Chip>🕒 {s.time}</Chip>}
-                  {s.duration && <Chip>⏱ {fmtDurationISO(s.duration)}</Chip>}
-                  {s.provider && <Chip>🏷 {s.provider}</Chip>}
+          {/* Notas y opciones (debajo de cada banner para no alargar) */}
+          {activities.some(a => a.notes || (a.options && a.options.length)) && (
+            <div className="mt-3 rounded-lg border p-3 text-xs bg-white" style={{ borderColor: '#eceae6' }}>
+              {activities.map((a, i) => (
+                <div key={`n-${i}`} className="mb-2 last:mb-0">
+                  {a.notes && <div className="text-neutral-700">• <span className="font-medium">{a.title}:</span> {a.notes}</div>}
+                  {a.options && a.options.length > 0 && (
+                    <div className="text-neutral-600 mt-1 ml-3">
+                      {a.options.map((op, j) => (
+                        <div key={j}>◦ <span className="font-medium">{op.title}</span>{op.notes ? ` — ${op.notes}` : ''}</div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                {(s.description || s.note) && (
-                  <div className="text-xs text-neutral-600 mt-2 whitespace-pre-wrap">
-                    {s.description}{s.description && s.note ? ' — ' : ''}{s.note}
-                  </div>
-                )}
-              </div>
-            )}
-          />
-        </ExpandableSection>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Add-ons */}
+      {d.addOns && d.addOns.length > 0 && (
+        <div className="mt-2">
+          <div className="text-sm font-semibold mb-2">Servicios adicionales</div>
+          <div className="space-y-2">
+            {d.addOns.map((s, i) => (
+              <BannerCard
+                key={i}
+                title={s.title}
+                subtitle={s.provider || ''}
+                tags={[
+                  s.time ? <>🕒 {s.time}</> : null,
+                  s.duration ? <>⏱ {fmtDurationISO(s.duration)}</> : null,
+                ].filter(Boolean) as React.ReactNode[]}
+              />
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
