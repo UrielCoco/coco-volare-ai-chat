@@ -1,233 +1,158 @@
-// app/(chat)/api/chat/route.ts
-import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'; // Streaming en Node
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY!,
-});
-const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
-
-// --------- Tipos mínimos para la UI ---------
-type UiMessage = {
-  role: 'user' | 'assistant';
-  parts: Array<{ type: 'text'; text: string }>;
-};
-
-function asText(msg?: UiMessage) {
-  if (!msg?.parts?.length) return '';
-  return msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join('');
+// Helper para emitir eventos SSE
+function sse(event: string, data?: any) {
+  const payload = data === undefined ? '' : `data: ${JSON.stringify(data)}\n`;
+  return new TextEncoder().encode(`event: ${event}\n${payload}\n`);
 }
 
-function sse(event: string, data: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
-}
-
-// ---------- Logs server ----------
-function slog(event: string, meta: Record<string, any> = {}) {
-  try {
-    console.info(JSON.stringify({ tag: '[CV][server]', event, ...meta }));
-  } catch {}
-}
-
-// ---------- Helpers OpenAI ----------
-function flattenAssistantTextFromMessage(message: any): string {
-  const out: string[] = [];
-  if (!message?.content) return '';
-  for (const c of message.content) {
-    if (c.type === 'text' && c.text?.value) out.push(c.text.value);
-  }
-  return out.join('\n');
-}
-
-// Extrae texto delta de eventos heterogéneos del SDK
-function extractDeltaTextFromEvent(e: any): string {
-  try {
-    const content = e?.data?.delta?.content;
-    if (Array.isArray(content)) {
-      const parts: string[] = [];
-      for (const item of content) {
-        if (item?.type === 'text' && item?.text?.value) parts.push(item.text.value);
-        if (item?.type === 'output_text' && item?.text?.value) parts.push(item.text.value);
-        // algunas versiones envían "output_text_delta"
-        if (item?.type === 'output_text_delta' && (item as any)?.value) parts.push((item as any).value);
-      }
-      return parts.join('');
-    }
-  } catch {}
-  return '';
-}
-
-// ---------- “te lo preparo / un momento” (para ACK visual) ----------
-const WAIT_PATTERNS = [
-  // ES
-  /dame un momento/i, /un momento/i, /perm[ií]teme/i, /en breve/i, /ahora mismo/i,
-  /lo preparo/i, /te preparo/i, /voy a preparar/i, /estoy preparando/i,
-  // EN
-  /give me a moment/i, /one moment/i, /hold on/i, /let me/i, /just a moment/i,
-  /i('|’)ll prepare/i, /i will prepare/i, /i('|’)m preparing/i, /working on it/i,
-  // IT
-  /un attimo/i, /lascia(mi)? che/i, /preparo/i, /sto preparando/i,
-  // PT
-  /um momento/i, /deixa eu/i, /vou preparar/i, /estou preparando/i,
-  // FR
-  /un instant/i, /laisse(-|\s)?moi/i, /je vais pr[eé]parer/i, /je pr[eé]pare/i,
-  // DE
-  /einen moment/i, /lass mich/i, /ich werde vorbereiten/i, /ich bereite vor/i,
-];
-function hasWaitPhrase(text: string) {
-  const t = text || '';
-  return WAIT_PATTERNS.some((rx) => rx.test(t));
-}
-function hasVisibleBlock(text: string) {
-  return /```cv:(itinerary|quote)\b/.test(text || '');
-}
-
-// ========== POST ==========
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   const { searchParams } = new URL(req.url);
   const wantStream = searchParams.get('stream') === '1';
 
-  const body = await req.json().catch(() => ({}));
-  const uiMsg: UiMessage | undefined = body?.message;
-  let threadId: string | null = body?.threadId || null;
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const assistantId = process.env.OPENAI_ASSISTANT_ID;
+  if (!assistantId) return new Response('Missing OPENAI_ASSISTANT_ID', { status: 500 });
 
-  // 1) thread
+  // Parse del body
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return new Response('Bad JSON', { status: 400 });
+  }
+
+  const userText: string =
+    body?.message?.parts?.[0]?.text ??
+    body?.message?.text ??
+    body?.text ??
+    '';
+
+  if (!userText) return new Response('Missing message text', { status: 400 });
+
+  // 1) Thread (reusar si viene)
+  let threadId: string = body?.threadId;
   if (!threadId) {
-    const created = await client.beta.threads.create({});
-    threadId = created.id;
+    const t = await openai.beta.threads.create({});
+    threadId = t.id;
   }
 
-  // 2) add user message
-  const userText = asText(uiMsg);
-  if (userText) {
-    await client.beta.threads.messages.create(threadId!, {
-      role: 'user',
-      content: userText,
-    });
-  }
+  // 2) Agregar el mensaje del usuario
+  await openai.beta.threads.messages.create(threadId, {
+    role: 'user',
+    content: userText,
+  });
 
-  // 3) NO streaming → simple createAndPoll (por si quieres debug)
+  // 3) Si no pidieron stream, devuelve ids y listo
   if (!wantStream) {
-    const run = await client.beta.threads.runs.createAndPoll(threadId!, {
-      assistant_id: ASSISTANT_ID,
+    const run = await openai.beta.threads.runs.create(threadId, {
+      assistant_id: assistantId,
     });
-    const list = await client.beta.threads.messages.list(threadId!);
-    const last = list.data?.[0];
-    const text = flattenAssistantTextFromMessage(last);
-    return new Response(JSON.stringify({ threadId, run, text }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return Response.json({ threadId, runId: run.id });
   }
 
-  // 4) Streaming SSE
+  // 4) Stream SSE
   const stream = new ReadableStream({
-    start: async (controller) => {
-      const send = (event: string, data: any) => {
-        controller.enqueue(new TextEncoder().encode(sse(event, data)));
-      };
+    async start(controller) {
+      // Envía meta con el thread id para que la UI lo guarde
+      controller.enqueue(sse('meta', { threadId }));
 
-      // informa thread listo
-      send('thread.ready', { threadId });
+      // Inicia el run en modo streaming
+      const asstStream = await openai.beta.threads.runs.stream(threadId, {
+        assistant_id: assistantId,
+      });
 
-      try {
-        // @ts-ignore – la forma concreta del stream varía por versión del SDK
-        const runStream: any = await client.beta.threads.runs.stream(threadId!, {
-          assistant_id: ASSISTANT_ID,
-        });
-
-        // --- Handlers de alto nivel (UI state machine) ---
-        runStream
-          .on('messageCreated', (e: any) => {
-            const text = flattenAssistantTextFromMessage(e?.data);
-            // ACK temprano (no bloquear UI)
-            if (hasWaitPhrase(text) && !hasVisibleBlock(text)) {
-              send('ack', { messageId: e?.data?.id });
-            }
-          })
-          .on('messageDelta', (e: any) => {
-            const delta = extractDeltaTextFromEvent(e);
-            if (delta) send('delta', { value: delta });
-          })
-          .on('messageCompleted', (e: any) => {
-            // mensaje completo del assistant (solo texto)
-            try {
-              const msg = e?.data;
-              const text = flattenAssistantTextFromMessage(msg);
-              send('message.final', {
-                id: msg?.id,
-                role: 'assistant',
-                text,
-              });
-            } catch {}
-          })
-          // Herramientas: si el assistant emite JSON, espera a cerrar y manda un solo bloque
-          .on('toolCallCreated', (e: any) => {
-            if (e?.data?.name) slog('tool.created', { name: e.data.name });
-          })
-          .on('toolCallDelta', (e: any) => {
-            // ignoramos los deltas de JSON para no renderizar parcial
-          })
-          .on('toolCallCompleted', (e: any) => {
-            try {
-              const tool = e?.data || e?.toolCall;
-              const fnName = tool?.function?.name;
-              if (fnName === 'emit_itinerary') {
-                const args = JSON.parse(tool.function.arguments ?? '{}');
-                if (args && Array.isArray(args.days)) {
-                  send('itinerary', { payload: args });
-                }
+      // ÚNICO listener tipado como 'event' para ser compatible con varias versiones del SDK
+      asstStream.on('event', (evt: any) => {
+        try {
+          const name: string = evt?.event || evt?.type || '';
+          // --- DELTAS DE TEXTO ---
+          // nombres que hemos visto según versión: "message.delta" o "thread.message.delta"
+          if (name.includes('message.delta')) {
+            const items = evt?.data?.delta?.content ?? evt?.data?.content ?? [];
+            for (const it of items) {
+              const piece =
+                it?.text?.value ??
+                it?.text?.content ??
+                it?.[ 'output_text' ] ??
+                '';
+              if (typeof piece === 'string' && piece.length) {
+                controller.enqueue(sse('delta', { value: piece }));
               }
-            } catch (err) {
-              slog('tool.error', { err: (err as any)?.message });
             }
-          })
-          .on('runStepCreated', (e: any) => {
-            send('run.step', { id: e?.data?.id, status: 'created' });
-          })
-          .on('runStepDelta', (e: any) => {
-            send('run.step', { id: e?.data?.id, status: 'in_progress' });
-          })
-          .on('runStepCompleted', (e: any) => {
-            send('run.step', { id: e?.data?.id, status: 'completed' });
-          })
-          .on('runCreated', (e: any) => {
-            send('run.status', { id: e?.data?.id, status: 'created' });
-          })
-          .on('runInProgress', (e: any) => {
-            send('run.status', { id: e?.data?.id, status: 'in_progress' });
-          })
-          .on('runCompleted', (e: any) => {
-            send('run.final', { id: e?.data?.id, status: 'completed' });
-            controller.close();
-          })
-          .on('runFailed', (e: any) => {
-            send('run.final', { id: e?.data?.id, status: 'failed' });
-            controller.close();
-          })
-          .on('error', (err: any) => {
-            slog('run.error', { err: String(err) });
-            send('error', { message: 'stream_error' });
-            controller.close();
-          });
+            return;
+          }
 
-      } catch (err: any) {
-        slog('server.error', { err: err?.message || String(err) });
-        send('error', { message: 'internal_error' });
-        controller.close();
-      }
+          // --- MENSAJE COMPLETADO ---
+          if (name.includes('message.completed')) {
+            const parts: string[] = [];
+            for (const c of evt?.data?.content ?? []) {
+              if (c?.type === 'text' && c?.text?.value) parts.push(c.text.value);
+              // variantes
+              else if (typeof c === 'string') parts.push(c);
+              else if (c?.output_text) parts.push(String(c.output_text));
+            }
+            const text = parts.join('');
+            if (text) controller.enqueue(sse('final', { text }));
+            return;
+          }
+
+          // --- RUN COMPLETADO / FALLIDO ---
+          if (name.includes('run.completed')) {
+            controller.enqueue(sse('done', {}));
+            return;
+          }
+          if (name.includes('run.failed')) {
+            controller.enqueue(sse('error', {
+              error: evt?.data?.error?.message || 'run.failed',
+            }));
+            return;
+          }
+        } catch (e: any) {
+          controller.enqueue(sse('error', { error: e?.message || String(e) }));
+        }
+      });
+
+      asstStream.on('error', (e: any) => {
+        controller.enqueue(sse('error', { error: e?.message || String(e) }));
+      });
+
+      asstStream.on('end', () => {
+        controller.enqueue(sse('done', {}));
+      });
+
+      // Si el cliente cierra la conexión
+      const abort = () => {
+        try { asstStream.abort(); } catch {}
+      };
+      req.signal.addEventListener('abort', abort);
+
+      // Espera a que termine el stream del SDK
+      await asstStream.done();
+
+      // Cierra el SSE
+      controller.close();
     },
   });
 
   return new Response(stream, {
-    status: 200,
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no', // evita buffering en proxies Nginx
+    },
+  });
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     },
   });
 }

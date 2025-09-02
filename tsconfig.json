@@ -4,7 +4,7 @@
     "lib": [
       "dom",
       "dom.iterable",
-      "esnext"
+      "es2022"
     ],
     "allowJs": true,
     "skipLibCheck": true,
@@ -24,7 +24,9 @@
       ]
     },
     "types": [
-      "node"
+      "node",
+      "react",
+      "react-dom"
     ],
     "typeRoots": [
       "./types",
