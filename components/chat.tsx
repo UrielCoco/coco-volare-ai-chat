@@ -10,7 +10,7 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
-// ---------- Helpers ----------
+// -------------------- Kommo helpers --------------------
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -31,6 +31,8 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
 function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any }> {
   const blocks: Array<{ raw: string; json: any }> = [];
   if (!text) return blocks;
+
+  // Fence completa
   const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
   while ((m = rxFence.exec(text))) {
@@ -42,6 +44,7 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   }
   if (blocks.length) return blocks;
 
+  // Fallback: fence sin cerrar pero JSON balanceado
   const at = text.toLowerCase().indexOf('```cv:kommo');
   if (at >= 0) {
     const rest = text.slice(at + '```cv:kommo'.length);
@@ -56,56 +59,98 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
-// Quita SOLO las fences cv:kommo del texto visible
+// -------------------- Segmentación texto/JSON --------------------
+
+// Quita SOLO fences cv:kommo del texto visible
 function stripKommoFences(text: string): string {
   if (!text) return text;
   return text.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
 
-// Intenta detectar un bloque JSON visible (no-kommo) y separar texto+json
-function splitTextAndJsonForUser(rawInput: string): { mode: 'onlyText'|'onlyJson'|'textAndJson', textPart?: string, jsonText?: string } {
-  if (!rawInput || !rawInput.trim()) return { mode: 'onlyText', textPart: '' };
+// Devuelve una lista ordenada de segmentos [{type:'text'|'json', text}], soporta múltiples fences y JSON balanceado "suelto"
+function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', text:string}> {
+  const out: Array<{type:'text'|'json', text:string}> = [];
+  if (!rawInput || !rawInput.trim()) return out;
 
-  const input = stripKommoFences(rawInput);
+  // 1) quitar cv:kommo del render (sigue yendo a CRM por otra vía)
+  let s = stripKommoFences(rawInput);
 
-  // 1) Fences específicas con JSON
-  const fences = [
-    { label: 'cv:itinerary', rx: /```[\t ]*cv:itinerary[\t ]*([\s\S]*?)```/i },
-    { label: 'cv:quote',     rx: /```[\t ]*cv:quote[\t ]*([\s\S]*?)```/i },
-    { label: 'json',         rx: /```[\t ]*json[\t ]*([\s\S]*?)```/i },
-  ];
+  // 2) encontrar todas las fences (cv:itinerary | cv:quote | json)
+  const fenceRx = /```[ \t]*(cv:itinerary|cv:quote|json)[ \t]*\n?([\s\S]*?)```/gi;
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRx.exec(s))) {
+    const start = m.index;
+    const end = m.index + m[0].length;
 
-  for (const f of fences) {
-    const m = f.rx.exec(input);
-    if (m && m[0]) {
-      const rawJson = (m[1] || '').trim();
-      let pretty = rawJson;
-      try { pretty = JSON.stringify(JSON.parse(rawJson), null, 2); } catch {}
-      const textPart = (input.slice(0, m.index) + input.slice(m.index + m[0].length)).trim();
-      if (textPart && pretty) return { mode: 'textAndJson', textPart, jsonText: pretty };
-      if (pretty) return { mode: 'onlyJson', jsonText: pretty };
-      return { mode: 'onlyText', textPart };
+    const before = s.slice(cursor, start);
+    if (before.trim()) out.push({ type: 'text', text: before.trim() });
+
+    const rawJson = (m[2] || '').trim();
+    try {
+      const pretty = JSON.stringify(JSON.parse(rawJson), null, 2);
+      out.push({ type: 'json', text: pretty });
+    } catch {
+      // si la fence no parsea como JSON, la dejamos como texto literal
+      out.push({ type: 'text', text: m[0] });
     }
+
+    cursor = end;
   }
 
-  // 2) JSON balanceado "suelto" en el texto
-  const brace = input.indexOf('{');
-  if (brace >= 0) {
-    const balanced = extractBalancedJson(input, brace);
-    if (balanced) {
-      let pretty = balanced;
-      try { pretty = JSON.stringify(JSON.parse(balanced), null, 2); } catch {}
-      const before = input.slice(0, brace);
-      const after = input.slice(brace + balanced.length);
-      const textPart = (before + after).trim();
-      if (textPart && pretty) return { mode: 'textAndJson', textPart, jsonText: pretty };
-      if (pretty) return { mode: 'onlyJson', jsonText: pretty };
-      return { mode: 'onlyText', textPart };
+  // 3) resto después de la última fence -> buscar JSON balanceado suelto (múltiples)
+  s = s.slice(cursor);
+
+  const pushText = (t: string) => { if (t && t.trim()) out.push({ type: 'text', text: t.trim() }); };
+
+  let i = 0, textStart = 0;
+  while (i < s.length) {
+    if (s[i] === '{') {
+      // buscar cierre balanceado
+      let j = i, depth = 0, inStr = false, esc = false, closed = false;
+      for (; j < s.length; j++) {
+        const ch = s[j];
+        if (inStr) {
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = false; continue; }
+          continue;
+        }
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === '{') { depth++; continue; }
+        if (ch === '}') { depth--; if (depth === 0) { closed = true; j++; break; } }
+      }
+      if (closed) {
+        const before = s.slice(textStart, i);
+        pushText(before);
+        const cand = s.slice(i, j);
+        try {
+          const pretty = JSON.stringify(JSON.parse(cand), null, 2);
+          out.push({ type: 'json', text: pretty });
+          textStart = j;
+          i = j;
+          continue;
+        } catch {
+          // no era JSON válido → seguir escaneando
+        }
+      }
     }
+    i++;
   }
 
-  // 3) Solo texto
-  return { mode: 'onlyText', textPart: input };
+  const rest = s.slice(textStart);
+  pushText(rest);
+
+  // 4) compactar textos contiguos
+  const compact: Array<{type:'text'|'json', text:string}> = [];
+  for (const seg of out) {
+    if (seg.type === 'text' && compact.length && compact[compact.length-1].type === 'text') {
+      compact[compact.length-1].text += '\n\n' + seg.text;
+    } else {
+      compact.push(seg);
+    }
+  }
+  return compact.filter(sg => sg.text.trim().length);
 }
 
 export default function Chat() {
@@ -118,7 +163,9 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
+  // evita duplicar ejecuciones de kommo
   const kommoHashesRef = useRef<Set<string>>(new Set());
+  // cuenta de mensajes finalizados dentro del mismo RUN
   const runFinalsCountRef = useRef<number>(0);
 
   const [composerH, setComposerH] = useState<number>(84);
@@ -153,7 +200,7 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // auto-scroll en nuevo mensaje
+  // auto-scroll al añadir nuevo mensaje
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
@@ -163,6 +210,7 @@ export default function Chat() {
     }
   }, [messages]);
 
+  // ---- despacho CRM Kommo (interno, no visible) ----
   function dispatchKommoOps(ops: any[], rawKey: string) {
     const key = 'k_' + rawKey.slice(0, 40);
     if (kommoHashesRef.current.has(key)) return;
@@ -176,6 +224,7 @@ export default function Chat() {
   }
 
   async function handleStream(userText: string) {
+    // loader on desde inicio de RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
 
@@ -245,6 +294,7 @@ export default function Chat() {
                 currentMsgBuffer += data.value;
                 fullTextForKommo += data.value;
 
+                // Detectar y despachar cv:kommo durante streaming
                 const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
@@ -266,8 +316,8 @@ export default function Chat() {
               currentMsgBuffer = '';
 
               if (finalTextRaw && finalTextRaw.trim().length) {
-                // ---- SPLIT TEXTO + JSON EN DOS MENSAJES ----
-                const split = splitTextAndJsonForUser(finalTextRaw);
+                // dividir en múltiples segmentos en el orden original
+                const segments = tokenizeTextJsonSegments(finalTextRaw);
 
                 const pushAssistant = (txt: string) => {
                   const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -280,19 +330,14 @@ export default function Chat() {
                   setMessages((prev) => [...prev, newMsg]);
                 };
 
-                if (split.mode === 'textAndJson') {
-                  if (split.textPart && split.textPart.trim()) pushAssistant(split.textPart.trim());
-                  if (split.jsonText && split.jsonText.trim()) pushAssistant(split.jsonText.trim());
-                } else if (split.mode === 'onlyJson') {
-                  pushAssistant(split.jsonText || '');
-                } else {
-                  pushAssistant(split.textPart || '');
+                for (const seg of segments) {
+                  pushAssistant(seg.text);
                 }
               }
 
               runFinalsCountRef.current += 1;
 
-              // también despacha cv:kommo si vino sólo en el final
+              // Despachar Kommo si solo vino en el final
               const kommoBlocks = extractKommoBlocksFromText(finalTextRaw);
               for (const b of kommoBlocks) {
                 try {
@@ -306,6 +351,7 @@ export default function Chat() {
           }
 
           if (event === 'done' || event === 'error') {
+            // loader off SOLO cuando terminó el RUN
             setIsLoading(false);
           }
         }
@@ -330,9 +376,8 @@ export default function Chat() {
     const text = input.trim();
     if (!text || isLoading) return;
 
-    const userId = `u_${Date.now()}`;
     const userMsg: ChatMessage = {
-      id: userId,
+      id: `u_${Date.now()}`,
       role: 'user',
       parts: [{ type: 'text', text }] as any,
       createdAt: new Date().toISOString(),
@@ -357,7 +402,11 @@ export default function Chat() {
         </div>
       </div>
 
-      <form ref={composerRef} onSubmit={handleSubmit} className="sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t">
+      <form
+        ref={composerRef}
+        onSubmit={handleSubmit}
+        className="sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
+      >
         <div className="mx-auto max-w-3xl w-full px-4 py-3 flex items-center gap-2">
           <input
             value={input}
