@@ -10,7 +10,7 @@ function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
 }
 
-// -------------------- Helpers: JSON balanceado & KOMMO --------------------
+// -------------------- Kommo helpers --------------------
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -59,58 +59,46 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   return blocks;
 }
 
-// -------------------- Segmentación texto / JSON / FENCE --------------------
+// -------------------- Segmentación texto/JSON --------------------
 
-// Quita SOLO fences cv:kommo del texto visible (lo del CRM no se pinta)
+// Quita SOLO fences cv:kommo del texto visible
 function stripKommoFences(text: string): string {
   if (!text) return text;
   return text.replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
 
-type Segment =
-  | { type: 'text'; text: string }
-  | { type: 'json'; text: string } // JSON sin etiqueta (se renderiza como texto plano)
-  | { type: 'fence'; label: 'cv:itinerary' | 'cv:quote'; text: string }; // preserva etiqueta
-
-// Devuelve segmentos ordenados: texto / fence(json) / texto / json / ...
-function tokenizeTextJsonSegments(rawInput: string): Segment[] {
-  const out: Segment[] = [];
+// Devuelve una lista ordenada de segmentos [{type:'text'|'json', text}], soporta múltiples fences y JSON balanceado "suelto"
+function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', text:string}> {
+  const out: Array<{type:'text'|'json', text:string}> = [];
   if (!rawInput || !rawInput.trim()) return out;
 
-  // 1) quitar cv:kommo del render (aun así se despacha a CRM aparte)
+  // 1) quitar cv:kommo del render (sigue yendo a CRM por otra vía)
   let s = stripKommoFences(rawInput);
 
-  // 2) detectar fences múltiples (cv:itinerary | cv:quote | json)
+  // 2) encontrar todas las fences (cv:itinerary | cv:quote | json)
   const fenceRx = /```[ \t]*(cv:itinerary|cv:quote|json)[ \t]*\n?([\s\S]*?)```/gi;
   let cursor = 0;
   let m: RegExpExecArray | null;
   while ((m = fenceRx.exec(s))) {
     const start = m.index;
     const end = m.index + m[0].length;
+
     const before = s.slice(cursor, start);
     if (before.trim()) out.push({ type: 'text', text: before.trim() });
 
-    const labelRaw = (m[1] || '').toLowerCase();
     const rawJson = (m[2] || '').trim();
-
-    // Intenta parsear el JSON de la fence
     try {
       const pretty = JSON.stringify(JSON.parse(rawJson), null, 2);
-      if (labelRaw === 'cv:itinerary' || labelRaw === 'cv:quote') {
-        out.push({ type: 'fence', label: labelRaw as 'cv:itinerary' | 'cv:quote', text: pretty });
-      } else {
-        // fence "```json" → sin etiqueta especial
-        out.push({ type: 'json', text: pretty });
-      }
+      out.push({ type: 'json', text: pretty });
     } catch {
-      // Si no parsea, lo dejamos como texto literal para no perder info
+      // si la fence no parsea como JSON, la dejamos como texto literal
       out.push({ type: 'text', text: m[0] });
     }
 
     cursor = end;
   }
 
-  // 3) resto después de la última fence → puede tener JSONs sueltos (múltiples)
+  // 3) resto después de la última fence -> buscar JSON balanceado suelto (múltiples)
   s = s.slice(cursor);
 
   const pushText = (t: string) => { if (t && t.trim()) out.push({ type: 'text', text: t.trim() }); };
@@ -154,15 +142,15 @@ function tokenizeTextJsonSegments(rawInput: string): Segment[] {
   pushText(rest);
 
   // 4) compactar textos contiguos
-  const compact: Segment[] = [];
+  const compact: Array<{type:'text'|'json', text:string}> = [];
   for (const seg of out) {
     if (seg.type === 'text' && compact.length && compact[compact.length-1].type === 'text') {
-      (compact[compact.length-1] as any).text += '\n\n' + seg.text;
+      compact[compact.length-1].text += '\n\n' + seg.text;
     } else {
       compact.push(seg);
     }
   }
-  return compact.filter(sg => (sg.type === 'text' ? sg.text.trim().length : true));
+  return compact.filter(sg => sg.text.trim().length);
 }
 
 export default function Chat() {
@@ -177,8 +165,6 @@ export default function Chat() {
 
   // evita duplicar ejecuciones de kommo
   const kommoHashesRef = useRef<Set<string>>(new Set());
-  // dedupe de fences dentro de un RUN (por si el assistant repite)
-  const fenceSeenRef = useRef<Set<string>>(new Set());
   // cuenta de mensajes finalizados dentro del mismo RUN
   const runFinalsCountRef = useRef<number>(0);
 
@@ -241,7 +227,6 @@ export default function Chat() {
     // loader on desde inicio de RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
-    fenceSeenRef.current.clear();
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -334,7 +319,7 @@ export default function Chat() {
                 // dividir en múltiples segmentos en el orden original
                 const segments = tokenizeTextJsonSegments(finalTextRaw);
 
-                const pushAssistantText = (txt: string) => {
+                const pushAssistant = (txt: string) => {
                   const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
                   const newMsg: ChatMessage = {
                     id,
@@ -345,25 +330,8 @@ export default function Chat() {
                   setMessages((prev) => [...prev, newMsg]);
                 };
 
-                const pushAssistantFence = (label: 'cv:itinerary' | 'cv:quote', jsonPretty: string) => {
-                  // dedupe por etiqueta + contenido minificado
-                  const key = `${label}|` + jsonPretty.replace(/\s+/g, '');
-                  if (fenceSeenRef.current.has(key)) return;
-                  fenceSeenRef.current.add(key);
-
-                  const fenced = '```' + label + '\n' + jsonPretty + '\n```';
-                  pushAssistantText(fenced);
-                };
-
                 for (const seg of segments) {
-                  if (seg.type === 'text') {
-                    pushAssistantText(seg.text);
-                  } else if (seg.type === 'json') {
-                    // JSON sin etiqueta → mostrar como texto plano (debug)
-                    pushAssistantText(seg.text);
-                  } else if (seg.type === 'fence') {
-                    pushAssistantFence(seg.label, seg.text);
-                  }
+                  pushAssistant(seg.text);
                 }
               }
 
