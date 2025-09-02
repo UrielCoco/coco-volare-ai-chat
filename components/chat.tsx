@@ -12,204 +12,225 @@ function ulog(event: string, meta: any = {}) {
   } catch {}
 }
 
-// ---------- Helpers ----------
-function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false, escape = false, depth = 0, first = -1;
-  for (let i = startIdx; i < src.length; i++) {
-    const ch = src[i];
-    if (inString) {
-      if (escape) { escape = false; continue; }
-      if (ch === '\\') { escape = true; continue; }
-      if (ch === '"') { inString = false; continue; }
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
-  }
-  return null;
-}
+/** ---- Utils JSON fence ---- */
+type FenceType = 'itinerary' | 'kommo' | 'quote';
+const FENCE_START_RE = /```cv:(itinerary|kommo|quote)/i;
+const FENCE_END = '```';
 
-type ParsedBlock =
-  | { type: 'text'; text: string }
-  | { type: 'itinerary'; data: any }
-  | { type: 'json'; data: any }
-  | { type: 'ack'; data: any };
-
-function splitIntoBlocks(full: string): ParsedBlock[] {
-  const blocks: ParsedBlock[] = [];
-  let cursor = 0;
-  const rx = /```([^\n]+)\n?/g;
-  let m: RegExpExecArray | null;
-
-  while ((m = rx.exec(full))) {
-    const fenceStart = m.index;
-    const fenceLang = (m[1] || '').trim().toLowerCase();
-
-    if (fenceStart > cursor) {
-      const chunk = full.slice(cursor, fenceStart);
-      if (chunk.trim()) blocks.push({ type: 'text', text: chunk });
-    }
-
-    const afterOpen = rx.lastIndex;
-    const closeIdx = full.indexOf('```', afterOpen);
-    if (closeIdx === -1) {
-      const rest = full.slice(fenceStart);
-      if (rest.trim()) blocks.push({ type: 'text', text: rest });
-      cursor = full.length;
-      break;
-    }
-
-    const inner = full.slice(afterOpen, closeIdx).trim();
-    let parsed: any = null;
-    if (inner.startsWith('{')) {
-      try { parsed = JSON.parse(inner); }
-      catch {
-        const balanced = extractBalancedJson(inner, inner.indexOf('{'));
-        if (balanced) { try { parsed = JSON.parse(balanced); } catch {} }
-      }
-    }
-
-    if (fenceLang === 'cv:itinerary' && parsed) blocks.push({ type: 'itinerary', data: parsed });
-    else if (fenceLang === 'json' && parsed) blocks.push({ type: 'json', data: parsed });
-    else if ((fenceLang === 'cv:ack' || fenceLang === 'ack') && parsed) blocks.push({ type: 'ack', data: parsed });
-    else blocks.push({ type: 'text', text: full.slice(fenceStart, closeIdx + 3) });
-
-    cursor = closeIdx + 3;
-  }
-
-  if (cursor < full.length) {
-    const tail = full.slice(cursor);
-    if (tail.trim()) blocks.push({ type: 'text', text: tail });
-  }
-  return blocks;
-}
-
-// ---------- Component ----------
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [isRunning, setIsRunning] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const threadIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
+  const [composerH, setComposerH] = useState<number>(84);
 
+  const threadIdRef = useRef<string | null>(null);
+
+  // ids de mensajes creados durante un run
+  const thinkingIdRef = useRef<string | null>(null);
+  const preTextIdRef = useRef<string | null>(null);
+  const postTextIdRef = useRef<string | null>(null);
+
+  // dedupe de tarjetas y kommo (por hash del JSON)
+  const cardHashesRef = useRef<Set<string>>(new Set());
   const kommoHashesRef = useRef<Set<string>>(new Set());
-  const activeAssistantIdRef = useRef<string | null>(null);
-  const suppressUntilFinalRef = useRef<boolean>(false);
-  const scrollPadHRef = useRef<number>(84);
 
+  // parser incremental
+  const modeRef = useRef<'text' | 'fence'>('text');
+  const fenceTypeRef = useRef<FenceType | null>(null);
+  const fenceBufRef = useRef<string>('');
+  const firstFenceClosedRef = useRef<boolean>(false);
+
+  // scroll automático en nuevos mensajes
   const lastMsgIdRef = useRef<string | null>(null);
-
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
-    const scroller = listRef.current;
-    if (!scroller) return;
-    endRef.current?.scrollIntoView({ behavior, block: 'end' });
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
-  };
-
-  useEffect(() => {
-    try {
-      const ss = window.sessionStorage.getItem(THREAD_KEY);
-      if (ss) { threadIdRef.current = ss; ulog('thread.restore', { threadId: ss }); }
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    if (!composerRef.current) return;
-    const ro = new ResizeObserver((entries) => {
-      const h = Math.ceil(entries[0].contentRect.height);
-      if (h && h !== scrollPadHRef.current) {
-        scrollPadHRef.current = h;
-        setInput((v) => v);
-      }
-    });
-    ro.observe(composerRef.current);
-    return () => ro.disconnect();
-  }, []);
-
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
     if (lastMsgIdRef.current !== last) {
       lastMsgIdRef.current = last;
-      requestAnimationFrame(() => scrollToBottom('smooth'));
+      requestAnimationFrame(() =>
+        endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }),
+      );
     }
   }, [messages]);
 
+  // restaurar thread
+  useEffect(() => {
+    try {
+      const ss = window.sessionStorage.getItem(THREAD_KEY);
+      if (ss) {
+        threadIdRef.current = ss;
+        ulog('thread.restore', { threadId: ss });
+      }
+    } catch {}
+  }, []);
+
+  // medir composer
+  useEffect(() => {
+    if (!composerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = Math.ceil(entries[0].contentRect.height);
+      if (h && h !== composerH) setComposerH(h);
+    });
+    ro.observe(composerRef.current);
+    return () => ro.disconnect();
+  }, [composerH]);
+
+  /** ---- helpers UI ---- */
+  function addMessage(part: any): string {
+    const id = `${part.type}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const msg: ChatMessage = {
+      id,
+      role: 'assistant',
+      parts: [part] as any,
+      createdAt: new Date().toISOString(),
+    } as any;
+    setMessages((prev) => [...prev, msg]);
+    return id;
+  }
+
+  function ensureThinking() {
+    if (thinkingIdRef.current) return thinkingIdRef.current;
+    const id = addMessage({ type: 'thinking' });
+    thinkingIdRef.current = id;
+    return id;
+  }
+
+  function removeThinking() {
+    const id = thinkingIdRef.current;
+    if (!id) return;
+    setMessages((prev) => prev.filter((m) => m.id !== id));
+    thinkingIdRef.current = null;
+  }
+
+  function ensureText(which: 'pre' | 'post') {
+    const ref = which === 'pre' ? preTextIdRef : postTextIdRef;
+    if (ref.current) return ref.current;
+    const id = addMessage({ type: 'text', text: '' });
+    ref.current = id;
+    return id;
+  }
+
+  function appendText(which: 'pre' | 'post', chunk: string) {
+    if (!chunk) return;
+    const id = ensureText(which);
+    setMessages((prev) => {
+      const next = [...prev];
+      const idx = next.findIndex((m) => m.id === id);
+      if (idx >= 0) {
+        const t = (next[idx] as any).parts?.[0]?.text ?? '';
+        (next[idx] as any).parts = [{ type: 'text', text: t + chunk }];
+      }
+      return next;
+    });
+  }
+
+  function addItineraryCard(json: any, rawKey: string) {
+    try {
+      const key = 'i_' + rawKey.slice(0, 64);
+      if (cardHashesRef.current.has(key)) return; // dedupe
+      cardHashesRef.current.add(key);
+
+      addMessage({ type: 'itinerary', itinerary: json });
+      ulog('card.inserted', { days: Array.isArray(json?.days) ? json.days.length : 0 });
+    } catch {
+      // noop
+    }
+  }
+
   function dispatchKommoOps(ops: any[], rawKey: string) {
-    const key = 'k_' + rawKey.slice(0, 40);
+    if (!ops?.length) return;
+    const key = 'k_' + rawKey.slice(0, 64);
     if (kommoHashesRef.current.has(key)) return;
     kommoHashesRef.current.add(key);
-    ulog('kommo.dispatch', { count: ops.length });
     fetch('/api/kommo/dispatch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ops, threadId: threadIdRef.current }),
       keepalive: true,
     }).catch(() => {});
+    ulog('kommo.sent', { ops: ops.length });
   }
 
-  function createAssistantPlaceholder(): string {
-    const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const msg: ChatMessage = {
-      id, role: 'assistant',
-      parts: [{ type: 'text', text: '…' }] as any,
-      createdAt: new Date().toISOString(),
-    } as any;
-    ulog('ui.placeholder.create', { id });
-    setMessages((prev) => [...prev, msg]);
-    return id;
-  }
+  /** Parser incremental de fences durante el stream */
+  function processChunk(chunk: string) {
+    let rest = chunk;
 
-  function setActiveTextDelta(delta: string, replace = false) {
-    setMessages((prev) => {
-      const next = [...prev];
-      const aid = activeAssistantIdRef.current;
-      const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
-      if (idx >= 0) {
-        const curr: any = next[idx];
-        if (!curr.parts?.length || curr.parts[0].type !== 'text') {
-          curr.parts = [{ type: 'text', text: '' }, ...(curr.parts || [])];
+    while (rest.length) {
+      // Estamos fuera de fence → buscar inicio
+      if (modeRef.current === 'text') {
+        const m = rest.match(FENCE_START_RE);
+        if (!m || m.index === undefined || m.index < 0) {
+          // todo el pedazo es texto visible
+          appendText(firstFenceClosedRef.current ? 'post' : 'pre', rest);
+          return;
         }
-        const before = curr.parts[0].text || '';
-        curr.parts[0].text = replace ? delta : before + delta;
-        next[idx] = curr;
-      }
-      return next;
-    });
-  }
 
-  function finalizeActiveWith(text: string) {
-    const parts = splitIntoBlocks(text);
-    ulog('ui.finalize.blocks', { parts: parts.map((p) => p.type) });
-    setMessages((prev) => {
-      const next = [...prev];
-      const aid = activeAssistantIdRef.current;
-      const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
-      if (idx >= 0) {
-        const curr: any = next[idx];
-        curr.parts = parts.map((p) => {
-          if (p.type === 'text') return { type: 'text', text: p.text };
-          if (p.type === 'itinerary') return { type: 'itinerary', data: p.data };
-          if (p.type === 'json') return { type: 'json', data: p.data };
-          if (p.type === 'ack') return { type: 'ack', data: p.data };
-          return { type: 'text', text: '' };
-        });
-        next[idx] = curr;
+        // texto antes del fence
+        if (m.index > 0) {
+          appendText(firstFenceClosedRef.current ? 'post' : 'pre', rest.slice(0, m.index));
+        }
+
+        // entrar a fence
+        modeRef.current = 'fence';
+        fenceTypeRef.current = m[1].toLowerCase() as FenceType;
+        fenceBufRef.current = '';
+        rest = rest.slice(m.index + m[0].length);
+        continue;
       }
-      return next;
-    });
+
+      // Estamos dentro de un fence → buscar cierre ```
+      const endIdx = rest.indexOf(FENCE_END);
+      if (endIdx === -1) {
+        fenceBufRef.current += rest;
+        return; // seguimos esperando el cierre
+      }
+
+      // completó el fence
+      fenceBufRef.current += rest.slice(0, endIdx);
+      const jsonText = fenceBufRef.current.trim();
+
+      try {
+        const parsed = JSON.parse(jsonText);
+        if (fenceTypeRef.current === 'itinerary') {
+          addItineraryCard(parsed, jsonText);
+        } else if (fenceTypeRef.current === 'kommo') {
+          const ops = Array.isArray(parsed?.ops) ? parsed.ops : [];
+          dispatchKommoOps(ops, jsonText);
+        }
+      } catch (e) {
+        ulog('fence.parse.error', { type: fenceTypeRef.current, msg: String(e) });
+      }
+
+      // marcamos que ya cerró el primer fence (para enviar lo siguiente a "post")
+      if (!firstFenceClosedRef.current) firstFenceClosedRef.current = true;
+
+      // salir de fence y continuar con el resto del chunk
+      modeRef.current = 'text';
+      fenceTypeRef.current = null;
+      fenceBufRef.current = '';
+      rest = rest.slice(endIdx + FENCE_END.length);
+    }
   }
 
   async function handleStream(userText: string) {
-    setIsRunning(true);
-    activeAssistantIdRef.current = null;
-    suppressUntilFinalRef.current = false;
+    setIsLoading(true);
 
-    ulog('run.begin', { threadId: threadIdRef.current });
+    // reset estado de run
+    preTextIdRef.current = null;
+    postTextIdRef.current = null;
+    cardHashesRef.current.clear();
+    kommoHashesRef.current.clear();
+    modeRef.current = 'text';
+    fenceTypeRef.current = null;
+    fenceBufRef.current = '';
+    firstFenceClosedRef.current = false;
+
+    // thinking SIEMPRE, hasta 'done'
+    ensureThinking();
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -221,27 +242,12 @@ export default function Chat() {
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (!res.body) throw new Error('Stream no soportado.');
+      if (!res.body) throw new Error('Stream no soportado');
 
       const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
+      const decoder = new TextDecoder();
+
       let buffer = '';
-      let fullText = '';
-
-      const maybeDispatchKommoFrom = (text: string) => {
-        const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
-        let m: RegExpExecArray | null;
-        while ((m = rxFence.exec(text))) {
-          const payload = (m[1] || '').trim();
-          try {
-            const json = JSON.parse(payload);
-            if (json && Array.isArray(json.ops)) {
-              dispatchKommoOps(json.ops, payload.slice(0, 40));
-            }
-          } catch {}
-        }
-      };
-
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -252,131 +258,69 @@ export default function Chat() {
 
         for (const ev of events) {
           const lines = ev.split('\n');
-          const event = (lines.find((l) => l.startsWith('event:')) || '').replace('event:', '').trim();
-          const dataLine = (lines.find((l) => l.startsWith('data:')) || '').replace('data:', '').trim();
+          const event = (lines.find((l) => l.startsWith('event:')) || '')
+            .replace('event:', '')
+            .trim();
+          const dataLine = (lines.find((l) => l.startsWith('data:')) || '')
+            .replace('data:', '')
+            .trim();
+
           if (!event) continue;
 
           if (event === 'meta') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              if (data?.threadId) {
-                threadIdRef.current = data.threadId;
-                try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
-                ulog('sse.meta', { threadId: data.threadId });
-              }
-            } catch {}
-            continue;
-          }
-
-          if (event === 'log') {
-            // Logs que el server decide enviarnos (opcional)
-            try { const data = JSON.parse(dataLine || '{}'); ulog('sse.log', data); } catch {}
-            continue;
-          }
-
-          if (event === 'kommo') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              const ops = Array.isArray(data?.ops) ? data.ops : [];
-              ulog('sse.kommo', { count: ops.length });
-              if (ops.length) dispatchKommoOps(ops, JSON.stringify(ops).slice(0, 40));
-            } catch {}
-            continue;
-          }
-
-          if (event === 'delta') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.value === 'string' && data.value.length) {
-                if (!activeAssistantIdRef.current) {
-                  activeAssistantIdRef.current = createAssistantPlaceholder();
-                }
-                fullText += data.value;
-
-                if (/```\s*(cv:itinerary|json|cv:ack|cv:kommo)/i.test(fullText)) {
-                  if (!suppressUntilFinalRef.current) {
-                    ulog('ui.suppress.deltas', {});
-                    suppressUntilFinalRef.current = true;
-                  }
-                }
-
-                if (!suppressUntilFinalRef.current) {
-                  if (fullText.length === data.value.length) setActiveTextDelta('', true);
-                  setActiveTextDelta(data.value);
-                }
-
-                ulog('sse.delta', { len: data.value.length, total: fullText.length, suppressed: suppressUntilFinalRef.current });
-                maybeDispatchKommoFrom(fullText);
-              }
-            } catch {}
-            continue;
-          }
-
-          if (event === 'final') {
-            try {
-              const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.text === 'string') {
-                if (!activeAssistantIdRef.current) {
-                  activeAssistantIdRef.current = createAssistantPlaceholder();
-                }
-                ulog('sse.final', { chars: data.text.length });
-                finalizeActiveWith(data.text);
-
-                // Prepara "pensando…" para los siguientes pasos del run.
-                activeAssistantIdRef.current = createAssistantPlaceholder();
-                fullText = '';
-                suppressUntilFinalRef.current = false;
-
-                maybeDispatchKommoFrom(data.text);
-              }
-            } catch {}
-            continue;
-          }
-
-          if (event === 'done' || event === 'error') {
-            setIsRunning(false);
-            ulog('sse.' + event, {});
-
-            // elimina placeholders “…” sobrantes (incluye el creado tras el último final)
-            setMessages((prev) => {
-              const next = [...prev];
-              for (let i = next.length - 1; i >= 0; i--) {
-                const m: any = next[i];
-                if (m.role === 'assistant' && m.parts?.length === 1 && m.parts[0]?.text === '…') {
-                  next.splice(i, 1);
-                }
-              }
-              return next;
+            const data = JSON.parse(dataLine || '{}');
+            if (data?.threadId) {
+              threadIdRef.current = data.threadId;
+              try {
+                window.sessionStorage.setItem(THREAD_KEY, data.threadId);
+              } catch {}
+            }
+            ulog('sse.meta', { threadId: data?.threadId });
+          } else if (event === 'delta') {
+            const data = JSON.parse(dataLine || '{}');
+            const val: string = data?.value ?? '';
+            if (val) {
+              processChunk(val);
+              ulog('sse.delta', { len: val.length });
+            }
+          } else if (event === 'final') {
+            const data = JSON.parse(dataLine || '{}');
+            const text: string = data?.text ?? '';
+            if (text) {
+              processChunk(text);
+              ulog('sse.final', { len: text.length });
+            }
+          } else if (event === 'done') {
+            ulog('sse.done');
+            removeThinking();
+            setIsLoading(false);
+          } else if (event === 'error') {
+            ulog('sse.error', { data: dataLine });
+            removeThinking();
+            setIsLoading(false);
+            addMessage({
+              type: 'text',
+              text: '⚠️ Ocurrió un problema procesando tu solicitud. Intenta de nuevo.',
             });
-            continue;
           }
         }
       }
     } catch (err) {
-      console.error('[CV][chat] stream error', err);
-      setIsRunning(false);
-      setMessages((prev) => {
-        const next = [...prev];
-        const idx = next.findIndex((m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…');
-        if (idx >= 0) {
-          (next[idx] as any).parts = [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }];
-        } else {
-          next.push({
-            id: `a_err_${Date.now()}`,
-            role: 'assistant',
-            parts: [{ type: 'text', text: '⚠️ No pude conectarme. Intenta otra vez.' }] as any,
-            createdAt: new Date().toISOString(),
-          } as any);
-        }
-        return next;
+      console.error('[CV][ui] stream error', err);
+      removeThinking();
+      setIsLoading(false);
+      addMessage({
+        type: 'text',
+        text: '⚠️ No pude conectarme. Intenta otra vez.',
       });
     }
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
     const text = input.trim();
-    if (!text || isRunning) return;
+    if (!text) return;
 
     const userMsg: ChatMessage = {
       id: `u_${Date.now()}`,
@@ -384,23 +328,24 @@ export default function Chat() {
       parts: [{ type: 'text', text }] as any,
       createdAt: new Date().toISOString(),
     } as any;
-
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
+
     await handleStream(text);
   };
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
+      {/* lista scrolleable */}
       <div
         ref={listRef}
         className="flex-1 overflow-y-auto"
-        style={{ paddingBottom: `${scrollPadHRef.current + 24}px` }}
+        style={{ paddingBottom: `${composerH + 24}px` }}
       >
         <div className="mx-auto max-w-3xl w-full px-4">
           <Messages
             messages={messages}
-            isLoading={isRunning}
+            isLoading={isLoading}
             setMessages={({ messages }) => setMessages(messages)}
             regenerate={async () => {}}
           />
@@ -408,6 +353,7 @@ export default function Chat() {
         </div>
       </div>
 
+      {/* composer */}
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
@@ -423,10 +369,9 @@ export default function Chat() {
           />
           <button
             type="submit"
-            disabled={isRunning}
-            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow disabled:opacity-60"
+            disabled={isLoading}
+            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow disabled:opacity-50"
             aria-label="Enviar"
-            title={isRunning ? 'Esperando respuesta…' : 'Enviar'}
           >
             ➤
           </button>
