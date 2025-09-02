@@ -32,6 +32,7 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   const blocks: Array<{ raw: string; json: any }> = [];
   if (!text) return blocks;
 
+  // Fence completa
   const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
   while ((m = rxFence.exec(text))) {
@@ -43,6 +44,7 @@ function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: an
   }
   if (blocks.length) return blocks;
 
+  // Fallback: fence sin cerrar pero JSON balanceado
   const at = text.toLowerCase().indexOf('```cv:kommo');
   if (at >= 0) {
     const rest = text.slice(at + '```cv:kommo'.length);
@@ -66,13 +68,14 @@ function stripKommoFences(text: string): string {
 }
 
 // Devuelve una lista ordenada de segmentos [{type:'text'|'json', text}], soporta múltiples fences y JSON balanceado "suelto"
-function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:string}> {
+function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', text:string}> {
   const out: Array<{type:'text'|'json', text:string}> = [];
   if (!rawInput || !rawInput.trim()) return out;
 
+  // 1) quitar cv:kommo del render (sigue yendo a CRM por otra vía)
   let s = stripKommoFences(rawInput);
 
-  // fences (json explícito)
+  // 2) encontrar todas las fences (cv:itinerary | cv:quote | json)
   const fenceRx = /```[ \t]*(cv:itinerary|cv:quote|json)[ \t]*\n?([\s\S]*?)```/gi;
   let cursor = 0;
   let m: RegExpExecArray | null;
@@ -88,13 +91,14 @@ function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:
       const pretty = JSON.stringify(JSON.parse(rawJson), null, 2);
       out.push({ type: 'json', text: pretty });
     } catch {
+      // si la fence no parsea como JSON, la dejamos como texto literal
       out.push({ type: 'text', text: m[0] });
     }
 
     cursor = end;
   }
 
-  // resto → JSON balanceado suelto (múltiples)
+  // 3) resto después de la última fence -> buscar JSON balanceado suelto (múltiples)
   s = s.slice(cursor);
 
   const pushText = (t: string) => { if (t && t.trim()) out.push({ type: 'text', text: t.trim() }); };
@@ -102,6 +106,7 @@ function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:
   let i = 0, textStart = 0;
   while (i < s.length) {
     if (s[i] === '{') {
+      // buscar cierre balanceado
       let j = i, depth = 0, inStr = false, esc = false, closed = false;
       for (; j < s.length; j++) {
         const ch = s[j];
@@ -125,7 +130,9 @@ function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:
           textStart = j;
           i = j;
           continue;
-        } catch {}
+        } catch {
+          // no era JSON válido → seguir escaneando
+        }
       }
     }
     i++;
@@ -134,7 +141,7 @@ function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:
   const rest = s.slice(textStart);
   pushText(rest);
 
-  // compactar textos contiguos
+  // 4) compactar textos contiguos
   const compact: Array<{type:'text'|'json', text:string}> = [];
   for (const seg of out) {
     if (seg.type === 'text' && compact.length && compact[compact.length-1].type === 'text') {
@@ -144,18 +151,6 @@ function tokenizeTextAndJson(rawInput: string): Array<{type:'text'|'json', text:
     }
   }
   return compact.filter(sg => sg.text.trim().length);
-}
-
-function hasAllowedCardType(jsonStr: string): { ok: boolean; canon?: string } {
-  try {
-    const obj = JSON.parse(jsonStr);
-    const ct = typeof obj?.cardType === 'string' ? obj.cardType.toLowerCase() : '';
-    if (ct === 'itinerary' || ct === 'quote') {
-      // devolvemos versión minificada para dedupe si se requiere
-      return { ok: true, canon: JSON.stringify(obj) };
-    }
-  } catch {}
-  return { ok: false };
 }
 
 export default function Chat() {
@@ -173,9 +168,6 @@ export default function Chat() {
   // cuenta de mensajes finalizados dentro del mismo RUN
   const runFinalsCountRef = useRef<number>(0);
 
-  // dedupe simple para no mostrar la misma tarjeta dos veces en el mismo RUN
-  const cardHashRef = useRef<Set<string>>(new Set());
-
   const [composerH, setComposerH] = useState<number>(84);
   const lastMsgIdRef = useRef<string | null>(null);
 
@@ -186,7 +178,7 @@ export default function Chat() {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // restaurar thread
+  // restaurar thread desde sessionStorage
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -208,7 +200,7 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // auto-scroll
+  // auto-scroll al añadir nuevo mensaje
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
@@ -232,9 +224,9 @@ export default function Chat() {
   }
 
   async function handleStream(userText: string) {
+    // loader on desde inicio de RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
-    cardHashRef.current.clear();
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -324,7 +316,8 @@ export default function Chat() {
               currentMsgBuffer = '';
 
               if (finalTextRaw && finalTextRaw.trim().length) {
-                const segments = tokenizeTextAndJson(finalTextRaw);
+                // dividir en múltiples segmentos en el orden original
+                const segments = tokenizeTextJsonSegments(finalTextRaw);
 
                 const pushAssistant = (txt: string) => {
                   const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -338,17 +331,7 @@ export default function Chat() {
                 };
 
                 for (const seg of segments) {
-                  if (seg.type === 'json') {
-                    const verdict = hasAllowedCardType(seg.text);
-                    if (verdict.ok) {
-                      // dedupe simple por hash canonizado
-                      if (!cardHashRef.current.has(verdict.canon!)) {
-                        cardHashRef.current.add(verdict.canon!);
-                        pushAssistant(seg.text); // mandamos el JSON tal cual; Messages pinta la tarjeta
-                      }
-                    }
-                  }
-                  // seg.type === 'text' → se ignora (no queremos mostrar texto del assistant)
+                  pushAssistant(seg.text);
                 }
               }
 
@@ -368,6 +351,7 @@ export default function Chat() {
           }
 
           if (event === 'done' || event === 'error') {
+            // loader off SOLO cuando terminó el RUN
             setIsLoading(false);
           }
         }
