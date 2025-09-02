@@ -12,7 +12,7 @@ function ulog(event: string, meta: any = {}) {
   } catch {}
 }
 
-// ---------- Helpers de extracción (respaldos para cv:kommo en texto) ----------
+// ---------- Helpers ----------
 function extractBalancedJson(src: string, startIdx: number): string | null {
   let inString = false, escape = false, depth = 0, first = -1;
   for (let i = startIdx; i < src.length; i++) {
@@ -30,39 +30,76 @@ function extractBalancedJson(src: string, startIdx: number): string | null {
   return null;
 }
 
-function extractKommoBlocksFromText(text: string): Array<{ raw: string; json: any }> {
-  const blocks: Array<{ raw: string; json: any }> = [];
-  if (!text) return blocks;
+type ParsedBlock =
+  | { type: 'text'; text: string }
+  | { type: 'itinerary'; data: any }
+  | { type: 'json'; data: any }
+  | { type: 'ack'; data: any };
 
-  // Fence completa
-  const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
+function splitIntoBlocks(full: string): ParsedBlock[] {
+  // Soporta:
+  // ```cv:itinerary { ... }```
+  // ```json { ... }```
+  // ```cv:ack { ... }```
+  const blocks: ParsedBlock[] = [];
+  let cursor = 0;
+  const rx = /```([^\n]+)\n?/g;
   let m: RegExpExecArray | null;
-  while ((m = rxFence.exec(text))) {
-    const candidate = (m[1] || '').trim();
-    try {
-      const json = JSON.parse(candidate);
-      if (json && Array.isArray(json.ops)) blocks.push({ raw: candidate, json });
-    } catch {}
-  }
-  if (blocks.length) return blocks;
 
-  // Fallback: fence sin cerrar pero JSON balanceado
-  const at = text.toLowerCase().indexOf('```cv:kommo');
-  if (at >= 0) {
-    const openBrace = text.indexOf('{', at);
-    if (openBrace >= 0) {
-      const jsonSlice = extractBalancedJson(text, openBrace);
-      if (jsonSlice) {
-        try {
-          const json = JSON.parse(jsonSlice);
-          if (json && Array.isArray(json.ops)) blocks.push({ raw: jsonSlice, json });
-        } catch {}
+  while ((m = rx.exec(full))) {
+    const fenceStart = m.index;
+    const fenceLang = (m[1] || '').trim().toLowerCase();
+
+    if (fenceStart > cursor) {
+      const chunk = full.slice(cursor, fenceStart);
+      if (chunk.trim().length) blocks.push({ type: 'text', text: chunk });
+    }
+
+    const afterOpen = rx.lastIndex;
+    const closeIdx = full.indexOf('```', afterOpen);
+    if (closeIdx === -1) {
+      const rest = full.slice(fenceStart);
+      if (rest.trim().length) blocks.push({ type: 'text', text: rest });
+      cursor = full.length;
+      break;
+    }
+
+    const inner = full.slice(afterOpen, closeIdx).trim();
+    let parsed: any = null;
+
+    if (inner.startsWith('{')) {
+      try {
+        parsed = JSON.parse(inner);
+      } catch {
+        const balanced = extractBalancedJson(inner, inner.indexOf('{'));
+        if (balanced) {
+          try { parsed = JSON.parse(balanced); } catch {}
+        }
       }
     }
+
+    if (fenceLang === 'cv:itinerary' && parsed) {
+      blocks.push({ type: 'itinerary', data: parsed });
+    } else if (fenceLang === 'json' && parsed) {
+      blocks.push({ type: 'json', data: parsed });
+    } else if ((fenceLang === 'cv:ack' || fenceLang === 'ack') && parsed) {
+      blocks.push({ type: 'ack', data: parsed });
+    } else {
+      const raw = full.slice(fenceStart, closeIdx + 3);
+      if (raw.trim().length) blocks.push({ type: 'text', text: raw });
+    }
+
+    cursor = closeIdx + 3;
+  }
+
+  if (cursor < full.length) {
+    const tail = full.slice(cursor);
+    if (tail.trim().length) blocks.push({ type: 'text', text: tail });
   }
   return blocks;
 }
 
+// ---------- Component ----------
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -73,17 +110,12 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
-  // evita duplicados de Kommo por contenido
   const kommoHashesRef = useRef<Set<string>>(new Set());
-
-  // manejar múltiples mensajes del assistant en un mismo run
   const runFinalsCountRef = useRef<number>(0);
-  const activeAssistantIdRef = useRef<string | null>(null); // id del mensaje "en curso"
+  const activeAssistantIdRef = useRef<string | null>(null);
+  const suppressUntilFinalRef = useRef<boolean>(false); // si hay fence, ocultar deltas
 
-  // altura dinámica del composer
   const [composerH, setComposerH] = useState<number>(84);
-
-  // auto-scroll: solo en NUEVO mensaje
   const lastMsgIdRef = useRef<string | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
@@ -93,7 +125,6 @@ export default function Chat() {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // restaurar thread
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -104,7 +135,6 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  // medir composer
   useEffect(() => {
     if (!composerRef.current) return;
     const ro = new ResizeObserver((entries) => {
@@ -115,7 +145,6 @@ export default function Chat() {
     return () => ro.disconnect();
   }, [composerH]);
 
-  // auto-scroll en nuevo mensaje
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
@@ -125,7 +154,7 @@ export default function Chat() {
     }
   }, [messages]);
 
-  // --- despacho a Kommo ---
+  // --- Kommo dispatch (silencioso) ---
   function dispatchKommoOps(ops: any[], rawKey: string) {
     const key = 'k_' + rawKey.slice(0, 40);
     if (kommoHashesRef.current.has(key)) return;
@@ -138,7 +167,6 @@ export default function Chat() {
     }).catch(() => {});
   }
 
-  // crea un mensaje placeholder con “…” (typing)
   function ensureTypingPlaceholder(): string {
     const id = `a_typing_${Date.now()}`;
     const placeholder: ChatMessage = {
@@ -151,10 +179,53 @@ export default function Chat() {
     return id;
   }
 
+  function replaceActiveWithParts(parts: ParsedBlock[]) {
+    setMessages((prev) => {
+      const next = [...prev];
+      const aid = activeAssistantIdRef.current;
+      const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
+
+      const builtParts: any[] = [];
+      for (const b of parts) {
+        if (b.type === 'text') builtParts.push({ type: 'text', text: b.text });
+        if (b.type === 'itinerary') builtParts.push({ type: 'itinerary', data: b.data });
+        if (b.type === 'json') builtParts.push({ type: 'json', data: b.data });
+        if (b.type === 'ack') builtParts.push({ type: 'ack', data: b.data });
+      }
+
+      if (idx >= 0) {
+        const curr = next[idx] as any;
+        curr.parts = builtParts.length ? builtParts : [{ type: 'text', text: '' }];
+        next[idx] = curr;
+      }
+      return next;
+    });
+  }
+
+  function appendDeltaToActiveText(delta: string, replace = false) {
+    setMessages((prev) => {
+      const next = [...prev];
+      const aid = activeAssistantIdRef.current;
+      const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
+      if (idx >= 0) {
+        const curr: any = next[idx];
+        const first = curr.parts?.[0];
+        if (!first || first.type !== 'text') {
+          curr.parts = [{ type: 'text', text: '' }, ...(curr.parts || [])];
+        }
+        const before = curr.parts[0].text || '';
+        curr.parts[0].text = replace ? delta : before + delta;
+        next[idx] = curr;
+      }
+      return next;
+    });
+  }
+
   async function handleStream(userText: string) {
     setIsLoading(true);
     runFinalsCountRef.current = 0;
     activeAssistantIdRef.current = null;
+    suppressUntilFinalRef.current = false;
 
     try {
       const res = await fetch('/api/chat?stream=1', {
@@ -171,35 +242,20 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let fullText = ''; // acumulado del mensaje “en curso”
+      let fullText = '';
 
-      // typing placeholder desde el arranque
       let typingId = ensureTypingPlaceholder();
       activeAssistantIdRef.current = typingId;
 
-      // helpers para escribir en el mensaje ACTIVO (placeholder o el último)
-      const applyText = (chunk: string, replace = false) => {
-        setMessages((prev) => {
-          const next = [...prev];
-          const aid = activeAssistantIdRef.current;
-          const idx = aid ? next.findIndex((m) => m.id === aid) : -1;
-          if (idx >= 0) {
-            const curr = next[idx] as any;
-            const before = curr.parts?.[0]?.text ?? '';
-            curr.parts = [{ type: 'text', text: replace ? chunk : before + chunk }];
-            next[idx] = curr;
-          }
-          return next;
-        });
-      };
-
-      // intenta despachar Kommo si ya llegó un bloque (en delta/final)
-      const maybeDispatchKommo = () => {
-        const blocks = extractKommoBlocksFromText(fullText);
-        for (const b of blocks) {
+      const maybeDispatchKommoFrom = (text: string) => {
+        const rxFence = /```\\s*cv:kommo\\s*([\\s\\S]*?)```/gi;
+        let m: RegExpExecArray | null;
+        while ((m = rxFence.exec(text))) {
+          const payload = (m[1] || '').trim();
           try {
-            if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
-              dispatchKommoOps(b.json.ops, b.raw);
+            const json = JSON.parse(payload);
+            if (json && Array.isArray(json.ops)) {
+              dispatchKommoOps(json.ops, payload.slice(0, 40));
             }
           } catch {}
         }
@@ -235,7 +291,6 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
-              ulog('sse.kommo', { count: ops.length });
               if (ops.length) {
                 const rawKey = JSON.stringify(ops).slice(0, 40);
                 dispatchKommoOps(ops, rawKey);
@@ -246,13 +301,21 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
-                if (fullText.length === 0) {
-                  // primer delta: limpia el “…”
-                  applyText('', true);
-                }
                 fullText += data.value;
-                applyText(data.value);
-                maybeDispatchKommo();
+
+                // Si aparece un fence, ocultamos deltas hasta el final
+                if (/```\\s*(cv:itinerary|json|cv:kommo|cv:ack)/i.test(fullText)) {
+                  suppressUntilFinalRef.current = true;
+                }
+
+                if (!suppressUntilFinalRef.current) {
+                  if (fullText.length === data.value.length) {
+                    appendDeltaToActiveText('', true); // limpiar "…"
+                  }
+                  appendDeltaToActiveText(data.value);
+                }
+
+                maybeDispatchKommoFrom(fullText);
               }
             } catch {}
           } else if (event === 'final') {
@@ -261,56 +324,31 @@ export default function Chat() {
               if (typeof data?.text === 'string') {
                 const text = data.text;
 
-                // ¿incluye bloque visible?
-                const hasBlock = /```cv:(itinerary|quote)\b/.test(text);
+                const parts = splitIntoBlocks(text);
+                replaceActiveWithParts(parts);
 
-                // reinicia buffer para el siguiente mensaje potencial
                 fullText = '';
-
-                if (runFinalsCountRef.current === 0) {
-                  // Reemplaza el primer typing por el texto final corto
-                  applyText(text, true);
-
-                  // Si NO hay bloque visible, dejamos un 2º placeholder “pensando…”
-                  if (!hasBlock) {
-                    const id2 = ensureTypingPlaceholder();
-                    activeAssistantIdRef.current = id2;
-                  }
-                } else {
-                  // Final adicional → NUEVO mensaje
-                  const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-                  const newMsg: ChatMessage = {
-                    id,
-                    role: 'assistant',
-                    parts: [{ type: 'text', text }] as any,
-                    createdAt: new Date().toISOString(),
-                  } as any;
-                  setMessages((prev) => [...prev, newMsg]);
-                  activeAssistantIdRef.current = id;
-                }
-
+                suppressUntilFinalRef.current = false;
                 runFinalsCountRef.current += 1;
 
-                // Despacho Kommo si vino en este final
-                const blocks = extractKommoBlocksFromText(text);
-                for (const b of blocks) {
-                  try {
-                    if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
-                      dispatchKommoOps(b.json.ops, b.raw);
-                    }
-                  } catch {}
-                }
+                // si el run continúa, mantenemos "pensando…" con un nuevo placeholder
+                const id2 = ensureTypingPlaceholder();
+                activeAssistantIdRef.current = id2;
+
+                maybeDispatchKommoFrom(text);
               }
             } catch {}
           } else if (event === 'done' || event === 'error') {
             setIsLoading(false);
-            // Limpia cualquier placeholder “…” sobrante
+            // limpia cualquier "…" restante
             setMessages((prev) => {
               const next = [...prev];
-              const idx = next.findIndex(
-                (m: any) => m.role === 'assistant' && m.parts?.[0]?.text === '…'
-              );
-              if (idx >= 0) next.splice(idx, 1);
+              for (let i = next.length - 1; i >= 0; i--) {
+                const m: any = next[i];
+                if (m.role === 'assistant' && m.parts?.length === 1 && m.parts[0]?.text === '…') {
+                  next.splice(i, 1);
+                }
+              }
               return next;
             });
           }
@@ -388,8 +426,10 @@ export default function Chat() {
           />
           <button
             type="submit"
-            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
+            disabled={isLoading}
+            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow disabled:opacity-60"
             aria-label="Enviar"
+            title={isLoading ? 'Esperando respuesta…' : 'Enviar'}
           >
             ➤
           </button>
