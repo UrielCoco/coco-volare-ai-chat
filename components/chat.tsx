@@ -393,9 +393,7 @@ export default function Chat() {
   return (
     <div className="flex flex-col min-h-[100svh] w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
-        {/* Fondo dinámico:
-            - Chat vacío  -> Texts.gif centrado sin opacidad
-            - Con mensajes -> Intelligence.gif sutil */}
+        {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
           {!hasMessages ? (
             <img
@@ -416,7 +414,7 @@ export default function Chat() {
           )}
         </div>
 
-        {/* Contenido de mensajes encima del fondo */}
+        {/* Contenido de mensajes */}
         <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
@@ -433,16 +431,24 @@ export default function Chat() {
         onSubmit={handleSubmit}
         className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
-        <div className="mx-auto max-w-3xl w-full px-4 py-3 flex items-center gap-2">
+        {/* Contenedor del composer: respeta safe-areas y evita overflow */}
+        <div
+          className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
+          style={{
+            paddingLeft: 'max(12px, env(safe-area-inset-left))',
+            paddingRight: 'max(12px, env(safe-area-inset-right))',
+            paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
+          }}
+        >
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Escribe tu mensaje…"
-            className="flex-1 rounded-full bg-muted px-5 py-3 outline-none text-foreground placeholder:text-muted-foreground shadow"
+            className="flex-1 min-w-0 rounded-full bg-muted px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
           />
           <button
             type="submit"
-            className="rounded-full px-4 py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow"
+            className="shrink-0 rounded-full h-10 w-10 sm:h-auto sm:w-auto px-0 sm:px-4 py-0 sm:py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
             aria-label="Enviar"
           >
             ➤
