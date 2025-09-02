@@ -1,158 +1,141 @@
+import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 
-export const runtime = 'nodejs'; // Streaming en Node
+export const runtime = 'nodejs';
 
-// Helper para emitir eventos SSE
-function sse(event: string, data?: any) {
-  const payload = data === undefined ? '' : `data: ${JSON.stringify(data)}\n`;
-  return new TextEncoder().encode(`event: ${event}\n${payload}\n`);
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const ASST_ID = process.env.OPENAI_ASSISTANT_ID!;
+
+// ---- helpers ----
+function sse(ctrl: ReadableStreamDefaultController, event: string, data: any) {
+  ctrl.enqueue(`event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`);
 }
 
-export async function POST(req: Request) {
+function toTextFromMessage(msg: any): string {
+  const parts = (msg?.content ?? [])
+    .map((c: any) => {
+      if (c.type === 'text' && c.text?.value) return c.text.value;
+      if (c.type === 'output_text' && c.output_text?.content?.[0]?.text) {
+        return c.output_text.content[0].text;
+      }
+      if (c.type === 'input_text' && c.input_text?.text) return c.input_text.text;
+      return '';
+    })
+    .filter(Boolean);
+  return parts.join('');
+}
+
+// ---- route ----
+export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const wantStream = searchParams.get('stream') === '1';
+  const debug = searchParams.get('debug') === '1';
 
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const assistantId = process.env.OPENAI_ASSISTANT_ID;
-  if (!assistantId) return new Response('Missing OPENAI_ASSISTANT_ID', { status: 500 });
-
-  // Parse del body
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return new Response('Bad JSON', { status: 400 });
-  }
-
-  const userText: string =
-    body?.message?.parts?.[0]?.text ??
-    body?.message?.text ??
-    body?.text ??
-    '';
-
-  if (!userText) return new Response('Missing message text', { status: 400 });
-
-  // 1) Thread (reusar si viene)
-  let threadId: string = body?.threadId;
-  if (!threadId) {
-    const t = await openai.beta.threads.create({});
-    threadId = t.id;
-  }
-
-  // 2) Agregar el mensaje del usuario
-  await openai.beta.threads.messages.create(threadId, {
-    role: 'user',
-    content: userText,
-  });
-
-  // 3) Si no pidieron stream, devuelve ids y listo
   if (!wantStream) {
-    const run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: assistantId,
-    });
-    return Response.json({ threadId, runId: run.id });
+    return new Response(JSON.stringify({ error: 'stream=1 required' }), { status: 400 });
   }
 
-  // 4) Stream SSE
+  const body = await req.json();
+  const userMsg = body?.message;
+  let threadId: string | null = body?.threadId || null;
+
   const stream = new ReadableStream({
-    async start(controller) {
-      // Envía meta con el thread id para que la UI lo guarde
-      controller.enqueue(sse('meta', { threadId }));
-
-      // Inicia el run en modo streaming
-      const asstStream = await openai.beta.threads.runs.stream(threadId, {
-        assistant_id: assistantId,
-      });
-
-      // ÚNICO listener tipado como 'event' para ser compatible con varias versiones del SDK
-      asstStream.on('event', (evt: any) => {
-        try {
-          const name: string = evt?.event || evt?.type || '';
-          // --- DELTAS DE TEXTO ---
-          // nombres que hemos visto según versión: "message.delta" o "thread.message.delta"
-          if (name.includes('message.delta')) {
-            const items = evt?.data?.delta?.content ?? evt?.data?.content ?? [];
-            for (const it of items) {
-              const piece =
-                it?.text?.value ??
-                it?.text?.content ??
-                it?.[ 'output_text' ] ??
-                '';
-              if (typeof piece === 'string' && piece.length) {
-                controller.enqueue(sse('delta', { value: piece }));
-              }
-            }
-            return;
-          }
-
-          // --- MENSAJE COMPLETADO ---
-          if (name.includes('message.completed')) {
-            const parts: string[] = [];
-            for (const c of evt?.data?.content ?? []) {
-              if (c?.type === 'text' && c?.text?.value) parts.push(c.text.value);
-              // variantes
-              else if (typeof c === 'string') parts.push(c);
-              else if (c?.output_text) parts.push(String(c.output_text));
-            }
-            const text = parts.join('');
-            if (text) controller.enqueue(sse('final', { text }));
-            return;
-          }
-
-          // --- RUN COMPLETADO / FALLIDO ---
-          if (name.includes('run.completed')) {
-            controller.enqueue(sse('done', {}));
-            return;
-          }
-          if (name.includes('run.failed')) {
-            controller.enqueue(sse('error', {
-              error: evt?.data?.error?.message || 'run.failed',
-            }));
-            return;
-          }
-        } catch (e: any) {
-          controller.enqueue(sse('error', { error: e?.message || String(e) }));
+    start: async (controller) => {
+      try {
+        // 1) thread
+        if (!threadId) {
+          const t = await client.beta.threads.create({});
+          threadId = t.id;
         }
-      });
+        console.log('[CV][api] thread', threadId);
+        sse(controller, 'meta', { threadId });
 
-      asstStream.on('error', (e: any) => {
-        controller.enqueue(sse('error', { error: e?.message || String(e) }));
-      });
+        // 2) user message
+        await client.beta.threads.messages.create(threadId!, {
+          role: 'user',
+          content: userMsg?.parts?.[0]?.text ?? '',
+        });
 
-      asstStream.on('end', () => {
-        controller.enqueue(sse('done', {}));
-      });
+        // 3) run (STREAM)
+        const runStream = await client.beta.threads.runs.stream(threadId!, {
+          assistant_id: ASST_ID,
+        });
 
-      // Si el cliente cierra la conexión
-      const abort = () => {
-        try { asstStream.abort(); } catch {}
-      };
-      req.signal.addEventListener('abort', abort);
+        // ÚNICO listener: event aggregator (tipos seguros)
+        runStream.on('event', (evt: any) => {
+          const name: string = evt?.event || '';
+          const data: any = evt?.data;
+          if (debug) sse(controller, 'log', { event: name, id: data?.id });
 
-      // Espera a que termine el stream del SDK
-      await asstStream.done();
+          // deltas de texto (acepta message.delta o thread.message.delta)
+          if (name.endsWith('message.delta') || name === 'message.delta') {
+            try {
+              const chunks =
+                data?.delta?.content?.map((c: any) => c?.text?.value || '') ?? [];
+              const text = chunks.join('');
+              if (text) sse(controller, 'delta', { value: text });
+            } catch (e) {
+              console.log('[CV][api] delta.parse.error', e);
+            }
+            return;
+          }
 
-      // Cierra el SSE
-      controller.close();
+          // mensaje final (acepta message.completed o thread.message.completed)
+          if (name.endsWith('message.completed') || name === 'message.completed') {
+            try {
+              const text = toTextFromMessage(data);
+              if (text) {
+                sse(controller, 'final', { text });
+
+                // bonus: si dentro del texto viene ```cv:kommo{...}``` reemítelo por canal propio
+                const m = text.match(/```cv:kommo([\s\S]*?)```/i);
+                if (m) {
+                  try {
+                    const payload = JSON.parse(m[1]);
+                    if (payload?.ops?.length) sse(controller, 'kommo', { ops: payload.ops });
+                  } catch {}
+                }
+              }
+            } catch (e) {
+              console.log('[CV][api] final.parse.error', e);
+            }
+            return;
+          }
+
+          // fin de run
+          if (name.endsWith('run.completed') || name === 'run.completed') {
+            sse(controller, 'done', {});
+            controller.close();
+            return;
+          }
+
+          if (name.endsWith('run.failed') || name === 'run.failed') {
+            const errMsg =
+              data?.last_error?.message ||
+              data?.last_error ||
+              'run failed';
+            console.log('[CV][api] run.failed', errMsg);
+            sse(controller, 'error', { error: errMsg });
+            controller.close();
+            return;
+          }
+        });
+
+        // Mantén la función viva hasta que termine el stream del SDK
+        await runStream.done();
+      } catch (err: any) {
+        console.error('[CV][api] fatal', err);
+        try { sse(controller, 'error', { error: String(err?.message || err) }); } catch {}
+        controller.close();
+      }
     },
   });
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-    },
-  });
-}
-
-export async function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     },
   });
 }

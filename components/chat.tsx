@@ -7,7 +7,9 @@ import type { ChatMessage } from '@/lib/types';
 const THREAD_KEY = 'cv_thread_id_session';
 
 function ulog(event: string, meta: any = {}) {
-  try { console.debug('[CV][ui]', event, meta); } catch {}
+  try {
+    console.debug('[CV][ui]', event, meta);
+  } catch {}
 }
 
 // ---------- Helpers ----------
@@ -87,7 +89,7 @@ function splitIntoBlocks(full: string): ParsedBlock[] {
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [isRunning, setIsRunning] = useState(false); // run global
+  const [isRunning, setIsRunning] = useState(false);
 
   const threadIdRef = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -95,8 +97,8 @@ export default function Chat() {
   const composerRef = useRef<HTMLFormElement | null>(null);
 
   const kommoHashesRef = useRef<Set<string>>(new Set());
-  const activeAssistantIdRef = useRef<string | null>(null);  // mensaje en curso
-  const suppressUntilFinalRef = useRef<boolean>(false);      // si hay fence → no mostrar deltas
+  const activeAssistantIdRef = useRef<string | null>(null);
+  const suppressUntilFinalRef = useRef<boolean>(false);
   const scrollPadHRef = useRef<number>(84);
 
   const lastMsgIdRef = useRef<string | null>(null);
@@ -108,7 +110,6 @@ export default function Chat() {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior });
   };
 
-  // restaurar thread
   useEffect(() => {
     try {
       const ss = window.sessionStorage.getItem(THREAD_KEY);
@@ -116,14 +117,12 @@ export default function Chat() {
     } catch {}
   }, []);
 
-  // medir composer
   useEffect(() => {
     if (!composerRef.current) return;
     const ro = new ResizeObserver((entries) => {
       const h = Math.ceil(entries[0].contentRect.height);
       if (h && h !== scrollPadHRef.current) {
         scrollPadHRef.current = h;
-        // fuerza re-render
         setInput((v) => v);
       }
     });
@@ -131,7 +130,6 @@ export default function Chat() {
     return () => ro.disconnect();
   }, []);
 
-  // autoscroll en NUEVO mensaje
   useEffect(() => {
     const last = messages[messages.length - 1]?.id;
     if (!last) return;
@@ -141,11 +139,11 @@ export default function Chat() {
     }
   }, [messages]);
 
-  // --- Kommo dispatch (silencioso) ---
   function dispatchKommoOps(ops: any[], rawKey: string) {
     const key = 'k_' + rawKey.slice(0, 40);
     if (kommoHashesRef.current.has(key)) return;
     kommoHashesRef.current.add(key);
+    ulog('kommo.dispatch', { count: ops.length });
     fetch('/api/kommo/dispatch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -154,7 +152,6 @@ export default function Chat() {
     }).catch(() => {});
   }
 
-  // crea un mensaje placeholder del assistant
   function createAssistantPlaceholder(): string {
     const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const msg: ChatMessage = {
@@ -162,6 +159,7 @@ export default function Chat() {
       parts: [{ type: 'text', text: '…' }] as any,
       createdAt: new Date().toISOString(),
     } as any;
+    ulog('ui.placeholder.create', { id });
     setMessages((prev) => [...prev, msg]);
     return id;
   }
@@ -186,6 +184,7 @@ export default function Chat() {
 
   function finalizeActiveWith(text: string) {
     const parts = splitIntoBlocks(text);
+    ulog('ui.finalize.blocks', { parts: parts.map((p) => p.type) });
     setMessages((prev) => {
       const next = [...prev];
       const aid = activeAssistantIdRef.current;
@@ -210,6 +209,8 @@ export default function Chat() {
     activeAssistantIdRef.current = null;
     suppressUntilFinalRef.current = false;
 
+    ulog('run.begin', { threadId: threadIdRef.current });
+
     try {
       const res = await fetch('/api/chat?stream=1', {
         method: 'POST',
@@ -225,7 +226,7 @@ export default function Chat() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let fullText = ''; // acumulado para el mensaje activo
+      let fullText = '';
 
       const maybeDispatchKommoFrom = (text: string) => {
         const rxFence = /```\s*cv:kommo\s*([\s\S]*?)```/gi;
@@ -261,8 +262,15 @@ export default function Chat() {
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
+                ulog('sse.meta', { threadId: data.threadId });
               }
             } catch {}
+            continue;
+          }
+
+          if (event === 'log') {
+            // Logs que el server decide enviarnos (opcional)
+            try { const data = JSON.parse(dataLine || '{}'); ulog('sse.log', data); } catch {}
             continue;
           }
 
@@ -270,6 +278,7 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
+              ulog('sse.kommo', { count: ops.length });
               if (ops.length) dispatchKommoOps(ops, JSON.stringify(ops).slice(0, 40));
             } catch {}
             continue;
@@ -279,24 +288,24 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.value === 'string' && data.value.length) {
-                // si no hay mensaje activo, crearlo
                 if (!activeAssistantIdRef.current) {
                   activeAssistantIdRef.current = createAssistantPlaceholder();
                 }
-
                 fullText += data.value;
 
-                // si aparece fence: no mostrar deltas
                 if (/```\s*(cv:itinerary|json|cv:ack|cv:kommo)/i.test(fullText)) {
-                  suppressUntilFinalRef.current = true;
+                  if (!suppressUntilFinalRef.current) {
+                    ulog('ui.suppress.deltas', {});
+                    suppressUntilFinalRef.current = true;
+                  }
                 }
 
-                // mostrar deltas solo si no hay fence
                 if (!suppressUntilFinalRef.current) {
-                  if (fullText.length === data.value.length) setActiveTextDelta('', true); // limpiar "…"
+                  if (fullText.length === data.value.length) setActiveTextDelta('', true);
                   setActiveTextDelta(data.value);
                 }
 
+                ulog('sse.delta', { len: data.value.length, total: fullText.length, suppressed: suppressUntilFinalRef.current });
                 maybeDispatchKommoFrom(fullText);
               }
             } catch {}
@@ -307,14 +316,14 @@ export default function Chat() {
             try {
               const data = JSON.parse(dataLine || '{}');
               if (typeof data?.text === 'string') {
-                // cierra el mensaje activo con blocks (texto + tarjeta + texto)
                 if (!activeAssistantIdRef.current) {
                   activeAssistantIdRef.current = createAssistantPlaceholder();
                 }
+                ulog('sse.final', { chars: data.text.length });
                 finalizeActiveWith(data.text);
 
-                // preparar para un posible siguiente mensaje dentro del MISMO run
-                activeAssistantIdRef.current = null;
+                // Prepara "pensando…" para los siguientes pasos del run.
+                activeAssistantIdRef.current = createAssistantPlaceholder();
                 fullText = '';
                 suppressUntilFinalRef.current = false;
 
@@ -326,8 +335,9 @@ export default function Chat() {
 
           if (event === 'done' || event === 'error') {
             setIsRunning(false);
+            ulog('sse.' + event, {});
 
-            // elimina placeholders “…” que hayan quedado
+            // elimina placeholders “…” sobrantes (incluye el creado tras el último final)
             setMessages((prev) => {
               const next = [...prev];
               for (let i = next.length - 1; i >= 0; i--) {
@@ -382,7 +392,6 @@ export default function Chat() {
 
   return (
     <div className="relative flex flex-col w-full min-h-[100dvh] bg-background">
-      {/* lista scrolleable */}
       <div
         ref={listRef}
         className="flex-1 overflow-y-auto"
@@ -399,7 +408,6 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* composer */}
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
