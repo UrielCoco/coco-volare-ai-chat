@@ -47,6 +47,7 @@ type Itinerary = {
 /** ================== Estilos/base ================== **/
 const GOLD = '#bba36d';
 const GOLD_SOFT_BG = '#f7f2e2';
+const BLACK = '#000000';
 const TEXT_DIM = 'text-neutral-600';
 
 function safe<T>(v: any, fallback: T): T { return (v === undefined || v === null) ? fallback : v; }
@@ -61,7 +62,6 @@ function fmtDate(d?: string) {
 }
 function fmtTime(input?: string) {
   if (!input) return '';
-  // soporta HH:mm o ISO
   const tryIso = Date.parse(input);
   if (!isNaN(tryIso)) {
     const dt = new Date(tryIso);
@@ -70,7 +70,7 @@ function fmtTime(input?: string) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(input);
   return m ? `${m[1].padStart(2,'0')}:${m[2]}` : input;
 }
-function fmtDateTime(d?: string) {
+function fmtDateTime(d?: string) { // (se queda por compat)
   if (!d) return '';
   try {
     const dt = new Date(d);
@@ -98,13 +98,16 @@ function formatMoney(currency: string = 'USD', value?: number) {
   }
 }
 
-/** ================== Chips ================== **/
+/** ================== Chips (sin bordes) ================== **/
 function Chip({ children, dark = false }: { children: React.ReactNode; dark?: boolean }) {
+  const cls = dark
+    ? 'bg-black/60 text-white/90 shadow-sm'
+    : '';
+  const style = dark
+    ? {}
+    : { background: GOLD_SOFT_BG, color: '#5d4f25', boxShadow: '0 1px 0 rgba(0,0,0,0.04)' };
   return (
-    <span
-      className={`inline-flex items-center px-2 py-1 text-xs mr-2 mb-2 rounded-full border ${dark ? 'bg-black/50 text-white/90 border-white/30' : ''}`}
-      style={!dark ? { borderColor: GOLD, background: GOLD_SOFT_BG, color: '#5d4f25' } : {}}
-    >
+    <span className={`inline-flex items-center px-2.5 py-1 text-xs mr-2 mb-2 rounded-full ${cls}`} style={style}>
       {children}
     </span>
   );
@@ -139,7 +142,7 @@ function uniqueCities(days: Day[]): number {
   return set.size;
 }
 
-/** ================== Summary (curva + dorado) ================== **/
+/** ================== Summary (hero blanco/negro + dorado, sin bordes) ================== **/
 function SummaryPage({ it }: { it: Itinerary }) {
   const summary = it.summary || {};
   const daysCount = safe(it.days, []).length || (summary.nights ? summary.nights + 1 : 0);
@@ -149,60 +152,47 @@ function SummaryPage({ it }: { it: Itinerary }) {
 
   return (
     <div className="pb-5">
-      {/* Hero con recorte curvo y logo destacado */}
+      {/* Hero con recorte curvo */}
       <div className="relative rounded-t-2xl overflow-hidden">
-        {/* Imagen */}
         <img
           src="/images/Palms.jpg"
           alt="Destino"
-          className="w-full h-64 md:h-80 object-cover"
+          className="w-full h-56 sm:h-64 md:h-80 object-cover"
           draggable={false}
         />
 
-        {/* Curva blanca inferior (SVG) */}
-        <svg
-          className="absolute bottom-0 left-0 w-full h-24"
-          viewBox="0 0 1440 320"
-          preserveAspectRatio="none"
-        >
+        {/* Curva blanca inferior */}
+        <svg className="absolute bottom-0 left-0 w-full h-20 sm:h-24" viewBox="0 0 1440 320" preserveAspectRatio="none">
           <path d="M0,192 C240,256 480,288 720,272 C960,256 1200,192 1440,224 L1440,360 L0,360 Z" fill="#ffffff" />
         </svg>
 
-        {/* Logo pill */}
+        {/* Logo pill (sin borde) */}
         <div className="absolute top-3 left-3">
-          <div
-            className="flex items-center gap-2 rounded-full px-3 py-1 shadow bg-white/90"
-            style={{ border: `1px solid ${GOLD}` }}
-          >
-            <img
-              src="/images/logo-coco-volare.png"
-              alt="Coco Volare"
-              className="h-6 w-auto select-none"
-              draggable={false}
-            />
+          <div className="flex items-center gap-2 rounded-full px-3 py-1 bg-white/90 shadow">
+            <img src="/images/logo-coco-volare.png" alt="Coco Volare" className="h-6 w-auto select-none" draggable={false} />
             <span className="text-xs font-medium text-neutral-800">Coco Volare Intelligence</span>
           </div>
         </div>
 
-        {/* Overlay de texto como la referencia */}
-        <div className="absolute left-4 md:left-6 bottom-6 md:bottom-8 text-white drop-shadow">
+        {/* Texto overlay */}
+        <div className="absolute left-4 sm:left-6 bottom-5 sm:bottom-8 text-white drop-shadow">
           <div className="flex items-center gap-2 mb-2">
             <Chip dark>🛏 {daysCount || '—'} {daysCount === 1 ? 'DÍA' : 'DÍAS'}</Chip>
             <Chip dark>📍 {cities || '—'} {cities === 1 ? 'CIUDAD' : 'CIUDADES'}</Chip>
           </div>
-          <div className="text-2xl md:text-3xl font-semibold">
+          <div className="text-2xl sm:text-3xl font-semibold">
             {it.tripTitle || summary.destination || 'Itinerary'}
           </div>
           {summary.overview && (
-            <div className="text-sm md:text-base mt-1 max-w-xl opacity-90">
+            <div className="text-sm sm:text-base mt-1 max-w-xl opacity-90">
               {summary.overview}
             </div>
           )}
         </div>
 
-        {/* Precio estimado (dorado) */}
+        {/* Precio (pill dorado) */}
         {estimate !== undefined && (
-          <div className="absolute right-4 bottom-6">
+          <div className="absolute right-4 bottom-5 sm:bottom-6">
             <div
               className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold shadow"
               style={{ background: GOLD, color: '#111827' }}
@@ -213,10 +203,10 @@ function SummaryPage({ it }: { it: Itinerary }) {
         )}
       </div>
 
-      {/* Meta + disclaimer en tarjeta blanca */}
-      <div className="px-5 -mt-6">
-        <div className="rounded-xl border bg-white p-4 shadow-sm" style={{ borderColor: '#eceae6' }}>
-          <div className="flex flex-wrap gap-2 text-sm">
+      {/* Meta + disclaimer (sin bordes) */}
+      <div className="px-4 sm:px-5 -mt-5">
+        <div className="rounded-xl bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap gap-2 text-[13px] sm:text-sm">
             {summary.startDate && summary.endDate && (
               <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
             )}
@@ -232,7 +222,7 @@ function SummaryPage({ it }: { it: Itinerary }) {
 
           <Divider />
 
-          <div className="text-[13px] text-neutral-500">
+          <div className="text-[12px] sm:text-[13px] text-neutral-500">
             {it.disclaimer || '*Fechas, horarios y proveedores sujetos a disponibilidad y cambios sin previo aviso.'}
           </div>
         </div>
@@ -241,7 +231,7 @@ function SummaryPage({ it }: { it: Itinerary }) {
   );
 }
 
-/** ================== Timeline (diseño estilo referencia) ================== **/
+/** ================== Timeline ================== **/
 type TItem = {
   timeSort: number;
   timeText?: string;
@@ -253,13 +243,11 @@ type TItem = {
 
 function timeToMinutes(t?: string) {
   if (!t) return Number.POSITIVE_INFINITY;
-  // ISO
   const ms = Date.parse(t);
   if (!isNaN(ms)) {
     const d = new Date(ms);
     return d.getHours() * 60 + d.getMinutes();
   }
-  // HH:mm
   const m = /^(\d{1,2}):(\d{2})$/.exec(t);
   if (m) return parseInt(m[1]) * 60 + parseInt(m[2]);
   return Number.POSITIVE_INFINITY;
@@ -268,7 +256,6 @@ function timeToMinutes(t?: string) {
 function collectTimeline(d: Day): TItem[] {
   const items: TItem[] = [];
 
-  // Flights (depart & arrive)
   const addFlight = (f: Flight) => {
     if (f.depart) {
       items.push({
@@ -296,7 +283,6 @@ function collectTimeline(d: Day): TItem[] {
   (d.flightsInternational || []).forEach(addFlight);
   (d.flightsDomestic || []).forEach(addFlight);
 
-  // Transports
   (d.transports || []).forEach(t => {
     items.push({
       timeSort: timeToMinutes(t.time),
@@ -307,7 +293,6 @@ function collectTimeline(d: Day): TItem[] {
     });
   });
 
-  // Hotel
   if (d.hotel?.checkIn) {
     items.push({
       timeSort: timeToMinutes(d.hotel.checkIn),
@@ -326,7 +311,6 @@ function collectTimeline(d: Day): TItem[] {
     });
   }
 
-  // Activities
   const acts: Activity[] = d.activities || d.timeline || [];
   acts.forEach(a => {
     items.push({
@@ -338,7 +322,6 @@ function collectTimeline(d: Day): TItem[] {
     });
   });
 
-  // AddOns
   (d.addOns || []).forEach(s => {
     items.push({
       timeSort: timeToMinutes(s.time),
@@ -349,36 +332,38 @@ function collectTimeline(d: Day): TItem[] {
     });
   });
 
-  // Orden
   items.sort((a, b) => a.timeSort - b.timeSort);
   return items;
 }
 
 function TimelineItem({ it }: { it: TItem }) {
   return (
-    <div className="relative flex gap-4">
+    <div className="relative flex gap-3 sm:gap-4">
       {/* Hora */}
-      <div className="w-14 shrink-0 text-right text-xs font-medium text-neutral-800 pt-3">
+      <div className="w-10 sm:w-14 shrink-0 text-right text-[11px] sm:text-xs font-medium text-neutral-800 pt-3">
         {it.timeText || '—'}
       </div>
 
-      {/* Línea vertical */}
+      {/* Línea vertical + pin (sin border, con sombras) */}
       <div className="relative">
         <div className="absolute left-1.5 top-0 bottom-0 w-[2px]" style={{ background: GOLD }} />
-        <div className="absolute -left-1 top-3 h-3 w-3 rounded-full border-2" style={{ background: GOLD, borderColor: 'white' }} />
+        <div
+          className="absolute -left-1 top-3 h-3 w-3 rounded-full"
+          style={{ background: GOLD, boxShadow: '0 0 0 2px #ffffff, 0 0 0 4px ' + GOLD }}
+        />
       </div>
 
-      {/* Tarjeta */}
+      {/* Tarjeta (sin bordes) */}
       <div className="flex-1">
-        <div className="rounded-xl border bg-white p-3 shadow-sm" style={{ borderColor: '#eceae6' }}>
+        <div className="rounded-xl bg-white p-3 sm:p-3.5 shadow-sm">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-[15px] font-semibold text-neutral-900">{it.title}</div>
-              {it.subtitle && <div className="text-xs text-neutral-600 mt-0.5">{it.subtitle}</div>}
+              <div className="text-[14.5px] sm:text-[15px] font-semibold text-neutral-900">{it.title}</div>
+              {it.subtitle && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-0.5">{it.subtitle}</div>}
             </div>
             {it.right}
           </div>
-          {it.note && <div className="text-xs text-neutral-600 mt-2">{it.note}</div>}
+          {it.note && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-2">{it.note}</div>}
         </div>
       </div>
     </div>
@@ -388,16 +373,16 @@ function TimelineItem({ it }: { it: TItem }) {
 function DayPage({ d }: { d: Day }) {
   const items = collectTimeline(d);
   return (
-    <div className="px-5 py-5">
+    <div className="px-4 sm:px-5 py-4 sm:py-5">
       {/* Encabezado del día */}
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <div className="text-[11px] tracking-wider text-neutral-500">DÍA {d.day}</div>
-          <div className="text-base md:text-lg font-semibold text-neutral-900">
+          <div className="text-[10px] sm:text-[11px] tracking-wider text-neutral-500">DÍA {d.day}</div>
+          <div className="text-base sm:text-lg font-semibold text-neutral-900">
             {d.title || 'Plan del día'}
           </div>
         </div>
-        <div className="text-xs text-neutral-500">{fmtDate(d.date)}</div>
+        <div className="text-[11.5px] sm:text-xs text-neutral-500">{fmtDate(d.date)}</div>
       </div>
 
       {/* Chips ubicación y clima */}
@@ -441,28 +426,22 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
   }, [page, days]);
 
   return (
-    <div
-      className="rounded-2xl bg-white shadow-xl overflow-hidden"
-      style={{ border: `2px solid ${GOLD}` }}
-    >
-      {/* HEADER con logo y paginador */}
-      <div
-        className="px-5 py-4 flex items-center justify-between"
-        style={{ borderBottom: `1px solid ${GOLD}` }}
-      >
-        <div className="flex items-center gap-3">
+    <div className="rounded-2xl bg-white shadow-xl overflow-hidden"> {/* sin bordes */}
+      {/* HEADER (sin border-bottom) */}
+      <div className="px-4 sm:px-5 py-3 sm:py-4 flex items-center justify-between bg-white">
+        <div className="flex items-center gap-3 min-w-0">
           <img
             src="/images/logo-coco-volare.png"
             alt="Coco Volare"
-            className="h-8 w-auto select-none"
+            className="h-7 sm:h-8 w-auto select-none"
             draggable={false}
           />
-          <div>
-            <div className="text-lg font-semibold text-neutral-900 leading-tight">
+          <div className="min-w-0">
+            <div className="text-[15px] sm:text-lg font-semibold text-neutral-900 leading-tight truncate">
               {it.tripTitle || summary.destination || 'Itinerario'}
             </div>
             {summary.startDate && summary.endDate && (
-              <div className={`text-xs ${TEXT_DIM}`}>
+              <div className={`text-[11.5px] sm:text-xs ${TEXT_DIM}`}>
                 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}
                 {summary.nights ? ` • ${summary.nights} noches` : ''}
               </div>
@@ -470,19 +449,19 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
           </div>
         </div>
 
-        {/* Pager */}
-        <div className="flex items-center gap-2">
+        {/* Pager: botones negros con texto dorado */}
+        <div className="flex items-center gap-1.5 sm:gap-2">
           <button
             onClick={prev}
-            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow border text-neutral-700"
-            style={{ borderColor: GOLD, background: 'white' }}
+            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
+            style={{ background: BLACK, color: GOLD }}
             aria-label="Anterior"
           >‹</button>
-          <div className="text-sm text-neutral-700 min-w-[8rem] text-center">{pageLabel}</div>
+          <div className="text-[12.5px] sm:text-sm text-neutral-800 text-center px-1 truncate max-w-[9rem]">{pageLabel}</div>
           <button
             onClick={next}
-            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow border text-neutral-700"
-            style={{ borderColor: GOLD, background: 'white' }}
+            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
+            style={{ background: BLACK, color: GOLD }}
             aria-label="Siguiente"
           >›</button>
         </div>
@@ -499,7 +478,7 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
             <SummaryPage it={it} />
           </div>
 
-          {/* Páginas 1..n: por día */}
+          {/* Páginas 1..n */}
           {days.map((d, idx) => (
             <div key={`p-${idx}`} className="inline-block align-top w-full">
               <DayPage d={d} />
@@ -507,16 +486,13 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
           ))}
         </div>
 
-        {/* Pills de navegación */}
-        <div className="px-5 pb-5 flex flex-wrap gap-2 items-center justify-center">
+        {/* Pills de navegación: negras con letra dorada, sin bordes */}
+        <div className="px-4 sm:px-5 pb-4 sm:pb-5 flex flex-wrap gap-2 items-center justify-center">
           <button
             onClick={() => goto(0)}
-            className="px-3 py-1 rounded-full text-xs border shadow-sm"
-            style={{
-              borderColor: GOLD,
-              background: page === 0 ? GOLD : 'white',
-              color: page === 0 ? 'white' : '#1f2937',
-            }}
+            className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
+            style={{ background: BLACK, color: GOLD }}
+            title="Resumen"
           >
             Resumen
           </button>
@@ -524,13 +500,9 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
             <button
               key={i}
               onClick={() => goto(i + 1)}
-              className="px-3 py-1 rounded-full text-xs border shadow-sm"
+              className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
               title={d.title || `Día ${d.day}`}
-              style={{
-                borderColor: GOLD,
-                background: page === i + 1 ? GOLD : 'white',
-                color: page === i + 1 ? 'white' : '#1f2937',
-              }}
+              style={{ background: BLACK, color: GOLD }}
             >
               Día {d.day || i + 1}
             </button>
