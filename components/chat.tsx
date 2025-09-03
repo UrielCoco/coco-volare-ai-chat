@@ -466,7 +466,7 @@ export default function Chat() {
     <div className="flex flex-col min-h-viewport w-full overflow-x-hidden">
       <div
         ref={listRef}
-        className="relative flex-1 overflow-y-auto chat-scroll"
+        className="relative flex-1 overflow-y-auto touch-pan-y overscroll-contain"
       >
         {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
