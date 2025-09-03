@@ -1,54 +1,39 @@
 // lib/block-parser.ts
-export type ParsedBlocks = {
-  text: string;                        // mensaje sin los fences
-  itineraries: any[];                  // payloads cv:itinerary (o json fallback)
-  quotes: any[];                       // si usas cv:quote
-  kommoOps: any[];                     // lista de ops si venían en cv:kommo
-  fenceTypes: string[];                // para diag
-};
+export type Block =
+  | { kind: "itinerary"; json: any; raw: string }
+  | { kind: "quote"; json: any; raw: string }
+  | { kind: "kommo"; json: { ops: Array<any> }; raw: string };
 
-const FENCE_RE = /```cv:(itinerary|quote|kommo)\s*([\s\S]*?)```/gi;
-const JSON_FENCE_RE = /```json\s*([\s\S]*?)```/gi;
+const RE = /```cv:(itinerary|quote|kommo)\s*([\s\S]*?)```/gi;
 
-export function parseAssistantMessage(raw: string): ParsedBlocks {
-  let text = raw || '';
-  const itineraries:any[] = [];
-  const quotes:any[] = [];
-  const kommoOps:any[] = [];
-  const fenceTypes:string[] = [];
+/**
+ * Extrae bloques cv:* y regresa:
+ * - clean: texto sin los bloques ocultos (cv:kommo). Itinerary/quote se conservan en 'blocks' para que el front los renderice como cards.
+ * - blocks: arreglo con los bloques parseados (JSON).
+ */
+export function extractBlocks(text: string) {
+  const blocks: Block[] = [];
+  let clean = text ?? "";
+  let m: RegExpExecArray | null;
 
-  // 1) Fences cv:* (camino feliz)
-  text = text.replace(FENCE_RE, (_m, kind: string, body: string) => {
-    fenceTypes.push(kind);
+  while ((m = RE.exec(text))) {
+    const kind = m[1].toLowerCase();
+    const raw = m[0];
+    let json: any = null;
     try {
-      const obj = JSON.parse(body.trim());
-      if (kind === 'itinerary') itineraries.push(obj);
-      else if (kind === 'quote') quotes.push(obj);
-      else if (kind === 'kommo') {
-        if (Array.isArray(obj?.ops)) kommoOps.push(...obj.ops);
-      }
-    } catch {/* ignore */}
-    return ''; // lo ocultamos del texto
-  });
-
-  // 2) Fallback: ```json ...``` con forma de itinerario
-  //    (solo si no hubo cv:itinerary)
-  if (itineraries.length === 0) {
-    text = text.replace(JSON_FENCE_RE, (_m, body: string) => {
-      try {
-        const obj = JSON.parse(body.trim());
-        const looksLikeIt =
-          obj && typeof obj === 'object' &&
-          (obj.cardType === 'itinerary' || (obj.tripTitle && obj.summary && Array.isArray(obj.days)));
-        if (looksLikeIt) {
-          itineraries.push(obj);
-          fenceTypes.push('itinerary(fallback)');
-          return '';
-        }
-      } catch {/* ignore */}
-      return _m; // dejamos el code block si no parece itinerario
-    });
+      json = JSON.parse(m[2].trim());
+    } catch (e) {
+      // JSON malformado: lo ignoramos como bloque pero no reventamos el render
+      console.warn("[CV][block-parser] JSON inválido en", kind, e);
+      continue;
+    }
+    if (kind === "itinerary") blocks.push({ kind: "itinerary", json, raw });
+    if (kind === "quote") blocks.push({ kind: "quote", json, raw });
+    if (kind === "kommo") blocks.push({ kind: "kommo", json, raw });
   }
 
-  return { text: text.trim(), itineraries, quotes, kommoOps, fenceTypes };
+  // Oculta SOLO los cv:kommo (nunca mostrar al cliente)
+  clean = clean.replace(/```cv:kommo[\s\S]*?```/gi, "").trim();
+
+  return { clean, blocks };
 }
