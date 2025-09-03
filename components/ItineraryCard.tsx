@@ -4,7 +4,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 /** ================== Tipos ================== **/
 type Pax = { adults: number; children?: number; infants?: number };
-type Budget = { currency: string; amountMin?: number; amountMax?: number };
 type Location = { city: string; country?: string };
 type Weather = {
   tempCmin?: number; tempCmax?: number;
@@ -35,7 +34,7 @@ type Day = {
 
 type Summary = {
   destination?: string; startDate?: string; endDate?: string; nights?: number;
-  pax?: Pax; theme?: string[]; budget?: Budget; overview?: string;
+  pax?: Pax; theme?: string[]; overview?: string;
 };
 
 type Itinerary = {
@@ -46,7 +45,6 @@ type Itinerary = {
 
 /** ================== Estilos/base ================== **/
 const GOLD = '#bba36d';
-const GOLD_SOFT_BG = '#f7f2e2';
 const BLACK = '#000000';
 const TEXT_DIM = 'text-neutral-600';
 
@@ -70,14 +68,6 @@ function fmtTime(input?: string) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(input);
   return m ? `${m[1].padStart(2,'0')}:${m[2]}` : input;
 }
-function fmtDateTime(d?: string) { // (se queda por compat)
-  if (!d) return '';
-  try {
-    const dt = new Date(d);
-    if (isNaN(dt.getTime())) return d;
-    return dt.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch { return d; }
-}
 function fmtDurationISO(iso?: string) {
   if (!iso) return '';
   const m = /^P(?:T(?:(\d+)H)?(?:(\d+)M)?)$/i.exec(iso);
@@ -87,32 +77,21 @@ function fmtDurationISO(iso?: string) {
   if (h && min) return `${h}h ${min}m`;
   if (h) return `${h}h`;
   if (min) return `${min}m`;
-  return '0m';
-}
-function formatMoney(currency: string = 'USD', value?: number) {
-  if (value === undefined || value === null || isNaN(value)) return '';
-  try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
-  } catch {
-    return `${currency} ${value}`;
-  }
+  return '';
 }
 
 /** ================== Chips (sin bordes) ================== **/
 function Chip({ children, dark = false }: { children: React.ReactNode; dark?: boolean }) {
   const cls = dark
     ? 'bg-black/60 text-white/90 shadow-sm'
-    : '';
-  const style = dark
-    ? {}
-    : { background: GOLD_SOFT_BG, color: '#5d4f25', boxShadow: '0 1px 0 rgba(0,0,0,0.04)' };
+    : 'bg-white/70 text-neutral-800 shadow-sm';
   return (
-    <span className={`inline-flex items-center px-2.5 py-1 text-xs mr-2 mb-2 rounded-full ${cls}`} style={style}>
+    <span className={`inline-flex items-center px-2.5 py-1 text-xs mr-2 mb-2 rounded-full ${cls}`}>
       {children}
     </span>
   );
 }
-function Divider() { return <div className="h-px my-4" style={{ background: '#e7e5e4' }} />; }
+function Divider() { return <div className="h-px my-4" style={{ background: 'rgba(0,0,0,0.06)' }} />; }
 
 /** ================== Pager ================== **/
 function usePager(total: number) {
@@ -130,103 +109,62 @@ function usePager(total: number) {
     return () => window.removeEventListener('keydown', onKey);
   }, [total]);
 
-  return { page, next, prev, goto, setPage };
+  return { page, next, prev, goto };
 }
 
 /** ================== Helpers Summary ================== **/
 function uniqueCities(days: Day[]): number {
   const set = new Set<string>();
   for (const d of days) {
-    for (const l of (d.locations || [])) set.add(`${l.city || ''}|${l.country || ''}`);
+    for (const l of (d.locations || [])) {
+      const key = `${(l.city || '').trim()}|${(l.country || '').trim()}`;
+      if (key !== '|' && key !== '| ') set.add(key);
+    }
   }
   return set.size;
 }
 
-/** ================== Summary (hero blanco/negro + dorado, sin bordes) ================== **/
+/** ================== Summary (dentro de la tarjeta, sin costo) ================== **/
 function SummaryPage({ it }: { it: Itinerary }) {
   const summary = it.summary || {};
   const daysCount = safe(it.days, []).length || (summary.nights ? summary.nights + 1 : 0);
   const cities = uniqueCities(safe(it.days, []));
-  const currency = summary.budget?.currency || 'USD';
-  const estimate = summary.budget?.amountMax ?? summary.budget?.amountMin;
 
   return (
-    <div className="pb-5">
-      {/* Hero con recorte curvo */}
-      <div className="relative rounded-t-2xl overflow-hidden">
-        <img
-          src="/images/Palms.jpg"
-          alt="Destino"
-          className="w-full h-56 sm:h-64 md:h-80 object-cover"
-          draggable={false}
-        />
-
-        {/* Curva blanca inferior */}
-        <svg className="absolute bottom-0 left-0 w-full h-20 sm:h-24" viewBox="0 0 1440 320" preserveAspectRatio="none">
-          <path d="M0,192 C240,256 480,288 720,272 C960,256 1200,192 1440,224 L1440,360 L0,360 Z" fill="#ffffff" />
-        </svg>
-
-        {/* Logo pill (sin borde) */}
-        <div className="absolute top-3 left-3">
-          <div className="flex items-center gap-2 rounded-full px-3 py-1 bg-white/90 shadow">
-            <img src="/images/logo-coco-volare.png" alt="Coco Volare" className="h-6 w-auto select-none" draggable={false} />
-            <span className="text-xs font-medium text-neutral-800">Coco Volare Intelligence</span>
-          </div>
+    <div className="px-4 sm:px-5 py-4 sm:py-5">
+      {/* Título y overview */}
+      <div className="mb-3">
+        <div className="text-lg sm:text-xl font-semibold text-neutral-900">
+          {it.tripTitle || summary.destination || 'Itinerario'}
         </div>
-
-        {/* Texto overlay */}
-        <div className="absolute left-4 sm:left-6 bottom-5 sm:bottom-8 text-white drop-shadow">
-          <div className="flex items-center gap-2 mb-2">
-            <Chip dark>🛏 {daysCount || '—'} {daysCount === 1 ? 'DÍA' : 'DÍAS'}</Chip>
-            <Chip dark>📍 {cities || '—'} {cities === 1 ? 'CIUDAD' : 'CIUDADES'}</Chip>
-          </div>
-          <div className="text-2xl sm:text-3xl font-semibold">
-            {it.tripTitle || summary.destination || 'Itinerary'}
-          </div>
-          {summary.overview && (
-            <div className="text-sm sm:text-base mt-1 max-w-xl opacity-90">
-              {summary.overview}
-            </div>
-          )}
-        </div>
-
-        {/* Precio (pill dorado) */}
-        {estimate !== undefined && (
-          <div className="absolute right-4 bottom-5 sm:bottom-6">
-            <div
-              className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold shadow"
-              style={{ background: GOLD, color: '#111827' }}
-            >
-              Estimado {formatMoney(currency, estimate)}
-            </div>
-          </div>
+        {!!summary.overview && (
+          <div className="mt-1 text-sm sm:text-[15px] text-neutral-800/90">{summary.overview}</div>
         )}
       </div>
 
-      {/* Meta + disclaimer (sin bordes) */}
-      <div className="px-4 sm:px-5 -mt-5">
-        <div className="rounded-xl bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap gap-2 text-[13px] sm:text-sm">
-            {summary.startDate && summary.endDate && (
-              <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
-            )}
-            {summary.pax && (
-              <Chip>👥 {summary.pax.adults} adultos{summary.pax.children ? `, ${summary.pax.children} niños` : ''}{summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}</Chip>
-            )}
-            {summary.theme && summary.theme.length > 0 && <Chip>🎯 {summary.theme.join(' · ')}</Chip>}
-            {summary.budget && (summary.budget.amountMin || summary.budget.amountMax) && (
-              <Chip>💰 {summary.budget.currency} {summary.budget.amountMin ?? ''}{summary.budget.amountMax ? ` – ${summary.budget.amountMax}` : ''}</Chip>
-            )}
-            {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
-          </div>
-
-          <Divider />
-
-          <div className="text-[12px] sm:text-[13px] text-neutral-500">
-            {it.disclaimer || '*Fechas, horarios y proveedores sujetos a disponibilidad y cambios sin previo aviso.'}
-          </div>
-        </div>
+      {/* Chips meta */}
+      <div className="flex flex-wrap gap-0.5 mb-3">
+        {daysCount > 0 && <Chip dark>🛏 {daysCount} {daysCount === 1 ? 'Día' : 'Días'}</Chip>}
+        {cities > 0 && <Chip dark>📍 {cities} {cities === 1 ? 'Ciudad' : 'Ciudades'}</Chip>}
+        {summary.startDate && summary.endDate && (
+          <Chip>🗓 {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}{summary.nights ? ` • ${summary.nights} noches` : ''}</Chip>
+        )}
+        {summary.pax && (
+          <Chip>👥 {summary.pax.adults} adultos
+            {summary.pax.children ? `, ${summary.pax.children} niños` : ''}
+            {summary.pax.infants ? `, ${summary.pax.infants} inf.` : ''}
+          </Chip>
+        )}
+        {summary.theme && summary.theme.length > 0 && <Chip>🎯 {summary.theme.join(' · ')}</Chip>}
+        {it.clientBooksLongHaulFlights && <Chip>✈️ Largos vuelos por cuenta del cliente</Chip>}
       </div>
+
+      {!!it.disclaimer && (
+        <>
+          <Divider />
+          <div className="text-[12px] sm:text-[13px] text-neutral-600">{it.disclaimer}</div>
+        </>
+      )}
     </div>
   );
 }
@@ -262,13 +200,11 @@ function collectTimeline(d: Day): TItem[] {
         timeSort: timeToMinutes(f.depart),
         timeText: fmtTime(f.depart),
         title: `${f.carrier || 'Vuelo'} ${f.code || ''} · Salida`,
-        subtitle: `${f.from || ''} → ${f.to || ''}`,
-        right: (
-          <div className="text-[10px] text-neutral-500">
-            {f.baggage && `🧳 ${f.baggage}`} {f.pnr && ` · PNR ${f.pnr}`}
-          </div>
-        ),
-        note: f.notes,
+        subtitle: [f.from, f.to].filter(Boolean).length ? `${f.from || ''} → ${f.to || ''}` : undefined,
+        right: (f.baggage || f.pnr)
+          ? <div className="text-[10px] text-neutral-500">{f.baggage ? `🧳 ${f.baggage}` : ''}{f.baggage && f.pnr ? ' · ' : ''}{f.pnr ? `PNR ${f.pnr}` : ''}</div>
+          : undefined,
+        note: f.notes || undefined,
       });
     }
     if (f.arrive) {
@@ -276,7 +212,7 @@ function collectTimeline(d: Day): TItem[] {
         timeSort: timeToMinutes(f.arrive),
         timeText: fmtTime(f.arrive),
         title: `${f.carrier || 'Vuelo'} ${f.code || ''} · Llegada`,
-        subtitle: `${f.to || ''}`,
+        subtitle: f.to || undefined,
       });
     }
   };
@@ -288,8 +224,10 @@ function collectTimeline(d: Day): TItem[] {
       timeSort: timeToMinutes(t.time),
       timeText: fmtTime(t.time),
       title: `${(t.mode || 'Transporte').toUpperCase()}${t.provider ? ` · ${t.provider}` : ''}`,
-      subtitle: `${t.from || ''}${t.to ? ` → ${t.to}` : ''}${t.duration ? ` · ${fmtDurationISO(t.duration)}` : ''}`,
-      note: t.notes,
+      subtitle: [t.from, t.to, t.duration ? fmtDurationISO(t.duration) : '']
+        .filter(Boolean)
+        .join(' · ') || undefined,
+      note: t.notes || undefined,
     });
   });
 
@@ -297,8 +235,8 @@ function collectTimeline(d: Day): TItem[] {
     items.push({
       timeSort: timeToMinutes(d.hotel.checkIn),
       timeText: fmtTime(d.hotel.checkIn),
-      title: `Check-in · ${d.hotel.name || 'Hotel'}`,
-      subtitle: `${d.hotel.area || ''}${d.hotel.style ? ` · ${d.hotel.style}` : ''}`,
+      title: `Check-in${d.hotel.name ? ` · ${d.hotel.name}` : ''}`,
+      subtitle: [d.hotel.area, d.hotel.style].filter(Boolean).join(' · ') || undefined,
       right: d.hotel.confirmation ? <span className="text-[10px] text-neutral-500">Conf: {d.hotel.confirmation}</span> : undefined,
     });
   }
@@ -306,8 +244,8 @@ function collectTimeline(d: Day): TItem[] {
     items.push({
       timeSort: timeToMinutes(d.hotel.checkOut),
       timeText: fmtTime(d.hotel.checkOut),
-      title: `Check-out · ${d.hotel.name || 'Hotel'}`,
-      subtitle: `${d.hotel.area || ''}`,
+      title: `Check-out${d.hotel.name ? ` · ${d.hotel.name}` : ''}`,
+      subtitle: d.hotel.area || undefined,
     });
   }
 
@@ -316,9 +254,14 @@ function collectTimeline(d: Day): TItem[] {
     items.push({
       timeSort: timeToMinutes(a.time),
       timeText: fmtTime(a.time),
-      title: `${a.title}${a.category ? ` · ${a.category}` : ''}${a.duration ? ` · ${fmtDurationISO(a.duration)}` : ''}${a.optional ? ' · Opcional' : ''}`,
-      subtitle: a.location,
-      note: a.notes,
+      title: [
+        a.title,
+        a.category ? `· ${a.category}` : '',
+        a.duration ? `· ${fmtDurationISO(a.duration)}` : '',
+        a.optional ? '· Opcional' : '',
+      ].filter(Boolean).join(' '),
+      subtitle: a.location || undefined,
+      note: a.notes || undefined,
     });
   });
 
@@ -326,9 +269,9 @@ function collectTimeline(d: Day): TItem[] {
     items.push({
       timeSort: timeToMinutes(s.time),
       timeText: fmtTime(s.time),
-      title: `${s.title}${s.duration ? ` · ${fmtDurationISO(s.duration)}` : ''}`,
-      subtitle: s.provider,
-      note: s.description || s.note,
+      title: [s.title, s.duration ? `· ${fmtDurationISO(s.duration)}` : ''].filter(Boolean).join(' '),
+      subtitle: s.provider || undefined,
+      note: s.description || s.note || undefined,
     });
   });
 
@@ -339,31 +282,31 @@ function collectTimeline(d: Day): TItem[] {
 function TimelineItem({ it }: { it: TItem }) {
   return (
     <div className="relative flex gap-3 sm:gap-4">
-      {/* Hora */}
+      {/* Hora (ocultar si no hay) */}
       <div className="w-10 sm:w-14 shrink-0 text-right text-[11px] sm:text-xs font-medium text-neutral-800 pt-3">
-        {it.timeText || '—'}
+        {it.timeText || ''}
       </div>
 
-      {/* Línea vertical + pin (sin border, con sombras) */}
+      {/* Línea dorada + pin, sin bordes */}
       <div className="relative">
         <div className="absolute left-1.5 top-0 bottom-0 w-[2px]" style={{ background: GOLD }} />
         <div
           className="absolute -left-1 top-3 h-3 w-3 rounded-full"
-          style={{ background: GOLD, boxShadow: '0 0 0 2px #ffffff, 0 0 0 4px ' + GOLD }}
+          style={{ background: GOLD, boxShadow: '0 0 0 2px rgba(255,255,255,0.9), 0 0 0 4px ' + GOLD }}
         />
       </div>
 
-      {/* Tarjeta (sin bordes) */}
+      {/* Tarjeta item (glass sutil) */}
       <div className="flex-1">
-        <div className="rounded-xl bg-white p-3 sm:p-3.5 shadow-sm">
+        <div className="rounded-xl bg-white/80 backdrop-blur-md supports-[backdrop-filter]:bg-white/60 p-3 sm:p-3.5 shadow-sm">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-[14.5px] sm:text-[15px] font-semibold text-neutral-900">{it.title}</div>
-              {it.subtitle && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-0.5">{it.subtitle}</div>}
+              {!!it.title && <div className="text-[14.5px] sm:text-[15px] font-semibold text-neutral-900">{it.title}</div>}
+              {!!it.subtitle && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-0.5">{it.subtitle}</div>}
             </div>
             {it.right}
           </div>
-          {it.note && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-2">{it.note}</div>}
+          {!!it.note && <div className="text-[11.5px] sm:text-xs text-neutral-600 mt-2">{it.note}</div>}
         </div>
       </div>
     </div>
@@ -387,9 +330,11 @@ function DayPage({ d }: { d: Day }) {
 
       {/* Chips ubicación y clima */}
       <div className="mb-4 flex flex-wrap">
-        {(d.locations || []).map((l, i) => (
-          <Chip key={i}>📍 {l.city}{l.country ? `, ${l.country}` : ''}</Chip>
-        ))}
+        {(d.locations || [])
+          .filter(l => (l.city && l.city.trim()) || (l.country && l.country.trim()))
+          .map((l, i) => (
+            <Chip key={i}>📍 {l.city}{l.country ? `, ${l.country}` : ''}</Chip>
+          ))}
         {d.weather && (d.weather.summary || d.weather.icon) && (
           <Chip>{d.weather.icon || '⛅'} {d.weather.summary}</Chip>
         )}
@@ -397,11 +342,9 @@ function DayPage({ d }: { d: Day }) {
 
       {/* Timeline */}
       <div className="space-y-3">
-        {items.length === 0 ? (
-          <div className={`text-sm ${TEXT_DIM}`}>Sin actividades registradas para este día.</div>
-        ) : (
-          items.map((ti, i) => <TimelineItem key={i} it={ti} />)
-        )}
+        {items.length === 0
+          ? <div className={`text-sm ${TEXT_DIM}`}>Sin actividades registradas para este día.</div>
+          : items.map((ti, i) => <TimelineItem key={i} it={ti} />)}
       </div>
     </div>
   );
@@ -426,87 +369,102 @@ export default function ItineraryCard({ data }: { data: Itinerary | any }) {
   }, [page, days]);
 
   return (
-    <div className="rounded-2xl bg-white shadow-xl overflow-hidden"> {/* sin bordes */}
-      {/* HEADER (sin border-bottom) */}
-      <div className="px-4 sm:px-5 py-3 sm:py-4 flex items-center justify-between bg-white">
-        <div className="flex items-center gap-3 min-w-0">
-          <img
-            src="/images/logo-coco-volare.png"
-            alt="Coco Volare"
-            className="h-7 sm:h-8 w-auto select-none"
-            draggable={false}
-          />
-          <div className="min-w-0">
-            <div className="text-[15px] sm:text-lg font-semibold text-neutral-900 leading-tight truncate">
-              {it.tripTitle || summary.destination || 'Itinerario'}
-            </div>
-            {summary.startDate && summary.endDate && (
-              <div className={`text-[11.5px] sm:text-xs ${TEXT_DIM}`}>
-                {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}
-                {summary.nights ? ` • ${summary.nights} noches` : ''}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Pager: botones negros con texto dorado */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
-          <button
-            onClick={prev}
-            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
-            style={{ background: BLACK, color: GOLD }}
-            aria-label="Anterior"
-          >‹</button>
-          <div className="text-[12.5px] sm:text-sm text-neutral-800 text-center px-1 truncate max-w-[9rem]">{pageLabel}</div>
-          <button
-            onClick={next}
-            className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
-            style={{ background: BLACK, color: GOLD }}
-            aria-label="Siguiente"
-          >›</button>
-        </div>
+    <div className="relative rounded-2xl overflow-hidden">
+      {/* Fondo fijo con imagen */}
+      <div className="absolute inset-0">
+        <img
+          src="/images/Palms.jpg"
+          alt="Fondo"
+          className="w-full h-full object-cover"
+          draggable={false}
+        />
       </div>
 
-      {/* BODY: carrusel por páginas */}
-      <div className="relative">
-        <div
-          className="whitespace-nowrap transition-transform duration-300 ease-out"
-          style={{ transform: `translateX(-${page * 100}%)` }}
-        >
-          {/* Página 0: Summary */}
-          <div className="inline-block align-top w-full">
-            <SummaryPage it={it} />
+      {/* Contenedor de la tarjeta con cristal esmerilado */}
+      <div className="relative p-3 sm:p-4">
+        <div className="rounded-2xl bg-white/60 backdrop-blur-md supports-[backdrop-filter]:bg-white/45 shadow-xl overflow-hidden">
+          {/* HEADER (sin bordes) */}
+          <div className="px-4 sm:px-5 py-3 sm:py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <img
+                src="/images/logo-coco-volare.png"
+                alt="Coco Volare"
+                className="h-7 sm:h-8 w-auto select-none"
+                draggable={false}
+              />
+              <div className="min-w-0">
+                <div className="text-[15px] sm:text-lg font-semibold text-neutral-900 leading-tight truncate">
+                  {it.tripTitle || summary.destination || 'Itinerario'}
+                </div>
+                {summary.startDate && summary.endDate && (
+                  <div className={`text-[11.5px] sm:text-xs ${TEXT_DIM}`}>
+                    {fmtDate(summary.startDate)} – {fmtDate(summary.endDate)}
+                    {summary.nights ? ` • ${summary.nights} noches` : ''}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Pager: botones negros con texto dorado */}
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <button
+                onClick={prev}
+                className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
+                style={{ background: BLACK, color: GOLD }}
+                aria-label="Anterior"
+              >‹</button>
+              <div className="text-[12.5px] sm:text-sm text-neutral-800 text-center px-1 truncate max-w-[9rem]">{pageLabel}</div>
+              <button
+                onClick={next}
+                className="h-8 w-8 rounded-full flex items-center justify-center shadow-sm hover:shadow-md"
+                style={{ background: BLACK, color: GOLD }}
+                aria-label="Siguiente"
+              >›</button>
+            </div>
           </div>
 
-          {/* Páginas 1..n */}
-          {days.map((d, idx) => (
-            <div key={`p-${idx}`} className="inline-block align-top w-full">
-              <DayPage d={d} />
-            </div>
-          ))}
-        </div>
-
-        {/* Pills de navegación: negras con letra dorada, sin bordes */}
-        <div className="px-4 sm:px-5 pb-4 sm:pb-5 flex flex-wrap gap-2 items-center justify-center">
-          <button
-            onClick={() => goto(0)}
-            className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
-            style={{ background: BLACK, color: GOLD }}
-            title="Resumen"
-          >
-            Resumen
-          </button>
-          {days.map((d, i) => (
-            <button
-              key={i}
-              onClick={() => goto(i + 1)}
-              className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
-              title={d.title || `Día ${d.day}`}
-              style={{ background: BLACK, color: GOLD }}
+          {/* BODY: carrusel por páginas */}
+          <div className="relative">
+            <div
+              className="whitespace-nowrap transition-transform duration-300 ease-out"
+              style={{ transform: `translateX(-${page * 100}%)` }}
             >
-              Día {d.day || i + 1}
-            </button>
-          ))}
+              {/* Página 0: Summary */}
+              <div className="inline-block align-top w-full">
+                <SummaryPage it={it} />
+              </div>
+
+              {/* Páginas 1..n */}
+              {days.map((d, idx) => (
+                <div key={`p-${idx}`} className="inline-block align-top w-full">
+                  <DayPage d={d} />
+                </div>
+              ))}
+            </div>
+
+            {/* Pills de navegación: negras con letra dorada, sin bordes */}
+            <div className="px-4 sm:px-5 pb-4 sm:pb-5 flex flex-wrap gap-2 items-center justify-center">
+              <button
+                onClick={() => goto(0)}
+                className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
+                style={{ background: BLACK, color: GOLD }}
+                title="Resumen"
+              >
+                Resumen
+              </button>
+              {days.map((d, i) => (
+                <button
+                  key={i}
+                  onClick={() => goto(i + 1)}
+                  className="px-3 py-1 rounded-full text-xs shadow-sm hover:shadow-md"
+                  title={d.title || `Día ${d.day}`}
+                  style={{ background: BLACK, color: GOLD }}
+                >
+                  Día {d.day || i + 1}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
