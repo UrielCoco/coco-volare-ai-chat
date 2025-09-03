@@ -41,7 +41,7 @@ function flattenAssistantTextFromMessage(message: any): string {
 
 function extractDeltaTextFromEvent(e: any): string {
   try {
-    const content = e?.data?.delta?.content ?? e?.delta?.content;
+    const content = e?.data?.delta?.content;
     if (Array.isArray(content)) {
       const parts: string[] = [];
       for (const item of content) {
@@ -97,14 +97,10 @@ function extractKommoOps(text: string): Array<any> {
 }
 
 /**
- * Ejecuta UN run y emite eventos SSE:
- *  - delta: trozos de texto
- *  - final: mensaje completo (puede haber varios finales si el asistente emite varios mensajes)
- *  - error: mensaje de error
- *
- * Implementación con `runs.stream` + snapshots locales (lazy-init) para evitar
- * "Received thread message event with no existing snapshot".
- * Mantiene tu instrumentación de fences/diag y tus logs.
+ * Ejecuta UN run con createAndStream y resuelve cuando termina.
+ * Emite los mismos eventos que ya consume tu UI.
+ * Devuelve el texto completo recibido en ese run.
+ * (AHORA con logs de diagnóstico de fences).
  */
 async function runOnceWithStream(
   tid: string,
@@ -116,122 +112,75 @@ async function runOnceWithStream(
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
+    // SSE opcional para inspección en cliente
     send('diag', { phase, threadId: tid, ...extra });
-    slog(phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final', { threadId: tid, ...extra });
+    // Log persistente en Vercel
+    slog(
+      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
+      { threadId: tid, ...extra },
+    );
   }
 
   let fullText = '';
-  let currentRunId: string | null = null;
+  let runId: string | null = null;
 
-  // Snapshots por mensaje dentro de ESTE stream
-  const snapshots = new Map<string, { text: string }>();
-  const keyFor = (ev: any) => {
-    const runId = ev?.run_id || currentRunId || 'run';
-    const messageId = ev?.data?.id || ev?.message?.id || ev?.id || 'msg';
-    return `${runId}:${messageId}`;
-  };
+  const stream: any = await client.beta.threads.runs.createAndStream(tid, {
+    assistant_id: ASSISTANT_ID,
+  });
 
-  // ⚠️ Sin tercer parámetro (onEvent) para evitar error de tipos
-  const stream: any = await (client as any).beta.threads.runs.stream(
-    tid,
-    { assistant_id: ASSISTANT_ID },
-  );
-
-  // Suscripción genérica y específicas
-  if (typeof stream?.on === 'function') {
-    stream.on('event', (e: any) => handle(e));
-    stream.on('thread.run.created', (e: any) => handle(e));
-    stream.on('thread.message.created', (e: any) => handle(e));
-    stream.on('thread.message.delta', (e: any) => handle(e));
-    stream.on('thread.message.completed', (e: any) => handle(e));
-    stream.on('thread.run.completed', (e: any) => handle(e));
-    stream.on('thread.run.failed', (e: any) => handle(e));
-    stream.on('error', (err: any) => {
-      slog('stream.error', { runId: currentRunId, threadId: tid, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
-    });
-  }
-
-  // Esperar a que concluya
-  try {
-    if (typeof stream?.final === 'function') {
-      await stream.final();
-    }
-  } catch (err: any) {
-    slog('exception.stream', { runId: currentRunId, threadId: tid, error: String(err?.message || err) });
-    send('error', { error: String(err?.message || err) });
-  } finally {
-    slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId: currentRunId, threadId: tid });
-  }
-
-  return { fullText, sawText: saw.text };
-
-  // ---------- handler de eventos ----------
-  function handle(e: any) {
-    const type = e?.event || e?.type || e?.name;
+  stream.on('event', (e: any) => {
+    const type = e?.event as string;
 
     if (type === 'thread.run.created') {
-      currentRunId = e?.data?.id ?? currentRunId;
-      slog('run.created', { runId: currentRunId, threadId: tid });
-      return;
-    }
-
-    if (type === 'thread.message.created') {
-      const key = keyFor(e);
-      if (!snapshots.has(key)) snapshots.set(key, { text: '' });
+      runId = e?.data?.id ?? null;
+      slog('run.created', { runId, threadId: tid });
       return;
     }
 
     if (type === 'thread.message.delta') {
-      const key = keyFor(e);
-      // ✅ Lazy-init: si llega delta antes del created, creamos snapshot
-      if (!snapshots.has(key)) snapshots.set(key, { text: '' });
-
       const deltaText = extractDeltaTextFromEvent(e);
       if (deltaText) {
         saw.text = true;
         saw.deltaChars += deltaText.length;
-        snapshots.get(key)!.text += deltaText;
         fullText += deltaText;
-
         send('delta', { value: deltaText });
 
+        // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
           emitDiag('delta', {
-            runId: currentRunId,
+            runId,
             fenceSeenInDelta: true,
             sample: deltaText.slice(0, 160),
           });
         }
+
         if (saw.deltaChars % 300 === 0) {
-          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId: currentRunId, threadId: tid });
+          slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
       }
       return;
     }
 
     if (type === 'thread.message.completed') {
-      const key = keyFor(e);
-      // Preferimos lo acumulado; si no existe, aplanamos desde el evento (fallback)
-      const msgText = snapshots.get(key)?.text ?? flattenAssistantTextFromMessage(e?.data) ?? '';
-      if (msgText) {
+      const complete = flattenAssistantTextFromMessage(e?.data);
+      if (complete) {
         saw.text = true;
-        fullText += msgText;
+        fullText += complete;
 
-        // DIAG final (conteo de fences y hashes)
+        // DIAG final: contar fences y generar huellas
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
-        const fenceTypes = fences.map((m) => m[1]);
-        const hashes = fences.map((m) => {
-          const raw = m[0];
-          let h = 0;
-          for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) >>> 0;
-          return h.toString(16);
+        const fenceTypes = fences.map(m => m[1]);
+        const hashes = fences.map(m => {
+          const raw = m[0]; // fence completo
+          let hash = 0;
+          for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+          return hash.toString(16);
         });
         const unique = Array.from(new Set(hashes)).length;
         emitDiag('final', {
-          runId: currentRunId,
+          runId,
           fenceCount,
           fenceTypes,
           hashes,
@@ -239,13 +188,14 @@ async function runOnceWithStream(
           fenceSeenInDelta: saw.fenceSeenInDelta,
         });
 
-        send('final', { text: msgText });
+        // Emitimos lo que ya usas
+        send('final', { text: complete });
 
-        const ops = extractKommoOps(msgText);
+        const ops = extractKommoOps(complete);
         slog('message.completed', {
-          fullLen: msgText.length,
+          fullLen: complete.length,
           kommoOps: ops.length,
-          runId: currentRunId,
+          runId,
           threadId: tid,
         });
         if (ops.length) send('kommo', { ops });
@@ -254,14 +204,31 @@ async function runOnceWithStream(
     }
 
     if (type === 'thread.run.failed') {
-      const err = e?.data?.last_error?.message || 'run_failed';
-      slog('stream.error', { runId: currentRunId, threadId: tid, error: err });
-      send('error', { error: err });
+      slog('stream.error', { runId, threadId: tid, error: 'run_failed' });
+      send('error', { error: 'run_failed' });
       return;
     }
 
-    // thread.run.completed → no-op (el caller manda 'done' al final)
-  }
+    if (type === 'error') {
+      slog('stream.error', { runId, threadId: tid, error: String(e?.data || 'unknown') });
+      send('error', { error: String(e?.data || 'unknown') });
+      return;
+    }
+  });
+
+  await new Promise<void>((resolve) => {
+    stream.on('end', () => {
+      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
+      resolve();
+    });
+    stream.on('error', (err: any) => {
+      slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
+      send('error', { error: String(err?.message || err) });
+      resolve();
+    });
+  });
+
+  return { fullText, sawText: saw.text };
 }
 
 export async function POST(req: NextRequest) {
@@ -305,6 +272,7 @@ export async function POST(req: NextRequest) {
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
+          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
