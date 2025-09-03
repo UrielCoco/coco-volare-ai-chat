@@ -1,7 +1,9 @@
-// app/(chat)/components/ItineraryCard.tsx
 'use client';
 
 import * as React from 'react';
+
+/** ===================== Tipos flexibles ===================== */
+type AnyObj = Record<string, any>;
 
 type Activity =
   | string
@@ -11,7 +13,7 @@ type Activity =
       name?: string;
       description?: string;
       details?: string;
-      location?: string | { city?: string; country?: string; area?: string };
+      location?: string | { city?: string; area?: string; country?: string };
     };
 
 type Day = {
@@ -20,29 +22,20 @@ type Day = {
   title?: string;
   subtitle?: string;
   notes?: string;
-  locations?: Array<
-    | string
-    | { city?: string; country?: string; area?: string }
-  >;
+  locations?: Array<string | { city?: string; area?: string; country?: string }>;
   weather?: {
-    tempCmin?: number;
-    tempCmax?: number;
-    tempFmin?: number;
-    tempFmax?: number;
-    icon?: string;
-    summary?: string;
+    tempCmin?: number; tempCmax?: number;
+    tempFmin?: number; tempFmax?: number;
+    icon?: string; summary?: string;
   };
-  transports?: any[];
+  transports?: AnyObj[] | string[];
   activities?: Activity[];
   hotel?: {
-    name?: string;
-    area?: string;
-    address?: string;
-    checkin?: string;
-    checkout?: string;
-    confirmation?: string;
-    style?: string;
-  };
+    name?: string; area?: string; address?: string;
+    checkin?: string; checkout?: string; confirmation?: string; style?: string;
+    [k: string]: any;
+  } | string;
+  [k: string]: any; // admite extensiones
 };
 
 type Summary = {
@@ -51,10 +44,10 @@ type Summary = {
   endDate?: string;
   nights?: number;
   overview?: string;
-  // admite variantes
   title?: string;
   tripTitle?: string;
-  cities?: string[]; // si el assistant manda lista de ciudades
+  cities?: string[];
+  [k: string]: any;
 };
 
 type Itinerary = {
@@ -62,157 +55,159 @@ type Itinerary = {
   lang?: string;
   summary?: Summary;
   days?: Day[];
+  [k: string]: any;
 };
 
-const GOLD = '#bba36d';
-const GOLD_SOFT_BG =
-  'linear-gradient(180deg, rgba(187,163,109,0.18) 0%, rgba(187,163,109,0.10) 100%)';
+/** ===================== Utilidades ===================== */
+const IMGS = [
+  '/images/CocoVolare1.jpg',
+  '/images/CocoVolare2.jpg',
+  '/images/CocoVolare3.jpg',
+  '/images/CocoVolare4.jpg',
+  '/images/CocoVolare5.jpg',
+  '/images/CocoVolare6.jpg',
+  '/images/CocoVolare7.jpg',
+  '/images/CocoVolare8.jpg',
+];
 
-/* ================= Helpers de “pinta solo si hay valor” ================= */
-
-function has<T>(v: T | null | undefined): v is T {
+function has(v: any): boolean {
   if (v == null) return false;
-  if (Array.isArray(v)) return v.length > 0;
   if (typeof v === 'string') return v.trim().length > 0;
+  if (Array.isArray(v)) return v.length > 0;
   if (typeof v === 'object') return Object.keys(v).length > 0;
   return true;
 }
-
 function fmtDate(d?: string) {
   if (!has(d)) return '';
   const dt = new Date(d as string);
   if (isNaN(+dt)) return String(d);
-  return dt.toLocaleDateString(undefined, {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
+  return dt.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
-
 function plural(n: number, uno: string, varios: string) {
   return `${n} ${n === 1 ? uno : varios}`;
 }
+function joinNonEmpty(list: (string | undefined)[], sep = ', ') {
+  return list.filter(Boolean).join(sep);
+}
 
-/* ================= Chips / Pills ================= */
+function normalizeLocations(locs?: Day['locations']): string[] | undefined {
+  if (!has(locs)) return;
+  const out: string[] = [];
+  for (const l of locs!) {
+    if (typeof l === 'string') out.push(l);
+    else out.push(joinNonEmpty([l.city, l.area, l.country]));
+  }
+  return out.filter(Boolean);
+}
 
-function Chip({
-  children,
-  dark = false,
-}: {
-  children: React.ReactNode;
-  dark?: boolean;
-}) {
+function normalizeActivities(acts?: Activity[]) {
+  if (!has(acts)) return;
+  return acts!.map((a) => {
+    if (typeof a === 'string') return { title: a };
+    const title = a.title || a.name;
+    let loc = '';
+    if (typeof a.location === 'string') loc = a.location;
+    else if (a.location) loc = joinNonEmpty([a.location.city, a.location.area, a.location.country]);
+    return { time: a.time, title, description: a.description || a.details, location: loc };
+  });
+}
+
+function normalizeWeather(w?: Day['weather']) {
+  if (!has(w)) return;
+  const temp =
+    w!.tempCmin != null && w!.tempCmax != null
+      ? `${w!.tempCmin}–${w!.tempCmax}°C`
+      : w!.tempFmin != null && w!.tempFmax != null
+      ? `${w!.tempFmin}–${w!.tempFmax}°F`
+      : undefined;
+  return { icon: w!.icon, summary: w!.summary, temp };
+}
+
+/** ===================== Subcomponentes ===================== */
+function Chip({ children }: { children: React.ReactNode }) {
   return (
     <span
-      className={`inline-flex items-center px-2 py-1 text-[11px] rounded-full border ${
-        dark ? 'bg-black/50 text-white/90 border-white/25' : 'border-transparent'
-      }`}
-      style={
-        dark
-          ? undefined
-          : { borderColor: GOLD, background: GOLD_SOFT_BG, color: '#5d4f25' }
-      }
+      className="inline-flex items-center px-2 py-1 rounded-full text-[11px]"
+      style={{ background: 'rgba(0,0,0,0.06)', color: '#333' }}
     >
       {children}
     </span>
   );
 }
 
-/* ================= Secciones ================= */
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  if (!has(children)) return null;
+function KVPairs({ obj }: { obj: AnyObj }) {
+  const entries = Object.entries(obj || {}).filter(([, v]) => has(v));
+  if (!entries.length) return null;
   return (
-    <div className="space-y-2">
-      <div className="text-[13px] tracking-wide text-neutral-300">{title}</div>
-      <div className="text-[13px] leading-6 text-neutral-200">{children}</div>
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-[13px] text-neutral-700">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex items-start">
+          <span className="min-w-28 text-neutral-500 capitalize">{k.replace(/[_-]/g, ' ')}:</span>
+          <span className="ml-2 break-words">
+            {typeof v === 'string'
+              ? v
+              : Array.isArray(v)
+              ? JSON.stringify(v)
+              : typeof v === 'object'
+              ? JSON.stringify(v)
+              : String(v)}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
 
-/* ========= Normalizadores para formatos “flexibles” del assistant ========= */
+/** Carrusel simple con auto-rotación */
+function Carousel({ images }: { images: string[] }) {
+  const [i, setI] = React.useState(0);
+  const len = images.length;
 
-function normalizeLocations(
-  locs?: Day['locations'],
-): Array<string> | undefined {
-  if (!has(locs)) return undefined;
-  const out: string[] = [];
-  for (const l of locs!) {
-    if (typeof l === 'string') out.push(l);
-    else {
-      const city = l?.city?.trim() || '';
-      const country = l?.country?.trim() || '';
-      const area = l?.area?.trim() || '';
-      const parts = [city, area, country].filter(Boolean);
-      if (parts.length) out.push(parts.join(', '));
-    }
-  }
-  return out.length ? out : undefined;
+  React.useEffect(() => {
+    if (!len) return;
+    const id = setInterval(() => setI((p) => (p + 1) % len), 4000);
+    return () => clearInterval(id);
+  }, [len]);
+
+  if (!len) return null;
+  return (
+    <div className="relative w-full overflow-hidden rounded-2xl">
+      <img
+        key={i}
+        src={images[i]}
+        alt=""
+        className="w-full h-56 sm:h-72 object-cover transition-opacity duration-500"
+      />
+      {/* controles */}
+      <button
+        aria-label="Anterior"
+        onClick={() => setI((p) => (p - 1 + len) % len)}
+        className="absolute left-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-black/55 text-white shadow-md flex items-center justify-center"
+      >
+        ‹
+      </button>
+      <button
+        aria-label="Siguiente"
+        onClick={() => setI((p) => (p + 1) % len)}
+        className="absolute right-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-black/55 text-white shadow-md flex items-center justify-center"
+      >
+        ›
+      </button>
+
+      {/* indicadores */}
+      <div className="absolute bottom-3 left-0 right-0 flex justify-center gap-1.5">
+        {images.map((_, idx) => (
+          <span
+            key={idx}
+            className={`h-1.5 rounded-full transition-all ${idx === i ? 'w-5 bg-white' : 'w-2 bg-white/60'}`}
+          />
+        ))}
+      </div>
+    </div>
+  );
 }
 
-function normalizeActivities(acts?: Activity[]): Array<{
-  time?: string;
-  title?: string;
-  description?: string;
-  location?: string;
-}> | undefined {
-  if (!has(acts)) return undefined;
-  const out: Array<{
-    time?: string;
-    title?: string;
-    description?: string;
-    location?: string;
-  }> = [];
-
-  for (const a of acts!) {
-    if (typeof a === 'string') {
-      out.push({ title: a });
-    } else {
-      const title = a.title || a.name;
-      const desc = a.description || a.details;
-      let location = '';
-      if (typeof a.location === 'string') location = a.location;
-      else if (a.location && typeof a.location === 'object') {
-        const { city = '', area = '', country = '' } = a.location;
-        location = [city, area, country].filter(Boolean).join(', ');
-      }
-      if (title || desc || a.time || location) {
-        out.push({
-          time: a.time,
-          title: title,
-          description: desc,
-          location,
-        });
-      }
-    }
-  }
-
-  return out.length ? out : undefined;
-}
-
-function normalizeWeather(w?: Day['weather']) {
-  if (!has(w)) return undefined;
-  const icon = w!.icon || '';
-  const summary = w!.summary || '';
-  const temp =
-    (w!.tempCmin != null && w!.tempCmax != null
-      ? `${w!.tempCmin}–${w!.tempCmax}°C`
-      : w!.tempFmin != null && w!.tempFmax != null
-      ? `${w!.tempFmin}–${w!.tempFmax}°F`
-      : '') || undefined;
-
-  if (!icon && !summary && !temp) return undefined;
-  return { icon, summary, temp };
-}
-
-/* ================== Tarjeta principal ================== */
-
+/** ===================== Componente principal ===================== */
 export default function ItineraryCard({ data }: { data: Itinerary }) {
   const summary = data?.summary || {};
   const title =
@@ -223,183 +218,229 @@ export default function ItineraryCard({ data }: { data: Itinerary }) {
   const start = fmtDate(summary.startDate);
   const end = fmtDate(summary.endDate);
   const nights =
-    typeof summary.nights === 'number' && summary.nights >= 0
-      ? summary.nights
-      : undefined;
+    typeof summary.nights === 'number' && summary.nights >= 0 ? summary.nights : undefined;
 
   const days: Day[] = Array.isArray(data?.days) ? (data!.days as Day[]) : [];
   const [idx, setIdx] = React.useState(0);
-  const current = days[idx];
+  const current: Day = (days[idx] ?? {}) as Day;
 
-  const cities =
-    Array.isArray(summary.cities) && summary.cities.length
-      ? summary.cities
-      : normalizeLocations(current?.locations);
+  const citiesFromSummary = (summary.cities && summary.cities.length ? summary.cities : undefined);
+  const citiesFromDay = normalizeLocations(current.locations);
+  const cities = citiesFromSummary ?? citiesFromDay;
 
-  const weather = normalizeWeather(current?.weather);
-  const acts = normalizeActivities(current?.activities);
+  const weather = normalizeWeather(current.weather);
+  const actsArr = normalizeActivities(current.activities) ?? [];
 
-  // estilos: fondo negro, tarjeta cristal
+  // Hotel, con guardas de tipo
+  const hotel = current?.hotel;
+  const hasHotel = has(hotel);
+  const isHotelString = typeof hotel === 'string';
+  const hotelObj: AnyObj | null =
+    !hotel || typeof hotel === 'string' ? null : (hotel as AnyObj);
+
   return (
-    <div className="w-full bg-black py-4 px-3 sm:px-4">
-      <div className="mx-auto max-w-3xl rounded-3xl shadow-xl ring-1 ring-white/10 bg-white/10 backdrop-blur-md p-4 sm:p-6">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
+    <div className="w-full px-3 py-4">
+      <div className="mx-auto max-w-xl sm:max-w-2xl rounded-[26px] shadow-xl bg-white overflow-hidden">
+        {/* MEDIA */}
+        <div className="p-3 sm:p-4">
+          <div className="flex items-center justify-between mb-3">
             <img
               src="/images/logo-coco-volare.png"
               alt="Coco Volare"
-              className="h-8 w-auto select-none"
+              className="h-10 sm:h-12 w-auto"
               draggable={false}
             />
-            <div>
-              <div className="text-base sm:text-lg font-semibold text-white">
-                {title}
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                {has(cities) && (
-                  <Chip>
-                    {Array.isArray(cities) ? cities.join(' • ') : String(cities)}
-                  </Chip>
-                )}
-                {start && end && <Chip>{`${start} — ${end}`}</Chip>}
-                {typeof nights === 'number' && (
-                  <Chip>{plural(nights, 'noche', 'noches')}</Chip>
-                )}
-              </div>
+            {/* Etiquetas rápidas de resumen */}
+            <div className="hidden sm:flex items-center gap-2">
+              {has(cities) && (
+                <Chip>{Array.isArray(cities) ? cities.join(' • ') : String(cities)}</Chip>
+              )}
+              {start && end && <Chip>{`${start} — ${end}`}</Chip>}
+              {typeof nights === 'number' && <Chip>{plural(nights, 'noche', 'noches')}</Chip>}
             </div>
           </div>
 
-          {/* Navegación de días */}
-          {days.length > 1 && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIdx((p) => Math.max(0, p - 1))}
-                className="h-8 w-8 rounded-full bg-black/60 text-white hover:bg-black/80 transition inline-flex items-center justify-center"
-                aria-label="Día anterior"
-              >
-                ‹
-              </button>
-              <Chip dark>Dia {Math.min(idx + 1, days.length)}</Chip>
-              <button
-                onClick={() => setIdx((p) => Math.min(days.length - 1, p + 1))}
-                className="h-8 w-8 rounded-full bg-black/60 text-white hover:bg-black/80 transition inline-flex items-center justify-center"
-                aria-label="Día siguiente"
-              >
-                ›
-              </button>
-            </div>
-          )}
+          <Carousel images={IMGS} />
         </div>
 
-        {/* Contenido del día */}
-        {has(current) ? (
-          <div className="mt-5 space-y-5">
-            {/* Encabezado del día */}
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                {has(current?.title) && (
-                  <div className="text-[15px] sm:text-base font-semibold text-white">
-                    {current!.title}
-                  </div>
-                )}
-                {has(current?.subtitle) && (
-                  <div className="text-sm text-neutral-300">
-                    {current!.subtitle}
-                  </div>
-                )}
-              </div>
-              <div className="text-sm text-neutral-400">
-                {fmtDate(current?.date)}
-              </div>
+        {/* BODY */}
+        <div className="px-4 sm:px-6 pb-5">
+          {/* Título principal */}
+          <div className="text-lg sm:text-xl font-semibold text-neutral-900">{title}</div>
+
+          {/* Tags móviles debajo del título */}
+          <div className="mt-2 flex flex-wrap gap-2 sm:hidden">
+            {has(cities) && (
+              <Chip>{Array.isArray(cities) ? cities.join(' • ') : String(cities)}</Chip>
+            )}
+            {start && end && <Chip>{`${start} — ${end}`}</Chip>}
+            {typeof nights === 'number' && <Chip>{plural(nights, 'noche', 'noches')}</Chip>}
+          </div>
+
+          {/* Día actual */}
+          <div className="mt-4 flex items-start justify-between">
+            <div>
+              {has(current.title) && (
+                <div className="text-[15px] font-medium text-neutral-900">{current.title}</div>
+              )}
+              {has(current.subtitle) && (
+                <div className="text-[13px] text-neutral-600">{current.subtitle}</div>
+              )}
             </div>
+            <div className="text-[12px] text-neutral-500">{fmtDate(current.date)}</div>
+          </div>
 
-            {/* Tags rápidos */}
-            {(has(cities) || has(weather)) && (
-              <div className="flex flex-wrap gap-2">
-                {has(cities) &&
-                  (cities as string[]).map((c, i) => <Chip key={i}>{c}</Chip>)}
-                {has(weather) && (
-                  <Chip>
-                    <span className="mr-1">{weather!.icon || '🌤️'}</span>
-                    {weather!.summary || 'Clima'}
-                    {weather!.temp ? ` • ${weather!.temp}` : ''}
-                  </Chip>
-                )}
-              </div>
+          {/* Chips de ubicación y clima */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {normalizeLocations(current.locations)?.map((c, i) => <Chip key={i}>{c}</Chip>)}
+            {weather && (
+              <Chip>
+                <span className="mr-1">{weather.icon || '🌤️'}</span>
+                {weather.summary || 'Clima'}{weather.temp ? ` • ${weather.temp}` : ''}
+              </Chip>
             )}
+          </div>
 
-            {/* Actividades */}
-            {has(acts) && (
-              <Section title="Actividades">
-                <div className="space-y-1">
-                  {(acts as any[]).map((a, i) => {
-                    const time = a.time ? `${a.time} — ` : '';
-                    const title = a.title || 'Actividad';
-                    const desc = a.description ? `: ${a.description}` : '';
-                    const loc = a.location ? ` (${a.location})` : '';
-                    return (
-                      <div key={i} className="text-neutral-200">
-                        • {time}
-                        <span className="font-medium">{title}</span>
-                        {desc}
-                        {loc}
-                      </div>
-                    );
-                  })}
+          {/* Actividades */}
+          {actsArr.length > 0 && (
+            <div className="mt-5">
+              <div className="font-medium text-neutral-900 mb-2">Actividades</div>
+              <ul className="space-y-1 text-[13px] text-neutral-800">
+                {actsArr.map((a, i) => {
+                  const t = [
+                    a.time ? `${a.time} —` : '',
+                    a.title || 'Actividad',
+                    a.description ? `: ${a.description}` : '',
+                    a.location ? ` (${a.location})` : '',
+                  ]
+                    .join(' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  return <li key={i}>• {t}</li>;
+                })}
+              </ul>
+            </div>
+          )}
+
+          {/* Alojamiento */}
+          {hasHotel && (
+            <div className="mt-5">
+              <div className="font-medium text-neutral-900 mb-2">Alojamiento</div>
+              {isHotelString ? (
+                <div className="text-[13px] text-neutral-800">{hotel as string}</div>
+              ) : (
+                <div className="text-[13px] text-neutral-800 space-y-1">
+                  {hotelObj?.name && <div>• <span className="font-medium">{hotelObj.name}</span></div>}
+                  {hotelObj?.area && <div>• Zona: {hotelObj.area}</div>}
+                  {hotelObj?.address && <div>• Dirección: {hotelObj.address}</div>}
+                  {hotelObj?.checkin && <div>• Check-in: {fmtDate(hotelObj.checkin)}</div>}
+                  {hotelObj?.checkout && <div>• Check-out: {fmtDate(hotelObj.checkout)}</div>}
+                  {hotelObj?.confirmation && <div>• Confirmación: {hotelObj.confirmation}</div>}
+                  {/* Cualquier campo adicional del hotel */}
+                  <KVPairs
+                    obj={
+                      hotelObj
+                        ? Object.fromEntries(
+                            Object.entries(hotelObj).filter(
+                              ([k]) =>
+                                ![
+                                  'name',
+                                  'area',
+                                  'address',
+                                  'checkin',
+                                  'checkout',
+                                  'confirmation',
+                                  'style',
+                                ].includes(k),
+                            ),
+                          )
+                        : {}
+                    }
+                  />
                 </div>
-              </Section>
-            )}
+              )}
+            </div>
+          )}
 
-            {/* Alojamiento */}
-            {has(current?.hotel) && (current!.hotel!.name || current!.hotel!.area || current!.hotel!.address) && (
-              <Section title="Alojamiento">
-                <ul className="list-disc pl-5">
-                  {current!.hotel!.name && (
-                    <li>
-                      <span className="font-medium">{current!.hotel!.name}</span>
-                    </li>
+          {/* Transporte (si viene) */}
+          {has(current.transports) && (
+            <div className="mt-5">
+              <div className="font-medium text-neutral-900 mb-2">Transporte</div>
+              {Array.isArray(current.transports) ? (
+                <div className="space-y-2">
+                  {current.transports.map((t: any, i: number) =>
+                    typeof t === 'string' ? (
+                      <div key={i} className="text-[13px] text-neutral-800">• {t}</div>
+                    ) : (
+                      <div key={i} className="rounded-xl bg-black/[0.03] p-3 text-[13px]">
+                        <KVPairs obj={(t || {}) as AnyObj} />
+                      </div>
+                    )
                   )}
-                  {current!.hotel!.area && <li>Zona: {current!.hotel!.area}</li>}
-                  {current!.hotel!.address && (
-                    <li>Dirección: {current!.hotel!.address}</li>
-                  )}
-                  {/* Check-in/out y confirmación SON DATOS LOGÍSTICOS; si prefieres mostrarlos, quita este comentario */}
-                  {/* {current!.hotel!.checkin && <li>Check-in: {fmtDate(current!.hotel!.checkin)}</li>}
-                  {current!.hotel!.checkout && <li>Check-out: {fmtDate(current!.hotel!.checkout)}</li>}
-                  {current!.hotel!.confirmation && <li>Confirmación: {current!.hotel!.confirmation}</li>} */}
-                </ul>
-              </Section>
-            )}
+                </div>
+              ) : (
+                <div className="text-[13px] text-neutral-800">{String(current.transports)}</div>
+              )}
+            </div>
+          )}
 
-            {/* Notas del día */}
-            {has(current?.notes) && (
-              <Section title="Notas">{current!.notes}</Section>
-            )}
-          </div>
-        ) : (
-          <div className="mt-6 text-neutral-300 text-sm">
-            No hay información para este día.
-          </div>
-        )}
+          {/* Notas */}
+          {has(current.notes) && (
+            <div className="mt-5">
+              <div className="font-medium text-neutral-900 mb-2">Notas</div>
+              <div className="text-[13px] text-neutral-800">{current.notes}</div>
+            </div>
+          )}
 
-        {/* Footer de navegación rápida */}
-        {days.length > 1 && (
-          <div className="mt-6 flex flex-wrap gap-2">
-            <Chip dark>Resumen</Chip>
-            {days.map((_, i) => (
-              <button
-                key={i}
-                onClick={() => setIdx(i)}
-                className={`px-2 py-1 text-[11px] rounded-full border transition ${
-                  i === idx
-                    ? 'bg-black/70 text-white border-white/30'
-                    : 'bg-black/40 text-white/80 border-white/20 hover:bg-black/60'
-                }`}
-              >
-                Día {i + 1}
-              </button>
-            ))}
+          {/* Cualquier otro campo del día (para no discriminar nada) */}
+          {(() => {
+            const omit = new Set([
+              'day','date','title','subtitle','notes',
+              'locations','weather','transports','activities','hotel'
+            ]);
+            const extra: AnyObj = {};
+            for (const [k, v] of Object.entries(current || {})) {
+              if (!omit.has(k) && has(v)) extra[k] = v;
+            }
+            if (!has(extra)) return null;
+            return (
+              <div className="mt-5">
+                <div className="font-medium text-neutral-900 mb-2">Detalles adicionales</div>
+                <div className="rounded-xl bg-black/[0.03] p-3">
+                  <KVPairs obj={extra} />
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* FOOTER: navegación por días, estilo “pill” */}
+        {days.length > 0 && (
+          <div
+            className="sticky bottom-3 mx-4 mb-4 rounded-full shadow-xl bg-neutral-900 text-white flex items-center justify-between px-3 py-2"
+            style={{ insetInline: '1rem' }}
+          >
+            <button
+              onClick={() => setIdx((p) => Math.max(0, p - 1))}
+              disabled={idx === 0}
+              className="h-9 w-9 rounded-full bg-white/10 disabled:opacity-40 flex items-center justify-center"
+              aria-label="Día anterior"
+              title="Día anterior"
+            >
+              ‹
+            </button>
+            <div className="px-3 text-[13px]">
+              Día <span className="font-semibold">{Math.min(idx + 1, days.length)}</span> de {days.length}
+            </div>
+            <button
+              onClick={() => setIdx((p) => Math.min(days.length - 1, p + 1))}
+              disabled={idx >= days.length - 1}
+              className="h-9 w-9 rounded-full bg-white/10 disabled:opacity-40 flex items-center justify-center"
+              aria-label="Día siguiente"
+              title="Día siguiente"
+            >
+              ›
+            </button>
           </div>
         )}
       </div>
