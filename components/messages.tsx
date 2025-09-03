@@ -43,23 +43,43 @@ function guessLang(messages: ChatMessage[]) {
     if (!m) continue;
     const t = (m as any)?.parts?.[0]?.text || '';
     if (typeof t === 'string' && t.trim()) {
-      const looksEn = /\b(the|and|to|please|when|how|where|days?)\b/.test(t) && !/[áéíóúñ¿¡]/.test(t);
+      const looksEn =
+        /\b(the|and|to|please|when|how|where|days?)\b/.test(t) &&
+        !/[áéíóúñ¿¡]/.test(t);
       return looksEn ? 'en' : 'es';
     }
   }
   return 'es';
 }
 
-function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
+function Loader({ lang, phase }: { lang: 'es' | 'en'; phase: 'in' | 'out' }) {
   const label = lang === 'en' ? 'thinking' : 'pensando';
   return (
-    <div className={`w-full flex items-center gap-2 my-3 ${phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'}`}>
-      <img src="/images/Intelligence.gif" alt="Coco Volare thinking" className="h-8 w-auto select-none" draggable={false} />
+    <div
+      className={`w-full flex items-center gap-2 my-3 ${
+        phase === 'in' ? 'cv-fade-in' : 'cv-fade-out'
+      }`}
+    >
+      <img
+        src="/images/Intelligence.gif"
+        alt="Coco Volare thinking"
+        className="h-8 w-auto select-none"
+        draggable={false}
+      />
       <div className="rounded-2xl bg-neutral-900 text-white px-3 py-2 shadow flex items-center gap-1">
         <span className="opacity-90">{label}</span>
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '0ms', background: 'rgba(255,255,255,.8)' }} />
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '150ms', background: 'rgba(255,255,255,.6)' }} />
-        <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ animationDelay: '300ms', background: 'rgba(255,255,255,.4)' }} />
+        <span
+          className="w-1.5 h-1.5 rounded-full animate-bounce"
+          style={{ animationDelay: '0ms', background: 'rgba(255,255,255,.8)' }}
+        />
+        <span
+          className="w-1.5 h-1.5 rounded-full animate-bounce"
+          style={{ animationDelay: '150ms', background: 'rgba(255,255,255,.6)' }}
+        />
+        <span
+          className="w-1.5 h-1.5 rounded-full animate-bounce"
+          style={{ animationDelay: '300ms', background: 'rgba(255,255,255,.4)' }}
+        />
       </div>
     </div>
   );
@@ -67,24 +87,46 @@ function Loader({ lang, phase }: { lang: 'es'|'en', phase: 'in'|'out' }) {
 
 /* ===================== Helpers ===================== */
 
-// quitar fences legacy cv:kommo
+// quitar fences legacy cv:kommo del texto visible
 function stripKommo(text: string) {
   return (text || '').replace(/```cv:kommo[\s\S]*?```/gi, '').trim();
 }
 
 function extractBalancedJson(src: string, startIdx: number): string | null {
-  let inString = false, escape = false, depth = 0, first = -1;
+  let inString = false,
+    escape = false,
+    depth = 0,
+    first = -1;
   for (let i = startIdx; i < src.length; i++) {
     const ch = src[i];
     if (inString) {
-      if (escape) { escape = false; continue; }
-      if (ch === '\\') { escape = true; continue; }
-      if (ch === '"') { inString = false; continue; }
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        continue;
+      }
       continue;
     }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === '{') { if (depth === 0) first = i; depth++; continue; }
-    if (ch === '}') { depth--; if (depth === 0 && first >= 0) return src.slice(first, i + 1); }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) first = i;
+      depth++;
+      continue;
+    }
+    if (ch === '}') {
+      depth--;
+      if (depth === 0 && first >= 0) return src.slice(first, i + 1);
+    }
   }
   return null;
 }
@@ -96,7 +138,9 @@ function parseFirstJson(text: string): any | null {
   // fence ```json ... ```
   const m = text.match(/```[ \t]*json[ \t]*\n?([\s\S]*?)```/i);
   if (m) {
-    try { return JSON.parse(m[1] || ''); } catch {}
+    try {
+      return JSON.parse(m[1] || '');
+    } catch {}
   }
 
   // balanceado crudo
@@ -104,7 +148,9 @@ function parseFirstJson(text: string): any | null {
   if (i >= 0) {
     const chunk = extractBalancedJson(text, i);
     if (chunk) {
-      try { return JSON.parse(chunk); } catch {}
+      try {
+        return JSON.parse(chunk);
+      } catch {}
     }
   }
   return null;
@@ -118,8 +164,14 @@ export default function Messages(props: Props) {
   const [phase, setPhase] = useState<'in' | 'out'>('in');
 
   useEffect(() => {
-    if (isLoading) { setShowLoader(true); setPhase('in'); }
-    else if (showLoader) { setPhase('out'); const t = setTimeout(() => setShowLoader(false), 180); return () => clearTimeout(t); }
+    if (isLoading) {
+      setShowLoader(true);
+      setPhase('in');
+    } else if (showLoader) {
+      setPhase('out');
+      const t = setTimeout(() => setShowLoader(false), 180);
+      return () => clearTimeout(t);
+    }
   }, [isLoading, showLoader]);
 
   return (
@@ -146,18 +198,30 @@ export default function Messages(props: Props) {
           if (obj && typeof obj === 'object') {
             const internal = String(obj.internal || '').toLowerCase();
             if (internal === 'kommo') return null;
-            const cardType = typeof obj.cardType === 'string' ? obj.cardType.toLowerCase() : '';
+
+            const cardType =
+              typeof obj.cardType === 'string'
+                ? obj.cardType.toLowerCase()
+                : '';
+
             if (!cardType) return null; // ocultar cualquier JSON sin cardType
+
             if (cardType === 'itinerary') {
               return (
-                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                <div
+                  key={(m as any).id || i}
+                  className="w-full flex justify-start my-3 cv-appear"
+                >
                   <ItineraryCard data={obj} />
                 </div>
               );
             }
             if (cardType === 'quote') {
               return (
-                <div key={(m as any).id || i} className="w-full flex justify-start my-3 cv-appear">
+                <div
+                  key={(m as any).id || i}
+                  className="w-full flex justify-start my-3 cv-appear"
+                >
                   <QuoteCard data={obj} />
                 </div>
               );
@@ -181,14 +245,47 @@ export default function Messages(props: Props) {
       {showLoader && <Loader lang={lang} phase={phase} />}
 
       <style jsx global>{`
-        @keyframes cvFadeIn { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes cvFadeOut { from { opacity: 1 } to { opacity: 0 } }
-        @keyframes cvAppear { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
-        .cv-fade-in  { animation: cvFadeIn .18s ease-out both; }
-        .cv-fade-out { animation: cvFadeOut .18s ease-out both; }
-        .cv-appear   { animation: cvAppear .22s ease-out both; }
+        @keyframes cvFadeIn {
+          from {
+            opacity: 0;
+          }
+          to {
+            opacity: 1;
+          }
+        }
+        @keyframes cvFadeOut {
+          from {
+            opacity: 1;
+          }
+          to {
+            opacity: 0;
+          }
+        }
+        @keyframes cvAppear {
+          from {
+            opacity: 0;
+            transform: translateY(6px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .cv-fade-in {
+          animation: cvFadeIn 0.18s ease-out both;
+        }
+        .cv-fade-out {
+          animation: cvFadeOut 0.18s ease-out both;
+        }
+        .cv-appear {
+          animation: cvAppear 0.22s ease-out both;
+        }
         @media (prefers-reduced-motion: reduce) {
-          .cv-fade-in, .cv-fade-out, .cv-appear { animation-duration: .001s; }
+          .cv-fade-in,
+          .cv-fade-out,
+          .cv-appear {
+            animation-duration: 0.001s;
+          }
         }
       `}</style>
     </div>
