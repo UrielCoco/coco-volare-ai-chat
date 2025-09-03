@@ -6,12 +6,8 @@ import type { ChatMessage } from '@/lib/types';
 
 const THREAD_KEY = 'cv_thread_id_session';
 
-// ---------- Logging helper ----------
 function ulog(event: string, meta: any = {}) {
   try { console.debug('[CV][ui]', event, meta); } catch {}
-}
-function klog(event: string, meta: any = {}) {
-  try { console.debug('[CV][kommo]', event, meta); } catch {}
 }
 
 /* ==================== Helpers Kommo (legacy fence + json interno) ==================== */
@@ -215,28 +211,17 @@ export default function Chat() {
     }
   }, [messages]);
 
-  /* ---- despacho CRM Kommo (via Hub Brain) ---- */
+  /* ---- despacho CRM Kommo (interno, no visible) ---- */
   function dispatchKommoOps(ops: any[], rawKey: string) {
     const key = 'k_' + rawKey.slice(0, 64);
-    if (kommoHashesRef.current.has(key)) {
-      klog('skip.duplicate', { key });
-      return;
-    }
+    if (kommoHashesRef.current.has(key)) return;
     kommoHashesRef.current.add(key);
-    klog('dispatch.enqueue', { opsCount: ops.length, threadId: threadIdRef.current });
-
     fetch('/api/kommo/dispatch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ops, threadId: threadIdRef.current }),
       keepalive: true,
-    })
-      .then(async (r) => {
-        const txt = await r.text().catch(() => '');
-        try { klog('dispatch.result', { ok: r.ok, status: r.status, body: JSON.parse(txt) }); }
-        catch { klog('dispatch.result', { ok: r.ok, status: r.status, body: txt?.slice(0, 300) }); }
-      })
-      .catch((err) => klog('dispatch.error', { err: String(err) }));
+    }).catch(() => {});
   }
 
   function triggerClientDownload(name: string, content: string) {
@@ -250,21 +235,16 @@ export default function Chat() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      klog('download.triggered', { name, bytes: content.length });
-    } catch (e) {
-      klog('download.error', { e: String(e) });
-    }
+    } catch {}
   }
 
   // procesa un segmento JSON ya aislado; retorna true si lo “consumió” (no renderizar)
   function handleJsonSegment(jsonText: string): boolean {
     try {
       const obj = JSON.parse(jsonText);
-
-      // 1) Nuevo formato interno para CRM: { internal:"kommo", ops:[…], download?:{…} }
+      // 1) Nuevo formato interno para CRM
       if (obj && typeof obj === 'object' && String(obj.internal || '').toLowerCase() === 'kommo') {
         const ops = Array.isArray(obj.ops) ? obj.ops : [];
-        klog('detected.internal', { opsCount: ops.length });
         if (ops.length) {
           const rawKey = JSON.stringify(ops).slice(0, 256);
           dispatchKommoOps(ops, rawKey);
@@ -281,7 +261,6 @@ export default function Chat() {
       }
 
       // 3) Cualquier otro JSON → ocultar
-      klog('json.hidden.noCardType');
       return true;
     } catch {
       // No era JSON válido → que lo procese como texto normal
@@ -290,6 +269,7 @@ export default function Chat() {
   }
 
   async function handleStream(userText: string) {
+    // loader on desde inicio de RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
 
@@ -335,23 +315,21 @@ export default function Chat() {
               if (data?.threadId) {
                 threadIdRef.current = data.threadId;
                 try { window.sessionStorage.setItem(THREAD_KEY, data.threadId); } catch {}
-                ulog('thread.update', { threadId: data.threadId });
               }
             } catch {}
             continue;
           }
 
-          // evento dedicado de backend (si lo usas)
+          // evento dedicado (si tu backend lo usa)
           if (event === 'kommo') {
             try {
               const data = JSON.parse(dataLine || '{}');
               const ops = Array.isArray(data?.ops) ? data.ops : [];
               if (ops.length) {
-                klog('sse.kommo', { opsCount: ops.length });
                 const rawKey = JSON.stringify(ops).slice(0, 256);
                 dispatchKommoOps(ops, rawKey);
               }
-            } catch (e) { klog('sse.kommo.parseError', { e: String(e) }); }
+            } catch {}
             continue;
           }
 
@@ -367,13 +345,12 @@ export default function Chat() {
                 for (const b of blocks) {
                   try {
                     if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
-                      klog('legacy.detected.delta', { opsCount: b.json.ops.length });
                       dispatchKommoOps(b.json.ops, b.raw);
                     }
-                  } catch (e) { klog('legacy.delta.error', { e: String(e) }); }
+                  } catch {}
                 }
               }
-            } catch (e) { ulog('delta.parseError', { e: String(e) }); }
+            } catch {}
             continue;
           }
 
@@ -385,6 +362,7 @@ export default function Chat() {
               currentMsgBuffer = '';
 
               if (finalTextRaw && finalTextRaw.trim().length) {
+                // dividir en múltiples segmentos en el orden original
                 const segments = tokenizeTextJsonSegments(finalTextRaw);
 
                 const pushAssistant = (txt: string) => {
@@ -415,22 +393,23 @@ export default function Chat() {
               for (const b of kommoBlocks) {
                 try {
                   if (b.json && Array.isArray(b.json.ops) && b.json.ops.length) {
-                    klog('legacy.detected.final', { opsCount: b.json.ops.length });
                     dispatchKommoOps(b.json.ops, b.raw);
                   }
-                } catch (e) { klog('legacy.final.error', { e: String(e) }); }
+                } catch {}
               }
-            } catch (e) { ulog('final.parseError', { e: String(e) }); }
+            } catch {}
             continue;
           }
 
+          // ⬇️ NUEVO: muestra mensaje de error si el run falla
           if (event === 'error') {
             setIsLoading(false);
             let errText = '⚠️ Ocurrió un problema al generar la respuesta. Intenta nuevamente.';
             try {
               const data = JSON.parse(dataLine || '{}');
-              if (typeof data?.error === 'string' && data.error.trim()) errText = `⚠️ ${data.error}`;
-              klog('sse.error', data);
+              if (typeof data?.error === 'string' && data.error.trim()) {
+                errText = `⚠️ ${data.error}`;
+              }
             } catch {}
             setMessages((prev) => [
               ...prev,
@@ -486,7 +465,7 @@ export default function Chat() {
   return (
     <div className="flex flex-col min-h-[100svh] w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
-        {/* Fondo dinámico (no se altera UI existente) */}
+        {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
           {!hasMessages ? (
             <img
