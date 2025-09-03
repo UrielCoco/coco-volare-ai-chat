@@ -471,7 +471,7 @@ export default function Chat() {
             <img
               src="/images/Texts.gif"
               alt="Coco Volare"
-              className="w-full h-auto max-w-[60vw] max-h-[60vh]"
+              className="w-full h-auto max-w-[40vw] max-h-[40vh]"
               style={{ objectFit: 'contain' }}
               draggable={false}
             />
@@ -479,7 +479,7 @@ export default function Chat() {
             <img
               src="/images/Intelligence.gif"
               alt="Coco Volare"
-              className="w-full h-auto max-w-[60vw] max-h-[60vh] opacity-30"
+              className="w-full h-auto max-w-[20vw] max-h-[20vh] opacity-30"
               style={{ objectFit: 'contain' }}
               draggable={false}
             />
