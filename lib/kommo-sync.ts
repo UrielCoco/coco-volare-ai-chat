@@ -1,6 +1,8 @@
-// lib/kommo-sync.ts — Cliente minimal para enviar eventos al Hub → Kommo
+// /lib/kommo-sync.ts — Reusa tu cliente y añade diagnóstico sin cambiar contrato
+import { dlog, timeit, short } from '@/lib/diag-log';
+
 const HUB_BASE = process.env.NEXT_PUBLIC_HUB_BASE_URL || '';
-const HUB_SECRET = process.env.HUB_BRAIN_SECRET || process.env.HUB_BRIDGE_SECRET || '';
+const HUB_SECRET = process.env.HUB_BRAIN_SECRET || process.env.HUB_BRIDGE_SECRET || ''; // solo informativo
 
 if (!HUB_BASE) console.warn('⚠️ NEXT_PUBLIC_HUB_BASE_URL no está definido');
 if (!HUB_SECRET) console.warn('⚠️ HUB_BRAIN_SECRET/HUB_BRIDGE_SECRET no está definido');
@@ -12,41 +14,77 @@ async function callKommo(action: string, payload: Record<string, any>): Promise<
   const body = { action, ...payload };
   const traceId = `cvk_${Math.random().toString(36).slice(2)}`;
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-bridge-secret': HUB_SECRET,
-        'x-webhook-secret': HUB_SECRET,
-      },
-      body: JSON.stringify(body),
-      cache: 'no-store',
-    });
-    const text = await res.text();
-    let json: any = {};
-    try { json = JSON.parse(text); } catch { json = { raw: text }; }
-    console.log(JSON.stringify({ level: 'info', traceId, msg: 'CV:kommo call', meta: { action, status: res.status, jsonPreview: JSON.stringify(json).slice(0, 200) } }));
-    return json as KommoRes;
-  } catch (e: any) {
-    console.error(JSON.stringify({ level: 'error', msg: 'CV:kommo fetch error', meta: { action, error: String(e?.message || e) } }));
-    return { ok: false, error: String(e?.message || e) };
-  }
+  return timeit('kommo.call', async () => {
+    try {
+      dlog('[CV][diag] kommo.req', { url, action, traceId, bodyPreview: short(JSON.stringify(body)) });
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const text = await res.text();
+      let json: any = undefined;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // está bien, a veces regresa texto plano
+      }
+
+      dlog('[CV][diag] kommo.res', {
+        url,
+        action,
+        traceId,
+        status: res.status,
+        ok: res.ok,
+        textPreview: short(text),
+      });
+
+      if (json) return json as KommoRes;
+      return { ok: res.ok, detail: text };
+    } catch (e: any) {
+      dlog('[CV][diag] kommo.err', { action, traceId, err: String(e?.message || e) }, 'error');
+      return { ok: false, error: String(e?.message || e) };
+    }
+  });
 }
 
-export async function kommoCreateLead(name: string, opts?: { price?: number; notes?: string; source?: string }) {
+export async function kommoCreateLead(
+  name: string,
+  opts?: { price?: number; notes?: string; source?: string }
+) {
   return callKommo('create-lead', { payload: { name, ...opts } });
 }
+
 export async function kommoUpdateLead(leadId: number, patch: Record<string, any>) {
   return callKommo('update-lead', { payload: { lead_id: leadId, ...patch } });
 }
-export async function kommoAttachContact(leadId: number, data: { name: string; email?: string; phone?: string; country?: string; city?: string; preferredContact?: string; notes?: string }) {
+
+export async function kommoAttachContact(
+  leadId: number,
+  data: {
+    name: string;
+    email?: string;
+    phone?: string;
+    country?: string;
+    city?: string;
+    preferredContact?: string;
+    notes?: string;
+  }
+) {
   return callKommo('attach-contact', { payload: { lead_id: leadId, ...data } });
 }
+
 export async function kommoAddNote(leadId: number, text: string) {
   return callKommo('add-note', { payload: { lead_id: leadId, text } });
 }
-export async function kommoAttachTranscript(leadId: number, transcript: string, opts?: { translateTo?: string }) {
+
+export async function kommoAttachTranscript(
+  leadId: number,
+  transcript: string,
+  opts?: { translateTo?: string }
+) {
   const payload: any = { lead_id: leadId, transcript };
   if (opts?.translateTo) payload.translateTo = opts.translateTo;
   return callKommo('attach-transcript', { payload });
