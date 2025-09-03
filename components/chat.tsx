@@ -467,7 +467,7 @@ export default function Chat() {
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
         {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-          {!hasMessages ? (
+          { 
             <img
               src="/images/Texts.gif"
               alt="Coco Volare"
@@ -475,15 +475,7 @@ export default function Chat() {
               style={{ objectFit: 'contain' }}
               draggable={false}
             />
-          ) : (
-            <img
-              src="/images/Intelligence.gif"
-              alt="Coco Volare"
-              className="w-full h-auto max-w-[20vw] max-h-[20vh] opacity-30"
-              style={{ objectFit: 'contain' }}
-              draggable={false}
-            />
-          )}
+          }
         </div>
 
         <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
