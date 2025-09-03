@@ -8,6 +8,9 @@ export const dynamic = 'force-dynamic';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!;
 
+// Toggle opcional por ENV (por defecto activado)
+const ENABLE_SNAPSHOT_RETRY = (process.env.CV_ENABLE_SNAPSHOT_RETRY ?? '1') === '1';
+
 type UiMessage = {
   role: 'user' | 'assistant';
   parts: Array<{ type: 'text'; text: string }>;
@@ -100,7 +103,7 @@ function extractKommoOps(text: string): Array<any> {
  * Ejecuta UN run con createAndStream y resuelve cuando termina.
  * Emite los mismos eventos que ya consume tu UI.
  * Devuelve el texto completo recibido en ese run.
- * (AHORA con logs de diagnóstico de fences).
+ * + Reintento puntual si se pierde el snapshot.
  */
 async function runOnceWithStream(
   tid: string,
@@ -112,23 +115,15 @@ async function runOnceWithStream(
   const allFencesRx = /```cv:(itinerary|quote)\s*([\s\S]*?)```/g;
 
   function emitDiag(phase: 'delta' | 'final', extra: Record<string, any> = {}) {
-    // SSE opcional para inspección en cliente
     send('diag', { phase, threadId: tid, ...extra });
-    // Log persistente en Vercel
-    slog(
-      phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final',
-      { threadId: tid, ...extra },
-    );
+    slog(phase === 'delta' ? 'diag.fence.delta' : 'diag.fence.final', { threadId: tid, ...extra });
   }
 
   let fullText = '';
   let runId: string | null = null;
 
-  const stream: any = await client.beta.threads.runs.createAndStream(tid, {
-    assistant_id: ASSISTANT_ID,
-  });
-
-  stream.on('event', (e: any) => {
+  // ---------- Handler factorado (lo usamos en stream y en el retry) ----------
+  const handleEvent = (e: any) => {
     const type = e?.event as string;
 
     if (type === 'thread.run.created') {
@@ -145,7 +140,6 @@ async function runOnceWithStream(
         fullText += deltaText;
         send('delta', { value: deltaText });
 
-        // DIAG: ¿apareció fence ya en delta?
         if (!saw.fenceSeenInDelta && fenceStartRx.test(deltaText)) {
           saw.fenceSeenInDelta = true;
           emitDiag('delta', {
@@ -154,7 +148,6 @@ async function runOnceWithStream(
             sample: deltaText.slice(0, 160),
           });
         }
-
         if (saw.deltaChars % 300 === 0) {
           slog('stream.delta.tick', { deltaChars: saw.deltaChars, runId, threadId: tid });
         }
@@ -168,12 +161,11 @@ async function runOnceWithStream(
         saw.text = true;
         fullText += complete;
 
-        // DIAG final: contar fences y generar huellas
         const fences = [...fullText.matchAll(allFencesRx)];
         const fenceCount = fences.length;
-        const fenceTypes = fences.map(m => m[1]);
-        const hashes = fences.map(m => {
-          const raw = m[0]; // fence completo
+        const fenceTypes = fences.map((m) => m[1]);
+        const hashes = fences.map((m) => {
+          const raw = m[0];
           let hash = 0;
           for (let i = 0; i < raw.length; i++) hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
           return hash.toString(16);
@@ -188,7 +180,6 @@ async function runOnceWithStream(
           fenceSeenInDelta: saw.fenceSeenInDelta,
         });
 
-        // Emitimos lo que ya usas
         send('final', { text: complete });
 
         const ops = extractKommoOps(complete);
@@ -214,17 +205,65 @@ async function runOnceWithStream(
       send('error', { error: String(e?.data || 'unknown') });
       return;
     }
+  };
+
+  // ---------- Stream principal ----------
+  const stream: any = await client.beta.threads.runs.createAndStream(tid, {
+    assistant_id: ASSISTANT_ID,
   });
 
+  stream.on('event', handleEvent);
+
+  // ---------- Espera de finalización con retry puntual ----------
   await new Promise<void>((resolve) => {
-    stream.on('end', () => {
-      slog('stream.end', { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
+    let settled = false;
+    const finish = (tag = 'stream.end') => {
+      if (settled) return;
+      settled = true;
+      slog(tag, { deltaChars: saw.deltaChars, sawText: saw.text, runId, threadId: tid });
       resolve();
-    });
+    };
+
+    const attachRetry = async () => {
+      if (!ENABLE_SNAPSHOT_RETRY) {
+        finish('stream.end.no-retry');
+        return;
+      }
+      try {
+        slog('stream.retry.begin', { runId, threadId: tid });
+        const retry: any = await client.beta.threads.runs.createAndStream(tid, {
+          assistant_id: ASSISTANT_ID,
+        });
+        retry.on('event', handleEvent);
+        retry.on('end', () => {
+          slog('stream.retry.end', { runId, threadId: tid });
+          finish('stream.end.retry');
+        });
+        retry.on('error', (e: any) => {
+          const msg = String(e?.message || e || '');
+          slog('exception.stream.retry', { runId, threadId: tid, error: msg });
+          send('error', { error: msg });
+          finish('stream.end.retry.error');
+        });
+      } catch (e: any) {
+        const msg = String(e?.message || e || '');
+        slog('exception.stream.retry.create', { runId, threadId: tid, error: msg });
+        send('error', { error: msg });
+        finish('stream.end.retry.create-error');
+      }
+    };
+
+    stream.on('end', () => finish());
     stream.on('error', (err: any) => {
-      slog('exception.stream', { runId, threadId: tid, error: String(err?.message || err) });
-      send('error', { error: String(err?.message || err) });
-      resolve();
+      const msg = String(err?.message || err || '');
+      slog('exception.stream', { runId, threadId: tid, error: msg });
+      if (ENABLE_SNAPSHOT_RETRY && /no existing snapshot/i.test(msg)) {
+        // 🔁 Reintento único
+        void attachRetry();
+        return;
+      }
+      send('error', { error: msg });
+      finish('stream.end.error');
     });
   });
 
@@ -272,7 +311,6 @@ export async function POST(req: NextRequest) {
 
         if (shouldReprompt) {
           slog('auto.reprompt', { reason: 'wait-no-block', threadId: tid });
-          // Enviar "?" oculto en el MISMO hilo
           await client.beta.threads.messages.create(tid, { role: 'user', content: '?' });
           slog('message.append.ok', { threadId: tid, info: 'auto-?' });
 
