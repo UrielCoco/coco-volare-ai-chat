@@ -463,18 +463,15 @@ export default function Chat() {
   const hasMessages = messages.length > 0;
 
   return (
-    <div className="flex flex-col min-h-viewport w-full overflow-x-hidden">
-      <div
-        ref={listRef}
-        className="relative flex-1 overflow-y-auto touch-pan-y overscroll-contain"
-      >
+    <div className="flex flex-col min-h-[100svh] w-full">
+      <div ref={listRef} className="relative flex-1 overflow-y-auto">
         {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
           {!hasMessages ? (
             <img
               src="/images/Texts.gif"
               alt="Coco Volare"
-              className="w-full h-auto max-w-[60vw] max-h-[40vh] sm:max-w-[40vw]"
+              className="w-full h-auto max-w-[40vw] max-h-[40vh]"
               style={{ objectFit: 'contain' }}
               draggable={false}
             />
@@ -482,17 +479,14 @@ export default function Chat() {
             <img
               src="/images/Intelligence.gif"
               alt="Coco Volare"
-              className="w-full h-auto max-w-[28vw] max-h-[20vh] opacity-30 sm:max-w-[20vw]"
+              className="w-full h-auto max-w-[20vw] max-h-[20vh] opacity-30"
               style={{ objectFit: 'contain' }}
               draggable={false}
             />
           )}
         </div>
 
-        <div
-          className="relative z-10 mx-auto w-full max-w-3xl px-3 sm:px-4"
-          style={{ paddingBottom: composerH + 16 }}
-        >
+        <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
             isLoading={isLoading}
@@ -506,10 +500,10 @@ export default function Chat() {
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
-        className="sticky bottom-0 z-20 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80 shadow-[0_-8px_24px_rgba(0,0,0,0.08)]"
+        className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
         <div
-          className="mx-auto max-w-3xl w-full flex items-center gap-2 py-2 sm:py-3 min-w-0"
+          className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
           style={{
             paddingLeft: 'max(12px, env(safe-area-inset-left))',
             paddingRight: 'max(12px, env(safe-area-inset-right))',
@@ -520,12 +514,11 @@ export default function Chat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Escribe tu mensaje…"
-            className="flex-1 min-w-0 rounded-full bg-white px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow ring-1 ring-black/5"
-            aria-label="Mensaje"
+            className="flex-1 min-w-0 rounded-full bg-muted px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
           />
           <button
             type="submit"
-            className="shrink-0 rounded-full h-11 w-11 sm:h-auto sm:w-auto px-0 sm:px-4 py-0 sm:py-3 font-semibold hover:opacity-90 transition bg-black text-[#bba36d] shadow flex items-center justify-center"
+            className="shrink-0 rounded-full h-10 w-10 sm:h-auto sm:w-auto px-0 sm:px-4 py-0 sm:py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
             aria-label="Enviar"
           >
             ➤
