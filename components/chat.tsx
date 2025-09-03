@@ -520,9 +520,7 @@ export default function Chat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Escribe tu mensaje…"
-            className="flex-1 min-w-0 rounded-full bg-white px-4 py-2.5 sm:px-5 sm:py-3
-             text-base sm:text-[17px] outline-none text-foreground
-             placeholder:text-muted-foreground shadow ring-1 ring-black/5"
+            className="flex-1 min-w-0 rounded-full bg-white px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow ring-1 ring-black/5"
             aria-label="Mensaje"
           />
           <button
