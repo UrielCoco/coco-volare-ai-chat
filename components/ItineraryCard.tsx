@@ -1,449 +1,360 @@
 'use client';
 
 import * as React from 'react';
+import { useMemo, useState, useEffect } from 'react';
 
-/** ===================== Tipos flexibles ===================== */
 type AnyObj = Record<string, any>;
 
-type Activity =
-  | string
-  | {
-      time?: string;
-      title?: string;
-      name?: string;
-      description?: string;
-      details?: string;
-      location?: string | { city?: string; area?: string; country?: string };
-    };
+export default function ItineraryCard({ data }: { data: AnyObj }) {
+  // --------- Helpers de lectura segura ----------
+  const summary = data?.summary ?? {};
+  const days: AnyObj[] = Array.isArray(data?.days) ? data.days : [];
+  const totalDays = days.length || 1;
 
-type Day = {
-  day?: number;
-  date?: string;
-  title?: string;
-  subtitle?: string;
-  notes?: string;
-  locations?: Array<string | { city?: string; area?: string; country?: string }>;
-  weather?: {
-    tempCmin?: number; tempCmax?: number;
-    tempFmin?: number; tempFmax?: number;
-    icon?: string; summary?: string;
-  };
-  transports?: AnyObj[] | string[];
-  activities?: Activity[];
-  hotel?: {
-    name?: string; area?: string; address?: string;
-    checkin?: string; checkout?: string; confirmation?: string; style?: string;
-    [k: string]: any;
-  } | string;
-  [k: string]: any; // admite extensiones
-};
+  const [dayIdx, setDayIdx] = useState(0);
+  const current = days[dayIdx] ?? {};
 
-type Summary = {
-  destination?: string;
-  startDate?: string;
-  endDate?: string;
-  nights?: number;
-  overview?: string;
-  title?: string;
-  tripTitle?: string;
-  cities?: string[];
-  [k: string]: any;
-};
-
-type Itinerary = {
-  cardType?: string;
-  lang?: string;
-  summary?: Summary;
-  days?: Day[];
-  [k: string]: any;
-};
-
-/** ===================== Utilidades ===================== */
-const IMGS = [
-  '/images/CocoVolare1.jpg',
-  '/images/CocoVolare2.jpg',
-  '/images/CocoVolare3.jpg',
-  '/images/CocoVolare4.jpg',
-  '/images/CocoVolare5.jpg',
-  '/images/CocoVolare6.jpg',
-  '/images/CocoVolare7.jpg',
-  '/images/CocoVolare8.jpg',
-];
-
-function has(v: any): boolean {
-  if (v == null) return false;
-  if (typeof v === 'string') return v.trim().length > 0;
-  if (Array.isArray(v)) return v.length > 0;
-  if (typeof v === 'object') return Object.keys(v).length > 0;
-  return true;
-}
-function fmtDate(d?: string) {
-  if (!has(d)) return '';
-  const dt = new Date(d as string);
-  if (isNaN(+dt)) return String(d);
-  return dt.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-}
-function plural(n: number, uno: string, varios: string) {
-  return `${n} ${n === 1 ? uno : varios}`;
-}
-function joinNonEmpty(list: (string | undefined)[], sep = ', ') {
-  return list.filter(Boolean).join(sep);
-}
-
-function normalizeLocations(locs?: Day['locations']): string[] | undefined {
-  if (!has(locs)) return;
-  const out: string[] = [];
-  for (const l of locs!) {
-    if (typeof l === 'string') out.push(l);
-    else out.push(joinNonEmpty([l.city, l.area, l.country]));
-  }
-  return out.filter(Boolean);
-}
-
-function normalizeActivities(acts?: Activity[]) {
-  if (!has(acts)) return;
-  return acts!.map((a) => {
-    if (typeof a === 'string') return { title: a };
-    const title = a.title || a.name;
-    let loc = '';
-    if (typeof a.location === 'string') loc = a.location;
-    else if (a.location) loc = joinNonEmpty([a.location.city, a.location.area, a.location.country]);
-    return { time: a.time, title, description: a.description || a.details, location: loc };
-  });
-}
-
-function normalizeWeather(w?: Day['weather']) {
-  if (!has(w)) return;
-  const temp =
-    w!.tempCmin != null && w!.tempCmax != null
-      ? `${w!.tempCmin}–${w!.tempCmax}°C`
-      : w!.tempFmin != null && w!.tempFmax != null
-      ? `${w!.tempFmin}–${w!.tempFmax}°F`
-      : undefined;
-  return { icon: w!.icon, summary: w!.summary, temp };
-}
-
-/** ===================== Subcomponentes ===================== */
-function Chip({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      className="inline-flex items-center px-2 py-1 rounded-full text-[11px]"
-      style={{ background: 'rgba(0,0,0,0.06)', color: '#333' }}
-    >
-      {children}
-    </span>
+  // Imágenes del carrusel
+  const heroImages = useMemo(
+    () => [
+      '/images/CocoVolare1.jpg',
+      '/images/CocoVolare2.jpg',
+      '/images/CocoVolare3.jpg',
+      '/images/CocoVolare4.jpg',
+      '/images/CocoVolare5.jpg',
+      '/images/CocoVolare6.jpg',
+      '/images/CocoVolare7.jpg',
+      '/images/CocoVolare8.jpg',
+    ],
+    [],
   );
-}
 
-function KVPairs({ obj }: { obj: AnyObj }) {
-  const entries = Object.entries(obj || {}).filter(([, v]) => has(v));
-  if (!entries.length) return null;
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-[13px] text-neutral-700">
-      {entries.map(([k, v]) => (
-        <div key={k} className="flex items-start">
-          <span className="min-w-28 text-neutral-500 capitalize">{k.replace(/[_-]/g, ' ')}:</span>
-          <span className="ml-2 break-words">
-            {typeof v === 'string'
-              ? v
-              : Array.isArray(v)
-              ? JSON.stringify(v)
-              : typeof v === 'object'
-              ? JSON.stringify(v)
-              : String(v)}
-          </span>
-        </div>
-      ))}
+  const [imgIdx, setImgIdx] = useState(0);
+  useEffect(() => {
+    // rotación automática suave
+    const id = setInterval(() => {
+      setImgIdx((p) => (p + 1) % heroImages.length);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [heroImages.length]);
+
+  // --------- Formateadores ----------
+  const fmtDate = (s?: string) => {
+    if (!s) return '';
+    try {
+      const d = new Date(s);
+      return d.toLocaleDateString(summary?.lang || 'es-MX', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      });
+    } catch {
+      return s;
+    }
+  };
+
+  const pill = (text?: string | number) =>
+    !text ? null : (
+      <span className="inline-block rounded-full bg-neutral-800 text-neutral-200 px-2.5 py-1 text-[11px] sm:text-xs whitespace-nowrap">
+        {String(text)}
+      </span>
+    );
+
+  const section = (label: string, children: React.ReactNode) => (
+    <div className="space-y-1">
+      <div className="text-[12px] sm:text-sm text-neutral-300">{label}</div>
+      <div className="text-[13px] sm:text-base text-neutral-100">{children}</div>
     </div>
   );
-}
 
-/** Carrusel simple con auto-rotación */
-function Carousel({ images }: { images: string[] }) {
-  const [i, setI] = React.useState(0);
-  const len = images.length;
+  const list = (items?: any[]) =>
+    !items || items.length === 0 ? null : (
+      <ul className="list-disc pl-5 space-y-1">
+        {items.map((it, i) => (
+          <li key={i} className="text-[13px] sm:text-[14px] leading-5">
+            {typeof it === 'string' ? it : stringifySmall(it)}
+          </li>
+        ))}
+      </ul>
+    );
 
-  React.useEffect(() => {
-    if (!len) return;
-    const id = setInterval(() => setI((p) => (p + 1) % len), 4000);
-    return () => clearInterval(id);
-  }, [len]);
-
-  if (!len) return null;
-  return (
-    <div className="relative w-full overflow-hidden rounded-2xl">
-      <img
-        key={i}
-        src={images[i]}
-        alt=""
-        className="w-full h-56 sm:h-72 object-cover transition-opacity duration-500"
-      />
-      {/* controles */}
-      <button
-        aria-label="Anterior"
-        onClick={() => setI((p) => (p - 1 + len) % len)}
-        className="absolute left-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-black/55 text-white shadow-md flex items-center justify-center"
-      >
-        ‹
-      </button>
-      <button
-        aria-label="Siguiente"
-        onClick={() => setI((p) => (p + 1) % len)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 h-9 w-9 rounded-full bg-black/55 text-white shadow-md flex items-center justify-center"
-      >
-        ›
-      </button>
-
-      {/* indicadores */}
-      <div className="absolute bottom-3 left-0 right-0 flex justify-center gap-1.5">
-        {images.map((_, idx) => (
+  const chips = (items?: any[]) =>
+    !items || items.length === 0 ? null : (
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((it, i) => (
           <span
-            key={idx}
-            className={`h-1.5 rounded-full transition-all ${idx === i ? 'w-5 bg-white' : 'w-2 bg-white/60'}`}
-          />
+            key={i}
+            className="inline-block rounded-full bg-neutral-800/80 text-neutral-200 px-2.5 py-1 text-[11px] sm:text-xs"
+          >
+            {typeof it === 'string' ? it : stringifySmall(it)}
+          </span>
         ))}
       </div>
-    </div>
-  );
-}
+    );
 
-/** ===================== Componente principal ===================== */
-export default function ItineraryCard({ data }: { data: Itinerary }) {
-  const summary = data?.summary || {};
+  function stringifySmall(v: any): string {
+    if (v == null) return '';
+    if (typeof v === 'string' || typeof v === 'number') return String(v);
+    if (Array.isArray(v)) return v.filter(Boolean).map(stringifySmall).join(', ');
+    // objetos típicos (locations, weather)
+    if (typeof v === 'object') {
+      if (v.city || v.country) return [v.city, v.country].filter(Boolean).join(', ');
+      if (v.name && (v.area || v.address || v.style))
+        return [v.name, v.area, v.style].filter(Boolean).join(' · ');
+      if (v.summary && (v.tempCmax || v.tempCmin))
+        return `${v.summary} · ${[v.tempCmin, v.tempCmax].filter(Boolean).join('–')}°C`;
+      if (v.text) return String(v.text);
+      return Object.entries(v)
+        .map(([k, val]) => `${k}: ${stringifySmall(val)}`)
+        .join(' · ');
+    }
+    return String(v);
+  }
+
+  // --------- Datos encabezado ----------
   const title =
-    summary.tripTitle ||
-    summary.title ||
-    (summary.destination ? `Viaje a ${summary.destination}` : 'Itinerario');
+    data?.tripTitle ||
+    data?.title ||
+    `Viaje a ${summary?.destination || ''}`.trim() ||
+    'Itinerario';
+  const dateStart = fmtDate(summary?.startDate || data?.startDate);
+  const dateEnd = fmtDate(summary?.endDate || data?.endDate);
+  const nights = data?.nights ?? summary?.nights;
 
-  const start = fmtDate(summary.startDate);
-  const end = fmtDate(summary.endDate);
-  const nights =
-    typeof summary.nights === 'number' && summary.nights >= 0 ? summary.nights : undefined;
+  const headerBadges: (string | null)[] = [
+    (Array.isArray(summary?.destinations)
+      ? summary.destinations.map((d: any) => stringifySmall(d)).join(', ')
+      : stringifySmall(summary?.destination)) || null,
+    dateStart && dateEnd ? `${dateStart} – ${dateEnd}` : null,
+    nights ? `${nights} noche${Number(nights) === 1 ? '' : 's'}` : null,
+  ].filter(Boolean) as string[];
 
-  const days: Day[] = Array.isArray(data?.days) ? (data!.days as Day[]) : [];
-  const [idx, setIdx] = React.useState(0);
-  const current: Day = (days[idx] ?? {}) as Day;
+  // --------- Datos del día ----------
+  const locations = Array.isArray(current?.locations) ? current.locations : undefined;
+  const weather = current?.weather;
+  const activities =
+    (Array.isArray(current?.activities) && current.activities.length > 0
+      ? current.activities
+      : Array.isArray(current?.hotelOptions)
+      ? current.hotelOptions
+      : []) || [];
 
-  const citiesFromSummary = (summary.cities && summary.cities.length ? summary.cities : undefined);
-  const citiesFromDay = normalizeLocations(current.locations);
-  const cities = citiesFromSummary ?? citiesFromDay;
-
-  const weather = normalizeWeather(current.weather);
-  const actsArr = normalizeActivities(current.activities) ?? [];
-
-  // Hotel, con guardas de tipo
   const hotel = current?.hotel;
-  const hasHotel = has(hotel);
-  const isHotelString = typeof hotel === 'string';
-  const hotelObj: AnyObj | null =
-    !hotel || typeof hotel === 'string' ? null : (hotel as AnyObj);
+  const transports = Array.isArray(current?.transports) ? current.transports : [];
+  const addonsArray = Array.isArray(current?.addons)
+    ? current.addons
+    : Array.isArray(current?.addOns)
+    ? current.addOns
+    : Array.isArray(current?.extras)
+    ? current.extras
+    : [];
 
+  // Otros campos útiles que no queremos perder si llegan
+  const extraBlocks: { label: string; content: React.ReactNode }[] = [];
+
+  if (current?.flightsInternational && current.flightsInternational.length) {
+    extraBlocks.push({
+      label: 'Vuelos',
+      content: list(current.flightsInternational),
+    });
+  }
+  if (current?.highlights && current.highlights.length) {
+    extraBlocks.push({ label: 'Highlights', content: list(current.highlights) });
+  }
+  if (current?.notes && String(current.notes).trim().length) {
+    extraBlocks.push({ label: 'Notas', content: <p>{current.notes}</p> });
+  }
+
+  // --------- Render ----------
   return (
-    <div className="w-full px-3 py-4">
-      <div className="mx-auto max-w-xl sm:max-w-2xl rounded-[26px] shadow-xl bg-white overflow-hidden">
-        {/* MEDIA */}
-        <div className="p-3 sm:p-4">
-          <div className="flex items-center justify-between mb-3">
-            <img
-              src="/images/logo-coco-volare.png"
-              alt="Coco Volare"
-              className="h-10 sm:h-12 w-auto"
-              draggable={false}
-            />
-            {/* Etiquetas rápidas de resumen */}
-            <div className="hidden sm:flex items-center gap-2">
-              {has(cities) && (
-                <Chip>{Array.isArray(cities) ? cities.join(' • ') : String(cities)}</Chip>
-              )}
-              {start && end && <Chip>{`${start} — ${end}`}</Chip>}
-              {typeof nights === 'number' && <Chip>{plural(nights, 'noche', 'noches')}</Chip>}
+    <div className="w-full">
+      <div
+        className="
+          w-full rounded-3xl shadow-xl bg-neutral-900 text-neutral-100
+          overflow-hidden
+        "
+        // sin bordes, solo sombra
+      >
+        {/* HERO - carrusel */}
+        <div className="relative w-full h-[180px] sm:h-[220px] md:h-[260px]">
+          <img
+            src={heroImages[imgIdx]}
+            alt="Coco Volare"
+            className="absolute inset-0 w-full h-full object-cover"
+            draggable={false}
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-transparent" />
+          {/* Logo + título */}
+          <div className="absolute left-0 right-0 bottom-0 px-4 sm:px-6 pb-3 sm:pb-4">
+            <div className="flex items-center gap-3">
+              <img
+                src="/images/logo-coco-volare.png"
+                alt="Coco Volare"
+                className="h-9 w-9 sm:h-11 sm:w-11 rounded-full bg-black/60 p-1 shadow"
+                draggable={false}
+              />
+              <div className="min-w-0">
+                <div className="text-[15px] sm:text-[17px] font-semibold leading-tight line-clamp-2">
+                  {title}
+                </div>
+                {headerBadges.length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {headerBadges.map((t, i) => (
+                      <span
+                        key={i}
+                        className="inline-block rounded-full bg-black/50 text-neutral-200 px-2.5 py-1 text-[11px] sm:text-xs"
+                      >
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-
-          <Carousel images={IMGS} />
         </div>
 
-        {/* BODY */}
-        <div className="px-4 sm:px-6 pb-5">
-          {/* Título principal */}
-          <div className="text-lg sm:text-xl font-semibold text-neutral-900">{title}</div>
-
-          {/* Tags móviles debajo del título */}
-          <div className="mt-2 flex flex-wrap gap-2 sm:hidden">
-            {has(cities) && (
-              <Chip>{Array.isArray(cities) ? cities.join(' • ') : String(cities)}</Chip>
-            )}
-            {start && end && <Chip>{`${start} — ${end}`}</Chip>}
-            {typeof nights === 'number' && <Chip>{plural(nights, 'noche', 'noches')}</Chip>}
-          </div>
-
-          {/* Día actual */}
-          <div className="mt-4 flex items-start justify-between">
-            <div>
-              {has(current.title) && (
-                <div className="text-[15px] font-medium text-neutral-900">{current.title}</div>
+        {/* CONTENIDO */}
+        <div className="p-4 sm:p-6 space-y-5">
+          {/* Top meta del día */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[12px] sm:text-[13px] text-neutral-400">Día {current?.day || dayIdx + 1}</div>
+              {current?.title && (
+                <div className="text-[15px] sm:text-[17px] font-semibold leading-tight">{current.title}</div>
               )}
-              {has(current.subtitle) && (
-                <div className="text-[13px] text-neutral-600">{current.subtitle}</div>
+              {current?.date && (
+                <div className="text-[12px] sm:text-[13px] text-neutral-300">{fmtDate(current.date)}</div>
               )}
             </div>
-            <div className="text-[12px] text-neutral-500">{fmtDate(current.date)}</div>
-          </div>
-
-          {/* Chips de ubicación y clima */}
-          <div className="mt-3 flex flex-wrap gap-2">
-            {normalizeLocations(current.locations)?.map((c, i) => <Chip key={i}>{c}</Chip>)}
-            {weather && (
-              <Chip>
-                <span className="mr-1">{weather.icon || '🌤️'}</span>
-                {weather.summary || 'Clima'}{weather.temp ? ` • ${weather.temp}` : ''}
-              </Chip>
-            )}
+            <div className="flex-shrink-0 flex gap-1.5">
+              {chips(
+                [
+                  ...(locations ? locations.map((l: AnyObj) => stringifySmall(l)) : []),
+                  weather?.summary ? stringifySmall(weather) : undefined,
+                ].filter(Boolean) as string[],
+              )}
+            </div>
           </div>
 
           {/* Actividades */}
-          {actsArr.length > 0 && (
-            <div className="mt-5">
-              <div className="font-medium text-neutral-900 mb-2">Actividades</div>
-              <ul className="space-y-1 text-[13px] text-neutral-800">
-                {actsArr.map((a, i) => {
-                  const t = [
-                    a.time ? `${a.time} —` : '',
-                    a.title || 'Actividad',
-                    a.description ? `: ${a.description}` : '',
-                    a.location ? ` (${a.location})` : '',
-                  ]
-                    .join(' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                  return <li key={i}>• {t}</li>;
-                })}
-              </ul>
+          {activities && activities.length > 0 ? (
+            section(
+              'Actividades',
+              <div className="space-y-1">
+                {activities.map((a: any, i: number) => (
+                  <div key={i} className="text-[13px] sm:text-[14px] leading-5">
+                    • {typeof a === 'string' ? a : stringifySmall(a)}
+                  </div>
+                ))}
+              </div>,
+            )
+          ) : (
+            <div className="text-[13px] sm:text-[14px] text-neutral-400">
+              Sin actividades registradas para este día.
             </div>
           )}
 
           {/* Alojamiento */}
-          {hasHotel && (
-            <div className="mt-5">
-              <div className="font-medium text-neutral-900 mb-2">Alojamiento</div>
-              {isHotelString ? (
-                <div className="text-[13px] text-neutral-800">{hotel as string}</div>
-              ) : (
-                <div className="text-[13px] text-neutral-800 space-y-1">
-                  {hotelObj?.name && <div>• <span className="font-medium">{hotelObj.name}</span></div>}
-                  {hotelObj?.area && <div>• Zona: {hotelObj.area}</div>}
-                  {hotelObj?.address && <div>• Dirección: {hotelObj.address}</div>}
-                  {hotelObj?.checkin && <div>• Check-in: {fmtDate(hotelObj.checkin)}</div>}
-                  {hotelObj?.checkout && <div>• Check-out: {fmtDate(hotelObj.checkout)}</div>}
-                  {hotelObj?.confirmation && <div>• Confirmación: {hotelObj.confirmation}</div>}
-                  {/* Cualquier campo adicional del hotel */}
-                  <KVPairs
-                    obj={
-                      hotelObj
-                        ? Object.fromEntries(
-                            Object.entries(hotelObj).filter(
-                              ([k]) =>
-                                ![
-                                  'name',
-                                  'area',
-                                  'address',
-                                  'checkin',
-                                  'checkout',
-                                  'confirmation',
-                                  'style',
-                                ].includes(k),
-                            ),
-                          )
-                        : {}
-                    }
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Transporte (si viene) */}
-          {has(current.transports) && (
-            <div className="mt-5">
-              <div className="font-medium text-neutral-900 mb-2">Transporte</div>
-              {Array.isArray(current.transports) ? (
-                <div className="space-y-2">
-                  {current.transports.map((t: any, i: number) =>
-                    typeof t === 'string' ? (
-                      <div key={i} className="text-[13px] text-neutral-800">• {t}</div>
-                    ) : (
-                      <div key={i} className="rounded-xl bg-black/[0.03] p-3 text-[13px]">
-                        <KVPairs obj={(t || {}) as AnyObj} />
-                      </div>
-                    )
+          {hotel && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {section(
+                'Alojamiento',
+                <div className="space-y-1">
+                  {hotel?.name && (
+                    <div className="font-medium text-[14px] sm:text-[15px]">{hotel.name}</div>
                   )}
-                </div>
-              ) : (
-                <div className="text-[13px] text-neutral-800">{String(current.transports)}</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pill(hotel?.area)}
+                    {pill(hotel?.style)}
+                    {pill(hotel?.address)}
+                  </div>
+                </div>,
               )}
-            </div>
-          )}
-
-          {/* Notas */}
-          {has(current.notes) && (
-            <div className="mt-5">
-              <div className="font-medium text-neutral-900 mb-2">Notas</div>
-              <div className="text-[13px] text-neutral-800">{current.notes}</div>
-            </div>
-          )}
-
-          {/* Cualquier otro campo del día (para no discriminar nada) */}
-          {(() => {
-            const omit = new Set([
-              'day','date','title','subtitle','notes',
-              'locations','weather','transports','activities','hotel'
-            ]);
-            const extra: AnyObj = {};
-            for (const [k, v] of Object.entries(current || {})) {
-              if (!omit.has(k) && has(v)) extra[k] = v;
-            }
-            if (!has(extra)) return null;
-            return (
-              <div className="mt-5">
-                <div className="font-medium text-neutral-900 mb-2">Detalles adicionales</div>
-                <div className="rounded-xl bg-black/[0.03] p-3">
-                  <KVPairs obj={extra} />
-                </div>
+              <div className="space-y-2">
+                {section(
+                  'Check-in / out',
+                  <div className="flex flex-wrap gap-2">
+                    {hotel?.checkin && pill(`Check-in: ${fmtDate(hotel.checkin)}`)}
+                    {hotel?.checkout && pill(`Check-out: ${fmtDate(hotel.checkout)}`)}
+                    {hotel?.confirmation && pill(`Conf.: ${hotel.confirmation}`)}
+                  </div>,
+                )}
               </div>
-            );
-          })()}
+            </div>
+          )}
+
+          {/* Traslados */}
+          {transports && transports.length > 0 && section('Traslados', list(transports))}
+
+          {/* Addons (chips / lista) */}
+          {addonsArray && addonsArray.length > 0 && section('Add-ons', chips(addonsArray))}
+
+          {/* Extras si vienen */}
+          {extraBlocks.map(
+            (b, i) => b.content && <div key={i}>{section(b.label, b.content)}</div>,
+          )}
+
+          {/* Meta inferior de resumen (si llega) */}
+          {(summary?.pax || summary?.theme || summary?.overview) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              {summary?.overview && section('Resumen', <p>{summary.overview}</p>)}
+              <div className="space-y-3">
+                {summary?.pax &&
+                  section(
+                    'Pax',
+                    <div className="flex flex-wrap gap-1.5">
+                      {pill(
+                        `${summary.pax.adults ?? 0} adulto${
+                          Number(summary.pax?.adults) === 1 ? '' : 's'
+                        }`,
+                      )}
+                      {summary.pax.children ? pill(`${summary.pax.children} niño(s)`) : null}
+                      {summary.pax.infants ? pill(`${summary.pax.infants} infante(s)`) : null}
+                    </div>,
+                  )}
+                {summary?.theme && section('Tema', pill(summary.theme))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* FOOTER: navegación por días, estilo “pill” */}
-        {days.length > 0 && (
-          <div
-            className="sticky bottom-3 mx-4 mb-4 rounded-full shadow-xl bg-neutral-900 text-white flex items-center justify-between px-3 py-2"
-            style={{ insetInline: '1rem' }}
-          >
+        {/* NAV DÍAS */}
+        <div className="px-4 sm:px-6 pb-4">
+          <div className="w-full bg-black rounded-full shadow-inner flex items-center justify-between p-1.5">
             <button
-              onClick={() => setIdx((p) => Math.max(0, p - 1))}
-              disabled={idx === 0}
-              className="h-9 w-9 rounded-full bg-white/10 disabled:opacity-40 flex items-center justify-center"
+              type="button"
+              onClick={() => setDayIdx((p) => (p - 1 + totalDays) % totalDays)}
+              className="h-9 w-9 rounded-full bg-[#bba36d] text-black grid place-items-center active:scale-[0.98]"
               aria-label="Día anterior"
-              title="Día anterior"
             >
-              ‹
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
             </button>
-            <div className="px-3 text-[13px]">
-              Día <span className="font-semibold">{Math.min(idx + 1, days.length)}</span> de {days.length}
+            <div className="text-neutral-200 text-[13px] sm:text-[14px]">
+              Día {Math.min(dayIdx + 1, totalDays)} de {totalDays}
             </div>
             <button
-              onClick={() => setIdx((p) => Math.min(days.length - 1, p + 1))}
-              disabled={idx >= days.length - 1}
-              className="h-9 w-9 rounded-full bg-white/10 disabled:opacity-40 flex items-center justify-center"
+              type="button"
+              onClick={() => setDayIdx((p) => (p + 1) % totalDays)}
+              className="h-9 w-9 rounded-full bg-[#bba36d] text-black grid place-items-center active:scale-[0.98]"
               aria-label="Día siguiente"
-              title="Día siguiente"
             >
-              ›
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
             </button>
           </div>
-        )}
+        </div>
       </div>
+
+      {/* Ajustes de tipografía responsiva generales */}
+      <style jsx>{`
+        :global(.itn-clamp-title) {
+          font-size: clamp(15px, 2.8vw, 18px);
+        }
+      `}</style>
     </div>
   );
 }
