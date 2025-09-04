@@ -105,6 +105,7 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
   let i = 0, textStart = 0;
   while (i < s.length) {
     if (s[i] === '{') {
+      // buscar cierre balanceado
       let j = i, depth = 0, inStr = false, esc = false, closed = false;
       for (; j < s.length; j++) {
         const ch = s[j];
@@ -128,7 +129,9 @@ function tokenizeTextJsonSegments(rawInput: string): Array<{type:'text'|'json', 
           textStart = j;
           i = j;
           continue;
-        } catch {}
+        } catch {
+          // no era JSON válido → seguir
+        }
       }
     }
     i++;
@@ -161,43 +164,13 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
 
+  // idempotencia: no duplicar ejecuciones de kommo
   const kommoHashesRef = useRef<Set<string>>(new Set());
+  // cuenta de mensajes finalizados dentro del mismo RUN
   const runFinalsCountRef = useRef<number>(0);
 
   const [composerH, setComposerH] = useState<number>(84);
   const lastMsgIdRef = useRef<string | null>(null);
-
-  // ====== NUEVO: estabilizar viewport y teclado (iOS/iPadOS) ======
-  const baselineVHRef = useRef<number>(0);
-
-  useEffect(() => {
-    const docEl = document.documentElement;
-    const setVars = (base: number, kb: number) => {
-      docEl.style.setProperty('--cv-vh', `${base}px`); // altura “congelada”
-      docEl.style.setProperty('--cv-kb', `${Math.max(0, kb)}px`); // alto teclado (aprox)
-    };
-
-    // altura base al montar
-    baselineVHRef.current = window.innerHeight;
-    setVars(baselineVHRef.current, 0);
-
-    const onVV = () => {
-      const vv = window.visualViewport;
-      if (!vv) return;
-      // Si el teclado está abierto, vv.height < baseline → kb = baseline - vv.height
-      const kb = Math.max(0, baselineVHRef.current - vv.height);
-      setVars(baselineVHRef.current, kb);
-      // mantén la vista del listado abajo cuando cambia el teclado
-      requestAnimationFrame(() => scrollToBottom('auto'));
-    };
-
-    window.visualViewport?.addEventListener('resize', onVV);
-    window.visualViewport?.addEventListener('scroll', onVV);
-    return () => {
-      window.visualViewport?.removeEventListener('resize', onVV);
-      window.visualViewport?.removeEventListener('scroll', onVV);
-    };
-  }, []);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     const scroller = listRef.current;
@@ -265,6 +238,7 @@ export default function Chat() {
     } catch {}
   }
 
+  // procesa un segmento JSON ya aislado; retorna true si lo “consumió” (no renderizar)
   function handleJsonSegment(jsonText: string): boolean {
     try {
       const obj = JSON.parse(jsonText);
@@ -357,7 +331,6 @@ export default function Chat() {
               if (typeof data?.value === 'string' && data.value.length) {
                 currentMsgBuffer += data.value;
                 fullTextForKommo += data.value;
-
                 const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
@@ -477,23 +450,10 @@ export default function Chat() {
   const hasMessages = messages.length > 0;
 
   return (
-    <div
-      className="flex flex-col w-full"
-      // Altura estable: usa la base congelada; si no existe, 100svh
-      style={{ minHeight: 'var(--cv-vh, 100svh)' }}
-    >
-      <div
-        ref={listRef}
-        className="relative flex-1 overflow-y-auto"
-        style={{
-          overscrollBehaviorY: 'contain',
-          // deja hueco para el composer + teclado
-          paddingBottom: `calc(${composerH + 12}px + var(--cv-kb, 0px))`,
-        }}
-      >
-        {/* (Quitado: fondos GIF) */}
-
-        <div className="relative z-10 mx-auto max-w-3xl w-full px-4">
+    <div className="flex flex-col min-h-[100svh] w-full">
+      <div ref={listRef} className="relative flex-1 overflow-y-auto">
+        {/* (sin GIFs de fondo) */}
+        <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
             isLoading={isLoading}
@@ -508,34 +468,34 @@ export default function Chat() {
         ref={composerRef}
         onSubmit={handleSubmit}
         className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
-        // Eleva el composer por encima del teclado sin encoger el contenedor
-        style={{ bottom: 'var(--cv-kb, 0px)' }}
       >
+        {/* Wrapper del composer centrado y levemente más compacto */}
         <div
-          className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
+          className="mx-auto max-w-3xl w-full py-2 sm:py-3 min-w-0"
           style={{
             paddingLeft: 'max(12px, env(safe-area-inset-left))',
             paddingRight: 'max(12px, env(safe-area-inset-right))',
             paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
           }}
         >
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Escribe tu mensaje…"
-            className="flex-1 min-w-0 rounded-full bg-muted px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
-            onFocus={() => {
-              // asegura auto-scroll hacia el final al enfocar
-              setTimeout(() => scrollToBottom('smooth'), 0);
-            }}
-          />
-          <button
-            type="submit"
-            className="shrink-0 rounded-full h-10 w-10 sm:h-auto sm:w-auto px-0 sm:px-4 py-0 sm:py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
-            aria-label="Enviar"
-          >
-            ➤
-          </button>
+          <div className="w-full flex justify-center">
+            {/* Ajuste de ancho: más angosto en móviles para que se vea centrado */}
+            <div className="w-full max-w-[360px] sm:max-w-[560px] flex items-center gap-2 sm:gap-3 min-w-0">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Escribe tu mensaje…"
+                className="flex-1 min-w-0 rounded-full bg-muted px-3.5 py-2 text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
+              />
+              <button
+                type="submit"
+                className="shrink-0 rounded-full h-9 w-9 sm:h-10 sm:w-10 px-0 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
+                aria-label="Enviar"
+              >
+                ➤
+              </button>
+            </div>
+          </div>
         </div>
       </form>
     </div>
