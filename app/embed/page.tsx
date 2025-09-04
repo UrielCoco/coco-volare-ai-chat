@@ -7,8 +7,10 @@ import InitThread from './InitThread';
 export default function EmbedPage() {
   useEffect(() => {
     const send = () => {
-      const h = document.documentElement.scrollHeight || document.body.scrollHeight;
-      try { parent.postMessage({ type: 'cv-chat:height', height: h }, '*'); } catch {}
+    const vv = (window as any).visualViewport;
+    const payload:any = { type: 'cv-chat:height', height: document.documentElement.scrollHeight || document.body.scrollHeight };
+    if (vv) payload.visualHeight = vv.height; // útil con teclado abierto
+    try { parent.postMessage(payload, '*'); } catch {}
     };
     let ro: ResizeObserver | null = null;
     try {
