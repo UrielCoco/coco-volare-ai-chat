@@ -463,7 +463,7 @@ export default function Chat() {
   const hasMessages = messages.length > 0;
 
   return (
-    <div className="flex flex-col  w-full">
+    <div className="flex flex-col min-h-[100svh] w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
         {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
