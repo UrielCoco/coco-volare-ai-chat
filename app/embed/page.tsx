@@ -26,7 +26,7 @@ export default function EmbedPage() {
   }, []);
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'transparent' }}>
+    <div style={{  display: 'flex', flexDirection: 'column', background: 'transparent' }}>
       {/* Inicializa cookie + threadId sin tocar tu UI */}
       <InitThread />
       <Chat />

@@ -492,7 +492,7 @@ export default function Chat() {
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
-        className=" bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
+        className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
         <div
           className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
