@@ -463,7 +463,7 @@ export default function Chat() {
   const hasMessages = messages.length > 0;
 
   return (
-    <div className="flex flex-col min-h-[100svh] md:min-h-[100svh] w-full">
+    <div className="flex flex-col min-h-[100svh] w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
         {/* Fondo dinámico */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
@@ -492,7 +492,7 @@ export default function Chat() {
       <form
         ref={composerRef}
         onSubmit={handleSubmit}
-        className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
+        className=" bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
         <div
           className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
