@@ -242,6 +242,7 @@ export default function Chat() {
   function handleJsonSegment(jsonText: string): boolean {
     try {
       const obj = JSON.parse(jsonText);
+      // 1) Nuevo formato interno para CRM
       if (obj && typeof obj === 'object' && String(obj.internal || '').toLowerCase() === 'kommo') {
         const ops = Array.isArray(obj.ops) ? obj.ops : [];
         if (ops.length) {
@@ -251,18 +252,24 @@ export default function Chat() {
         if (obj.download && obj.download.name && obj.download.content) {
           triggerClientDownload(String(obj.download.name), String(obj.download.content));
         }
-        return true;
+        return true; // no renderizar en chat
       }
+
+      // 2) Tarjetas: permitir que se rendericen (se mostrarán en Messages)
       if (obj && typeof obj === 'object' && typeof obj.cardType === 'string') {
-        return false;
+        return false; // sí se debe mostrar
       }
+
+      // 3) Cualquier otro JSON → ocultar
       return true;
     } catch {
+      // No era JSON válido → que lo procese como texto normal
       return false;
     }
   }
 
   async function handleStream(userText: string) {
+    // loader on desde inicio de RUN
     setIsLoading(true);
     runFinalsCountRef.current = 0;
 
@@ -313,6 +320,7 @@ export default function Chat() {
             continue;
           }
 
+          // evento dedicado (si tu backend lo usa)
           if (event === 'kommo') {
             try {
               const data = JSON.parse(dataLine || '{}');
@@ -331,6 +339,8 @@ export default function Chat() {
               if (typeof data?.value === 'string' && data.value.length) {
                 currentMsgBuffer += data.value;
                 fullTextForKommo += data.value;
+
+                // Detectar y despachar cv:kommo (legacy) durante streaming
                 const blocks = extractKommoBlocksFromText(fullTextForKommo);
                 for (const b of blocks) {
                   try {
@@ -352,6 +362,7 @@ export default function Chat() {
               currentMsgBuffer = '';
 
               if (finalTextRaw && finalTextRaw.trim().length) {
+                // dividir en múltiples segmentos en el orden original
                 const segments = tokenizeTextJsonSegments(finalTextRaw);
 
                 const pushAssistant = (txt: string) => {
@@ -377,6 +388,7 @@ export default function Chat() {
 
               runFinalsCountRef.current += 1;
 
+              // Despachar Kommo si solo vino en el final (legacy fence)
               const kommoBlocks = extractKommoBlocksFromText(finalTextRaw);
               for (const b of kommoBlocks) {
                 try {
@@ -389,6 +401,7 @@ export default function Chat() {
             continue;
           }
 
+          // ⬇️ NUEVO: muestra mensaje de error si el run falla
           if (event === 'error') {
             setIsLoading(false);
             let errText = '⚠️ Ocurrió un problema al generar la respuesta. Intenta nuevamente.';
@@ -450,9 +463,21 @@ export default function Chat() {
   const hasMessages = messages.length > 0;
 
   return (
-    <div className="flex flex-col min-h-[100svh] w-full">
+    <div className="flex flex-col  w-full">
       <div ref={listRef} className="relative flex-1 overflow-y-auto">
-        {/* (sin GIFs de fondo) */}
+        {/* Fondo dinámico */}
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+          {/* 
+            <img
+              src="/images/Texts.gif"
+              alt="Coco Volare"
+              className="w-full h-auto max-w-[40vw] max-h-[40vh]"
+              style={{ objectFit: 'contain' }}
+              draggable={false}
+            />
+          */}
+        </div>
+
         <div className="relative z-10 mx-auto max-w-3xl w-full px-4" style={{ paddingBottom: composerH + 12 }}>
           <Messages
             messages={messages}
@@ -469,33 +494,27 @@ export default function Chat() {
         onSubmit={handleSubmit}
         className="sticky bottom-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t"
       >
-        {/* Wrapper del composer centrado y levemente más compacto */}
         <div
-          className="mx-auto max-w-3xl w-full py-2 sm:py-3 min-w-0"
+          className="mx-auto max-w-3xl w-full flex items-center gap-2 sm:gap-2 py-2 sm:py-3 min-w-0"
           style={{
             paddingLeft: 'max(12px, env(safe-area-inset-left))',
             paddingRight: 'max(12px, env(safe-area-inset-right))',
             paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
           }}
         >
-          <div className="w-full flex justify-center">
-            {/* Ajuste de ancho: más angosto en móviles para que se vea centrado */}
-            <div className="w-full max-w-[360px] sm:max-w-[560px] flex items-center gap-2 sm:gap-3 min-w-0">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Escribe tu mensaje…"
-                className="flex-1 min-w-0 rounded-full bg-muted px-3.5 py-2 text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
-              />
-              <button
-                type="submit"
-                className="shrink-0 rounded-full h-9 w-9 sm:h-10 sm:w-10 px-0 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
-                aria-label="Enviar"
-              >
-                ➤
-              </button>
-            </div>
-          </div>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Escribe tu mensaje…"
+            className="flex-1 min-w-0 rounded-full bg-muted px-4 py-2.5 sm:px-5 sm:py-3 text-sm sm:text-base outline-none text-foreground placeholder:text-muted-foreground shadow"
+          />
+          <button
+            type="submit"
+            className="shrink-0 rounded-full h-10 w-10 sm:h-auto sm:w-auto px-0 sm:px-4 py-0 sm:py-3 font-medium hover:opacity-90 transition bg-[#bba36d] text-black shadow flex items-center justify-center"
+            aria-label="Enviar"
+          >
+            ➤
+          </button>
         </div>
       </form>
     </div>
