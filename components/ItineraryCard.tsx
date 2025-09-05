@@ -277,7 +277,7 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
                   <div className="flex flex-wrap gap-2">
                     {hotel?.checkin && pill(`Check-in: ${fmtDate(hotel.checkin)}`)}
                     {hotel?.checkout && pill(`Check-out: ${fmtDate(hotel.checkout)}`)}
-                    {hotel?.confirmation && pill(`Conf.: ${hotel.confirmation}`)}
+                    {hotel?.Category && pill(`Category: ${hotel.category}`)}
                   </div>,
                 )}
               </div>
