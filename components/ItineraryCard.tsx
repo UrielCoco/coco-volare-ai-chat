@@ -72,14 +72,9 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
   // Imágenes del carrusel
   const heroImages = useMemo(
     () => [
-      '/images/CocoVolare1.jpg',
-      '/images/CocoVolare2.jpg',
-      '/images/CocoVolare3.jpg',
+
       '/images/CocoVolare4.jpg',
-      '/images/CocoVolare5.jpg',
-      '/images/CocoVolare6.jpg',
-      '/images/CocoVolare7.jpg',
-      '/images/CocoVolare8.jpg',
+
     ],
     [],
   );
