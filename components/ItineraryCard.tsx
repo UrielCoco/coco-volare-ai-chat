@@ -112,7 +112,6 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
     try {
       const d = new Date(s);
       if (isNaN(d.getTime())) {
-        // intentar HH:mm directo
         const hhmm = s.match(/^(\d{2}):(\d{2})/);
         return hhmm ? hhmm[0] : s;
       }
@@ -150,6 +149,25 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
     </div>
   );
 
+  // Sección fija resaltada (para el Recap global)
+  const SectionFixed = ({ title, children }: { title: string; children: React.ReactNode }) => (
+    <div className="mt-2 rounded-2xl border border-[#bba36d]/40 bg-neutral-800/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+      <div className="flex items-center justify-between px-3.5 py-2 border-b border-[#bba36d]/30">
+        <div className="flex items-center gap-2 text-[#e3d7b2]">
+          {/* Pin icon */}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M14.7 4.3l5 5-3.4 3.4.7 4.9-1.4 1.4-4.9-.7L7.3 19.7 5.9 18.3l1.4-1.4-.7-4.9L3.2 8.3l1.4-1.4 4.9.7L12.9 4.3l1.8 0z" stroke="#e3d7b2" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span className="text-sm font-medium">{title}</span>
+        </div>
+        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#bba36d] text-black uppercase tracking-wide">
+          {lang.toLowerCase().startsWith('en') ? 'Fixed' : 'Fijo'}
+        </span>
+      </div>
+      <div className="p-3.5">{children}</div>
+    </div>
+  );
+
   const list = (items?: any[]) =>
     !items || items.length === 0 ? null : (
       <ul className="list-disc pl-5 space-y-1">
@@ -180,15 +198,12 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
     if (typeof v === 'string' || typeof v === 'number') return String(v);
     if (Array.isArray(v)) return v.filter(Boolean).map(stringifySmall).join(', ');
     if (typeof v === 'object') {
-      // formatos comunes
       if (v.city || v.country) return [v.city, v.country].filter(Boolean).join(', ');
       if (v.name && (v.area || v.address || v.style))
         return [v.name, v.area, v.style].filter(Boolean).join(' · ');
       if (v.summary && (v.tempCmax || v.tempCmin))
         return `${v.summary} · ${[v.tempCmin, v.tempCmax].filter(Boolean).join('–')}°C`;
       if (v.text) return String(v.text);
-
-      // serializar objeto filtrando llaves sensibles
       return Object.entries(v)
         .filter(([k]) => !OMIT_KEYS.has(String(k).toLowerCase()))
         .map(([k, val]) => `${k}: ${stringifySmall(val)}`)
@@ -500,11 +515,9 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
               <div className="space-y-2">
                 <Section title={lang.toLowerCase().startsWith('en') ? 'Check-in / out' : 'Check-in / out'}>
                   <div className="flex flex-wrap gap-2">
-                    {/* Soporte a mayúsculas/minúsculas: checkIn/checkin */}
                     {(hotel?.checkIn || hotel?.checkin) && pill(`Check-in: ${fmtDate(hotel?.checkIn || hotel?.checkin)}`)}
                     {(hotel?.checkOut || hotel?.checkout) && pill(`Check-out: ${fmtDate(hotel?.checkOut || hotel?.checkout)}`)}
                     {/* Nunca mostrar confirmación */}
-                    {/* {hotel?.confirmation && pill(`Conf.: ${hotel.confirmation}`)} */}
                   </div>
                 </Section>
               </div>
@@ -571,10 +584,10 @@ export default function ItineraryCard({ data }: { data: AnyObj }) {
             </div>
           )}
 
-          {/* Recap final (timeline) */}
-          <Section title={labels.recap}>
+          {/* Recap final (timeline fijo/global) */}
+          <SectionFixed title={labels.recap}>
             <RenderFinalTimeline data={data} />
-          </Section>
+          </SectionFixed>
         </div>
 
         {/* NAV DÍAS */}
