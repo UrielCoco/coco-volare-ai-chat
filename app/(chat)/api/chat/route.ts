@@ -332,6 +332,10 @@ export async function POST(req: NextRequest) {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
+      'Access-Control-Allow-Origin': 'ALLOW_ORIGIN',
+      'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Credentials': 'true',
       Connection: 'keep-alive',
     },
   });
