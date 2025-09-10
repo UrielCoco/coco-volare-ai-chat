@@ -2,17 +2,17 @@
 
 // --- CORS (minimal) ---
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? '*'
+const corsHeaders: Record<string, string> = {
+  'Access-Control-Allow-Origin': ALLOW_ORIGIN,
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Credentials': 'true',
+  'Vary': 'Origin',
+}
+
+// Preflight CORS
 export async function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Credentials': 'true',
-      'Vary': 'Origin',
-    },
-  })
+  return new Response(null, { status: 204, headers: corsHeaders })
 }
 
 // app/(chat)/api/chat/route.ts
@@ -349,10 +349,6 @@ export async function POST(req: NextRequest) {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
-      'Access-Control-Allow-Origin': (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? '*'),
-      'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Credentials': 'true',
       Connection: 'keep-alive',
     },
   });
