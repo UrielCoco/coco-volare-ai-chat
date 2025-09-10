@@ -1,3 +1,20 @@
+
+
+// --- CORS (minimal) ---
+const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? '*'
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': ALLOW_ORIGIN,
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Credentials': 'true',
+      'Vary': 'Origin',
+    },
+  })
+}
+
 // app/(chat)/api/chat/route.ts
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
@@ -332,7 +349,7 @@ export async function POST(req: NextRequest) {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
-      'Access-Control-Allow-Origin': 'ALLOW_ORIGIN',
+      'Access-Control-Allow-Origin': (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? '*'),
       'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Access-Control-Allow-Credentials': 'true',
