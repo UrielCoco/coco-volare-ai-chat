@@ -1,8 +1,8 @@
-// app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge"; // quítalo si quieres Node
+export const runtime = "edge"; // quítalo si prefieres Node
 
+// CORS sencillo (si todo corre en el mismo dominio, igual funciona)
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": ALLOW_ORIGIN,
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     let body: any = {};
     try { body = await req.json(); } catch {}
 
-    // 1) Normaliza entrada
+    // 1) Normaliza entrada (acepta {messages} o un string en message/input/prompt/text)
     let msgs: UIMessage[] | undefined = body?.messages;
     if (!Array.isArray(msgs)) {
       const single = body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
@@ -45,14 +45,19 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Instrucciones (en Responses NO va 'system')
+    // 2) Responses API (tu versión) → usa input con content parts de tipo "text"
+    const input = msgs.map((m) => ({
+      role: m.role,
+      content: [{ type: "text" as const, text: String(m.content ?? "") }],
+    }));
+
+    // 3) Instrucciones (en Responses no se usa 'system' separado)
     const instructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
-      "SIEMPRE llama a la función upsert_itinerary con { partial: ... } " +
-      "usando claves meta, summary, flights, days, transports, extras y labels. " +
-      "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
+      "llama a la función upsert_itinerary con { partial: ... } usando claves meta, summary, flights, days, transports, extras y labels " +
+      "cuando aplique. Además responde con un texto breve y útil. Nunca borres datos existentes; sólo envía parciales.";
 
-    // 3) Tools (formato NUEVO)
+    // 4) Tools en formato NUEVO (name/description/parameters al tope)
     const tools = [
       {
         type: "function",
@@ -77,62 +82,19 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // Helpers para armar 'input' en sus variantes
-    const asInputWith = (partType: "input_text" | "text") =>
-      msgs!.map((m) => ({
-        role: m.role,
-        content: [{ type: partType, text: String(m.content ?? "") }],
-      }));
+    // 5) Crear stream: **usa input** (no messages) y content.type "text"
+    const stream = await (openai.responses as any).stream({
+      model: "gpt-4.1-mini",
+      input,            // 👈 aquí va el array [{ role, content:[{type:"text", text}]}]
+      instructions,     // 👈 reemplaza a 'system' en Responses
+      tools,
+      tool_choice: "auto",
+      stream: true,
+    });
 
-    const asSingleString = () =>
-      msgs!.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
-
-    // 4) Intenta crear el stream con 'input_text' → fallback a 'text' → fallback a string
-    async function createStream() {
-      try {
-        // Variante A: parts con input_text
-        return await (openai.responses as any).stream({
-          model: "gpt-4.1-mini",
-          input: asInputWith("input_text"),
-          instructions,
-          tools,
-          tool_choice: "auto",
-          stream: true,
-        });
-      } catch (e: any) {
-        const msg = (e?.message || "").toString();
-        // Si se queja de 'input_text', probamos 'text'
-        if (msg.includes("input_text") || msg.includes("Invalid value") || msg.includes("Supported values")) {
-          try {
-            return await (openai.responses as any).stream({
-              model: "gpt-4.1-mini",
-              input: asInputWith("text"),
-              instructions,
-              tools,
-              tool_choice: "auto",
-              stream: true,
-            });
-          } catch (e2: any) {
-            // Último fallback: input como string concatenado
-            return await (openai.responses as any).stream({
-              model: "gpt-4.1-mini",
-              input: asSingleString(),
-              instructions,
-              tools,
-              tool_choice: "auto",
-              stream: true,
-            });
-          }
-        }
-        // Si fue otro error, re-lanza
-        throw e;
-      }
-    }
-
-    const stream = await createStream();
     const encoder = new TextEncoder();
 
-    // 5) Reemitimos SSE en el formato que tu front ya mapea
+    // 6) Reemitir SSE que tu front ya mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
