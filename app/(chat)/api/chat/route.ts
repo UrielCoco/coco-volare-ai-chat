@@ -26,17 +26,41 @@ function sseChunk(event: string, data: any) {
 
 export async function POST(req: Request) {
   try {
-    const { messages } = (await req.json()) as { messages: UIMessage[] };
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {
+      body = {};
+    }
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    // 1) Normaliza el input del cliente
+    let msgs: UIMessage[] | undefined = body?.messages;
+    if (!Array.isArray(msgs)) {
+      // Acepta también formatos alternos
+      const single: unknown =
+        body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
+      if (typeof single === "string" && single.trim()) {
+        msgs = [{ role: "user", content: single.trim() }];
+      }
+    }
 
-    // Responses API usa "input_text" (no "text")
-    const input = messages.map((m) => ({
+    if (!Array.isArray(msgs) || msgs.length === 0) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Bad Request: expected { messages: Array<{role, content}> } or a string field like 'message'/'input'/'prompt'.",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
+    // 2) Responses API usa "input_text" (no "text")
+    const input = msgs.map((m) => ({
       role: m.role,
-      content: [{ type: "input_text" as const, text: m.content }],
+      content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
     }));
 
-    // 👇 SIN tipos del SDK (para evitar el error de Tool). Estructura válida para Responses.
+    // 3) Define la tool (sin tipos del SDK para evitar broncas de TS)
     const tools = [
       {
         type: "function",
@@ -61,9 +85,11 @@ export async function POST(req: Request) {
       },
     ] as any;
 
-    // Crea el stream de Responses API
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+    // 4) Crea el stream de Responses API
     const stream = await openai.responses.stream({
-      model: "gpt-4.1-mini", // cambia si necesitas otro
+      model: "gpt-4.1-mini", // cambia si prefieres otro
       input,
       tools,
       tool_choice: "auto",
@@ -76,13 +102,13 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
 
+    // 5) Reemite los eventos que tu front ya mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
           controller.enqueue(encoder.encode(sseChunk(event, data)));
 
         try {
-          // Iterador agnóstico de versión: re-emite eventos que tu front ya mapea
           for await (const ev of stream as any) {
             const type = ev?.type as string;
 
@@ -91,11 +117,13 @@ export async function POST(req: Request) {
               continue;
             }
 
+            // Texto en vivo
             if (type === "response.output_text.delta" || type === "response.refusal.delta") {
               send("delta", { value: ev.delta }); // tu hook acepta { value }
               continue;
             }
 
+            // Tool-call argumentos en streaming
             if (type === "response.function_call.arguments.delta") {
               send("tool_call.arguments.delta", {
                 id: ev.item?.id,
@@ -105,6 +133,7 @@ export async function POST(req: Request) {
               continue;
             }
 
+            // Tool-call completado (args cerrados)
             if (type === "response.function_call.completed") {
               send("tool_call.completed", {
                 id: ev.item?.id,
@@ -114,18 +143,20 @@ export async function POST(req: Request) {
               continue;
             }
 
+            // Respuesta completada
             if (type === "response.completed") {
               const text = ev.response?.output_text ?? "";
               send("done", { text }); // por si no hubo deltas
               continue;
             }
 
+            // Errores
             if (type === "response.error" || type === "error") {
               send("error", { message: ev.error?.message ?? String(ev) });
               continue;
             }
 
-            // Si sale algo no contemplado, lo ignoramos sin romper el stream
+            // Si aparece algo más, lo ignoramos sin romper
             // console.log("unhandled", type, ev);
           }
         } catch (e: any) {
