@@ -1,8 +1,9 @@
+// app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
 export const runtime = "edge"; // quítalo si prefieres Node
 
-// CORS sencillo (si todo corre en el mismo dominio, igual funciona)
+// CORS básico (si todo está en el mismo dominio, también funciona)
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": ALLOW_ORIGIN,
@@ -27,7 +28,7 @@ export async function POST(req: Request) {
     let body: any = {};
     try { body = await req.json(); } catch {}
 
-    // 1) Normaliza entrada (acepta {messages} o un string en message/input/prompt/text)
+    // 1) Normaliza entrada: acepta { messages } o un string suelto
     let msgs: UIMessage[] | undefined = body?.messages;
     if (!Array.isArray(msgs)) {
       const single = body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
@@ -45,19 +46,19 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Responses API (tu versión) → usa input con content parts de tipo "text"
+    // 2) Responses API (tu backend) → 'input' con content parts de tipo **input_text**
     const input = msgs.map((m) => ({
       role: m.role,
-      content: [{ type: "text" as const, text: String(m.content ?? "") }],
+      content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
     }));
 
-    // 3) Instrucciones (en Responses no se usa 'system' separado)
+    // 3) Instrucciones (en Responses no va 'system' por separado)
     const instructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
       "llama a la función upsert_itinerary con { partial: ... } usando claves meta, summary, flights, days, transports, extras y labels " +
-      "cuando aplique. Además responde con un texto breve y útil. Nunca borres datos existentes; sólo envía parciales.";
+      "cuando aplique. Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
 
-    // 4) Tools en formato NUEVO (name/description/parameters al tope)
+    // 4) Tools (formato NUEVO: name/description/parameters al nivel superior)
     const tools = [
       {
         type: "function",
@@ -82,11 +83,11 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 5) Crear stream: **usa input** (no messages) y content.type "text"
+    // 5) Crear stream con Responses API (usa **input**)
     const stream = await (openai.responses as any).stream({
       model: "gpt-4.1-mini",
-      input,            // 👈 aquí va el array [{ role, content:[{type:"text", text}]}]
-      instructions,     // 👈 reemplaza a 'system' en Responses
+      input,            // ← partes con { type: "input_text", text }
+      instructions,     // ← reemplaza a 'system'
       tools,
       tool_choice: "auto",
       stream: true,
@@ -94,7 +95,7 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
 
-    // 6) Reemitir SSE que tu front ya mapea
+    // 6) Reemitimos SSE que tu front ya entiende
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
