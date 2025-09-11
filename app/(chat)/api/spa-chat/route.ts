@@ -1,9 +1,8 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge"; // quítalo si prefieres Node runtime
+export const runtime = "edge";
 
-// --- CORS básico (si front y API están en el mismo dominio, funciona igual) ---
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": ALLOW_ORIGIN,
@@ -19,17 +18,16 @@ export async function OPTIONS() {
 
 type UIMessage = { role: "user" | "assistant" | "system"; content: string };
 
-// Bloque SSE
 function sseChunk(event: string, data: any) {
   return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
 }
 
 export async function POST(req: Request) {
   try {
-    // 1) Body robusto
     let body: any = {};
-    try { body = await req.json(); } catch { body = {}; }
+    try { body = await req.json(); } catch {}
 
+    // 1) Normaliza la entrada
     let msgs: UIMessage[] | undefined = body?.messages;
     if (!Array.isArray(msgs)) {
       const single =
@@ -48,7 +46,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Responses API usa 'input_text'
+    // 2) Responses API usa input_text
     const input = msgs.map((m) => ({
       role: m.role,
       content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
@@ -81,9 +79,9 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 4) Crea el stream con Responses API
+    // 4) Crear stream con Responses API
     const stream = await openai.responses.stream({
-      model: "gpt-4.1-mini", // cambia si quieres
+      model: "gpt-4.1-mini",
       input,
       tools,
       tool_choice: "auto",
@@ -96,7 +94,7 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
 
-    // 5) Reemitimos SSE exacto a lo que tu front ya mapea
+    // 5) Reemitir SSE en el formato que tu front espera
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
@@ -106,19 +104,16 @@ export async function POST(req: Request) {
           for await (const ev of stream as any) {
             const type = ev?.type as string;
 
-            // Meta
             if (type === "response.created") {
               send("meta", { threadId: ev.response?.id });
               continue;
             }
 
-            // Texto token a token
             if (type === "response.output_text.delta" || type === "response.refusal.delta") {
               send("delta", { value: ev.delta });
               continue;
             }
 
-            // Tool args (streaming)
             if (type === "response.function_call.arguments.delta") {
               send("tool_call.arguments.delta", {
                 id: ev.item?.id,
@@ -128,7 +123,6 @@ export async function POST(req: Request) {
               continue;
             }
 
-            // Tool args completos
             if (type === "response.function_call.completed") {
               send("tool_call.completed", {
                 id: ev.item?.id,
@@ -138,20 +132,16 @@ export async function POST(req: Request) {
               continue;
             }
 
-            // Final
             if (type === "response.completed") {
               const text = ev.response?.output_text ?? "";
               send("done", { text });
               continue;
             }
 
-            // Error
             if (type === "response.error" || type === "error") {
               send("error", { message: ev.error?.message ?? String(ev) });
               continue;
             }
-
-            // Ignora otros eventos sin romper
           }
         } catch (e: any) {
           send("error", { message: String(e?.message || e) });
