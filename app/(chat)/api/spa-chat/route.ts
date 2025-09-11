@@ -1,7 +1,7 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge";
+export const runtime = "edge"; // quítalo si prefieres Node runtime
 
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
@@ -27,11 +27,10 @@ export async function POST(req: Request) {
     let body: any = {};
     try { body = await req.json(); } catch {}
 
-    // 1) Normaliza la entrada
+    // 1) Normaliza entrada
     let msgs: UIMessage[] | undefined = body?.messages;
     if (!Array.isArray(msgs)) {
-      const single =
-        body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
+      const single = body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
       if (typeof single === "string" && single.trim()) {
         msgs = [{ role: "user", content: single.trim() }];
       }
@@ -52,7 +51,14 @@ export async function POST(req: Request) {
       content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
     }));
 
-    // 3) Tool (sin tipos del SDK para evitar broncas)
+    // 3) Instrucciones del asistente (ANTES teníamos 'system' → 400)
+    const instructions =
+      "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
+      "SIEMPRE llama a la función upsert_itinerary con { partial: ... } " +
+      "usando claves meta/summary/flights/days/transports/extras/labels. " +
+      "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
+
+    // 4) Tool (sin tipos del SDK para evitar broncas)
     const tools = [
       {
         type: "function",
@@ -79,22 +85,20 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 4) Crear stream con Responses API
+    // 5) Crea el stream (NOTA: usamos 'instructions' en lugar de 'system')
     const stream = await openai.responses.stream({
       model: "gpt-4.1-mini",
       input,
+      instructions,     // ← aquí está el fix
       tools,
       tool_choice: "auto",
       stream: true,
-      system:
-        "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
-        "SIEMPRE llama a upsert_itinerary con { partial: ... } (meta/summary/flights/days/etc). " +
-        "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.",
+      // modalities: ["text"], // opcional
     });
 
     const encoder = new TextEncoder();
 
-    // 5) Reemitir SSE en el formato que tu front espera
+    // 6) Reemitimos SSE que tu front ya mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
