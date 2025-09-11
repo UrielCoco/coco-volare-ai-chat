@@ -45,20 +45,20 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Responses API usa "input_text"
-    const input = msgs.map((m) => ({
+    // 2) Mapea a messages de Responses API (tu SDK pide type: "text")
+    const messagesPayload = msgs.map((m) => ({
       role: m.role,
-      content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
+      content: [{ type: "text" as const, text: String(m.content ?? "") }],
     }));
 
-    // 3) Instrucciones (NO uses 'system' con Responses)
+    // 3) Instrucciones (en Responses no va 'system' separado)
     const instructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
       "SIEMPRE llama a la función upsert_itinerary con { partial: ... } " +
       "usando claves meta, summary, flights, days, transports, extras y labels. " +
       "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
 
-    // 4) Tools — forma NUEVA: name/description/parameters al nivel superior
+    // 4) Tools en formato NUEVO (name/description/parameters al tope)
     const tools = [
       {
         type: "function",
@@ -84,19 +84,19 @@ export async function POST(req: Request) {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
     // 5) Stream de Responses API
-    const stream = await openai.responses.stream({
+    //    ⚠️ Nota: usamos 'messages' (no 'input') y castea a any para evitar choques de tipos entre versiones.
+    const stream = await (openai.responses as any).stream({
       model: "gpt-4.1-mini",
-      input,
-      instructions,       // ← en Responses, esto sustituye a 'system'
-      tools,              // ← forma nueva (evita el 400)
+      messages: messagesPayload as any,
+      instructions,
+      tools,
       tool_choice: "auto",
       stream: true,
-      // modalities: ["text"], // opcional
     });
 
     const encoder = new TextEncoder();
 
-    // 6) Reemitimos SSE en el formato que tu front ya lee
+    // 6) Reemitimos SSE en el formato que tu front ya mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
