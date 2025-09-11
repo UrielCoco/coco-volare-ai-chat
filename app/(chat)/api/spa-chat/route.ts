@@ -1,9 +1,8 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-//export const runtime = "edge"; // quítalo si prefieres Node
+export const runtime = "edge"; // quítalo si prefieres Node
 
-// CORS básico (si todo está en el mismo dominio, también funciona)
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": ALLOW_ORIGIN,
@@ -28,7 +27,7 @@ export async function POST(req: Request) {
     let body: any = {};
     try { body = await req.json(); } catch {}
 
-    // 1) Normaliza entrada: acepta { messages } o un string suelto
+    // 1) Normaliza entrada: { messages } o string en message/input/prompt/text
     let msgs: UIMessage[] | undefined = body?.messages;
     if (!Array.isArray(msgs)) {
       const single = body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
@@ -46,19 +45,40 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Responses API (tu backend) → 'input' con content parts de tipo **input_text**
-    const input = msgs.map((m) => ({
-      role: m.role,
-      content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
-    }));
-
-    // 3) Instrucciones (en Responses no va 'system' por separado)
-    const instructions =
+    // 2) Construye instructions (lo fijo + cualquier mensaje 'system')
+    const fixedInstructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
       "llama a la función upsert_itinerary con { partial: ... } usando claves meta, summary, flights, days, transports, extras y labels " +
       "cuando aplique. Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
 
-    // 4) Tools (formato NUEVO: name/description/parameters al nivel superior)
+    const systemNotes = msgs
+      .filter((m) => m.role === "system" && String(m.content ?? "").trim().length > 0)
+      .map((m) => m.content.trim())
+      .join("\n");
+
+    const instructions = systemNotes
+      ? `${fixedInstructions}\n\nNotas del sistema:\n${systemNotes}`
+      : fixedInstructions;
+// 3) Mapea a `input` para Responses con el type correcto por rol
+const input = msgs
+  .filter((m) => m.role !== "system" && String(m.content ?? "").trim().length > 0)
+  .map((m) => {
+    const text = String(m.content).trim();
+
+    // Importante: assistant -> output_text | user -> input_text
+    const contentPart =
+      m.role === "assistant"
+        ? ({ type: "output_text" as const, text })
+        : ({ type: "input_text" as const, text });
+
+    return {
+      role: m.role,               // "user" | "assistant"
+      content: [contentPart],     // <- aquí ya NO usamos 'as const' sobre variable
+    };
+  });
+
+
+    // 4) Tool (formato NUEVO)
     const tools = [
       {
         type: "function",
@@ -83,11 +103,11 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 5) Crear stream con Responses API (usa **input**)
+    // 5) Stream Responses API
     const stream = await (openai.responses as any).stream({
       model: "gpt-4.1-mini",
-      input,            // ← partes con { type: "input_text", text }
-      instructions,     // ← reemplaza a 'system'
+      input,            // 👈 ahora con types correctos por rol
+      instructions,     // 👈 reemplaza a 'system'
       tools,
       tool_choice: "auto",
       stream: true,
@@ -95,7 +115,7 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
 
-    // 6) Reemitimos SSE que tu front ya entiende
+    // 6) Reemitimos SSE que tu front mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
