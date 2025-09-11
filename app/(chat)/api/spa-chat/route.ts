@@ -1,7 +1,7 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge"; // quítalo si prefieres Node
+//export const runtime = "edge"; // quítalo si prefieres Node
 
 // CORS básico (si todo está en el mismo dominio, también funciona)
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
