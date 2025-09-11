@@ -1,7 +1,7 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge"; // quítalo si prefieres Node
+export const runtime = "edge"; // quítalo si quieres Node
 
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
@@ -45,20 +45,14 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Mapea a messages de Responses API (tu SDK pide type: "text")
-    const messagesPayload = msgs.map((m) => ({
-      role: m.role,
-      content: [{ type: "text" as const, text: String(m.content ?? "") }],
-    }));
-
-    // 3) Instrucciones (en Responses no va 'system' separado)
+    // 2) Instrucciones (en Responses NO va 'system')
     const instructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
       "SIEMPRE llama a la función upsert_itinerary con { partial: ... } " +
       "usando claves meta, summary, flights, days, transports, extras y labels. " +
       "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
 
-    // 4) Tools en formato NUEVO (name/description/parameters al tope)
+    // 3) Tools (formato NUEVO)
     const tools = [
       {
         type: "function",
@@ -83,20 +77,62 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 5) Stream de Responses API
-    //    ⚠️ Nota: usamos 'messages' (no 'input') y castea a any para evitar choques de tipos entre versiones.
-    const stream = await (openai.responses as any).stream({
-      model: "gpt-4.1-mini",
-      messages: messagesPayload as any,
-      instructions,
-      tools,
-      tool_choice: "auto",
-      stream: true,
-    });
+    // Helpers para armar 'input' en sus variantes
+    const asInputWith = (partType: "input_text" | "text") =>
+      msgs!.map((m) => ({
+        role: m.role,
+        content: [{ type: partType, text: String(m.content ?? "") }],
+      }));
 
+    const asSingleString = () =>
+      msgs!.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
+
+    // 4) Intenta crear el stream con 'input_text' → fallback a 'text' → fallback a string
+    async function createStream() {
+      try {
+        // Variante A: parts con input_text
+        return await (openai.responses as any).stream({
+          model: "gpt-4.1-mini",
+          input: asInputWith("input_text"),
+          instructions,
+          tools,
+          tool_choice: "auto",
+          stream: true,
+        });
+      } catch (e: any) {
+        const msg = (e?.message || "").toString();
+        // Si se queja de 'input_text', probamos 'text'
+        if (msg.includes("input_text") || msg.includes("Invalid value") || msg.includes("Supported values")) {
+          try {
+            return await (openai.responses as any).stream({
+              model: "gpt-4.1-mini",
+              input: asInputWith("text"),
+              instructions,
+              tools,
+              tool_choice: "auto",
+              stream: true,
+            });
+          } catch (e2: any) {
+            // Último fallback: input como string concatenado
+            return await (openai.responses as any).stream({
+              model: "gpt-4.1-mini",
+              input: asSingleString(),
+              instructions,
+              tools,
+              tool_choice: "auto",
+              stream: true,
+            });
+          }
+        }
+        // Si fue otro error, re-lanza
+        throw e;
+      }
+    }
+
+    const stream = await createStream();
     const encoder = new TextEncoder();
 
-    // 6) Reemitimos SSE en el formato que tu front ya mapea
+    // 5) Reemitimos SSE en el formato que tu front ya mapea
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
@@ -110,12 +146,10 @@ export async function POST(req: Request) {
               send("meta", { threadId: ev.response?.id });
               continue;
             }
-
             if (type === "response.output_text.delta" || type === "response.refusal.delta") {
               send("delta", { value: ev.delta });
               continue;
             }
-
             if (type === "response.function_call.arguments.delta") {
               send("tool_call.arguments.delta", {
                 id: ev.item?.id,
@@ -124,7 +158,6 @@ export async function POST(req: Request) {
               });
               continue;
             }
-
             if (type === "response.function_call.completed") {
               send("tool_call.completed", {
                 id: ev.item?.id,
@@ -133,13 +166,11 @@ export async function POST(req: Request) {
               });
               continue;
             }
-
             if (type === "response.completed") {
               const text = ev.response?.output_text ?? "";
               send("done", { text });
               continue;
             }
-
             if (type === "response.error" || type === "error") {
               send("error", { message: ev.error?.message ?? String(ev) });
               continue;
