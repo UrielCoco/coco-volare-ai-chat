@@ -1,7 +1,7 @@
 // app/api/spa-chat/route.ts
 import OpenAI from "openai";
 
-export const runtime = "edge"; // quítalo si prefieres Node runtime
+export const runtime = "edge"; // quítalo si prefieres Node
 
 const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 const corsHeaders: Record<string, string> = {
@@ -45,52 +45,50 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Responses API usa input_text
+    // 2) Responses API usa "input_text"
     const input = msgs.map((m) => ({
       role: m.role,
       content: [{ type: "input_text" as const, text: String(m.content ?? "") }],
     }));
 
-    // 3) Instrucciones del asistente (ANTES teníamos 'system' → 400)
+    // 3) Instrucciones (NO uses 'system' con Responses)
     const instructions =
       "Eres Coco Volare Intelligence. Cuando el usuario comparta detalles de viaje, " +
       "SIEMPRE llama a la función upsert_itinerary con { partial: ... } " +
-      "usando claves meta/summary/flights/days/transports/extras/labels. " +
+      "usando claves meta, summary, flights, days, transports, extras y labels. " +
       "Además responde con un texto breve y útil. Nunca borres datos existentes; solo envía parciales.";
 
-    // 4) Tool (sin tipos del SDK para evitar broncas)
+    // 4) Tools — forma NUEVA: name/description/parameters al nivel superior
     const tools = [
       {
         type: "function",
-        function: {
-          name: "upsert_itinerary",
-          description:
-            "Actualiza (merge) el itinerario de la UI con un objeto parcial. Nunca borres campos existentes.",
-          parameters: {
-            type: "object",
-            additionalProperties: true,
-            properties: {
-              partial: {
-                type: "object",
-                description:
-                  "Partial<Itinerary> con meta/summary/flights/days/transports/extras/labels",
-                additionalProperties: true,
-              },
+        name: "upsert_itinerary",
+        description:
+          "Actualiza (merge) el itinerario de la UI con un objeto parcial. Nunca borres campos existentes.",
+        parameters: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            partial: {
+              type: "object",
+              description:
+                "Partial<Itinerary> con meta/summary/flights/days/transports/extras/labels",
+              additionalProperties: true,
             },
-            required: ["partial"],
           },
+          required: ["partial"],
         },
       },
     ] as any;
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // 5) Crea el stream (NOTA: usamos 'instructions' en lugar de 'system')
+    // 5) Stream de Responses API
     const stream = await openai.responses.stream({
       model: "gpt-4.1-mini",
       input,
-      instructions,     // ← aquí está el fix
-      tools,
+      instructions,       // ← en Responses, esto sustituye a 'system'
+      tools,              // ← forma nueva (evita el 400)
       tool_choice: "auto",
       stream: true,
       // modalities: ["text"], // opcional
@@ -98,7 +96,7 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
 
-    // 6) Reemitimos SSE que tu front ya mapea
+    // 6) Reemitimos SSE en el formato que tu front ya lee
     const rs = new ReadableStream({
       async start(controller) {
         const send = (event: string, data: any) =>
@@ -131,7 +129,7 @@ export async function POST(req: Request) {
               send("tool_call.completed", {
                 id: ev.item?.id,
                 name: ev.item?.name,
-                arguments: ev.item?.arguments, // string JSON
+                arguments: ev.item?.arguments, // JSON string
               });
               continue;
             }
