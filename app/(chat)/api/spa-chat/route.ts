@@ -3,7 +3,7 @@
 import type { NextRequest } from 'next/server'
 import OpenAI from 'openai'
 
-export const runtime = 'nodejs'          // Node: listeners estables
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
@@ -16,11 +16,43 @@ const enc = new TextEncoder()
 const LOG_FULL = process.env.LOG_FULL_EVENTS === '1'
 const LOG_TOOL_ARGS = process.env.LOG_TOOL_ARGS === '1'
 const DIAG_ALWAYS = process.env.CHAT_DIAGNOSTIC_MODE === '1'
+const IGNORE_WS_DELTAS = (process.env.IGNORE_WS_DELTAS ?? '1') !== '0'
+
+const onlyWs = (s?: string) => !s || /^\s+$/.test(s)
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+const tid = () => Math.random().toString(36).slice(2) + '-' + Date.now().toString(36)
 
 function sse(controller: Ctl, event: string, data: any) {
   controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
 }
-function tid() { return Math.random().toString(36).slice(2) + '-' + Date.now().toString(36) }
+
+/* ---------------------- SDK compatibility helpers (as any) ---------------------- */
+const runsApi = () => (openai.beta.threads.runs as any)
+
+async function runsListNewest(threadId: string) {
+  const api = runsApi()
+  try { return await api.list(threadId, { order: 'desc', limit: 1 }) } catch {}
+  try { return await api.list({ thread_id: threadId, order: 'desc', limit: 1 }) } catch {}
+  return { data: [] }
+}
+async function runRetrieve(threadId: string, runId: string) {
+  const api = runsApi()
+  try { return await api.retrieve(threadId, runId) } catch {}
+  try { return await api.retrieve(threadId, { run_id: runId }) } catch {}
+  try { return await api.retrieve({ thread_id: threadId, run_id: runId }) } catch {}
+  // último intento “ciegas”
+  return await (openai.beta.threads.runs as any).retrieve(threadId as any, runId as any)
+}
+async function submitToolOutputsCompat(threadId: string, runId: string, tool_outputs: any[]) {
+  const api = runsApi()
+  if (typeof api.submitToolOutputsStream === 'function') {
+    const resumed = await api.submitToolOutputsStream(threadId, runId, { tool_outputs } as any)
+    return { resumed, streaming: true }
+  }
+  await api.submitToolOutputs(threadId, runId, { tool_outputs } as any)
+  return { resumed: null, streaming: false }
+}
+/* -------------------------------------------------------------------------------- */
 
 function textFrom(ev: any): string | null {
   if (!ev) return null
@@ -41,6 +73,10 @@ function textFrom(ev: any): string | null {
   return null
 }
 const toolDeltaFrom = (ev: any) => {
+  const maybeTool =
+    ev?.type?.includes('tool') || ev?.name || ev?.function?.name || ev?.tool_call_id || ev?.id ||
+    ev?.arguments || ev?.args || ev?.function?.arguments
+  if (!maybeTool) return null
   const id = ev?.id ?? ev?.tool_call_id ?? 'tc'
   const name = ev?.name ?? ev?.function?.name
   const delta =
@@ -49,7 +85,7 @@ const toolDeltaFrom = (ev: any) => {
     typeof ev?.arguments === 'string' ? ev.arguments :
     typeof ev?.arguments?.delta === 'string' ? ev.arguments.delta :
     typeof ev?.function?.arguments === 'string' ? ev.function.arguments : ''
-  return delta ? { id, name, delta } : null
+  return delta !== '' ? { id, name, delta } : null
 }
 const toolFullFrom = (ev: any) => {
   const id = ev?.id ?? ev?.tool_call_id ?? 'tc'
@@ -58,10 +94,8 @@ const toolFullFrom = (ev: any) => {
     typeof ev?.args === 'string' ? ev.args :
     typeof ev?.arguments === 'string' ? ev.arguments :
     typeof ev?.function?.arguments === 'string' ? ev.function.arguments : ''
-  return args ? { id, name, args } : null
+  return args !== '' ? { id, name, args } : null
 }
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 export async function POST(req: NextRequest) {
   if (!process.env.OPENAI_API_KEY) return new Response('Falta OPENAI_API_KEY', { status: 500 })
@@ -83,12 +117,15 @@ export async function POST(req: NextRequest) {
     'x-trace-id': traceId,
   })
 
+  let lastRunId: string | undefined
+  let threadId: string | undefined
+
   const stream = new ReadableStream({
     start: async (controller) => {
       const log = (msg: string, extra?: any) => {
         const entry = { traceId, msg, ...(extra || {}) }
-        console.log('[spa-chat]', entry)           // Logs en Vercel
-        if (DIAG) sse(controller, 'debug', entry)  // y por SSE si quieres verlos en el cliente
+        console.log('[spa-chat]', entry)
+        if (DIAG) sse(controller, 'debug', entry)
       }
 
       const stats = {
@@ -103,26 +140,33 @@ export async function POST(req: NextRequest) {
       }
       const toolBuf: Record<string, { name?: string; args: string }> = {}
 
-      async function attachListeners(runStream: any, threadId: string) {
-        // Texto
+      async function attach(runStream: any) {
+        runStream.on?.('runCreated', (ev: any) => { lastRunId = ev?.data?.id ?? ev?.id })
+        runStream.on?.('runQueued',  (ev: any) => { lastRunId = ev?.data?.id ?? ev?.id })
+        runStream.on?.('runInProgress',(ev:any)=> { lastRunId = ev?.data?.id ?? ev?.id })
+
         runStream.on?.('textDelta', (ev: any) => {
           const txt = textFrom(ev)
           if (LOG_FULL) console.log('[spa-chat:event textDelta]', { traceId, ev })
-          if (txt) { stats.deltaCount++; stats.deltaChars += txt.length; sse(controller, 'delta', { value: txt }) }
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'textDelta', textLen: txt?.length ?? 0 })
+          if (txt && !(IGNORE_WS_DELTAS && onlyWs(txt))) {
+            stats.deltaCount++; stats.deltaChars += txt.length
+            sse(controller, 'delta', { value: txt })
+          }
         })
         runStream.on?.('messageDelta', (ev: any) => {
           const txt = textFrom(ev)
           if (LOG_FULL) console.log('[spa-chat:event messageDelta]', { traceId, ev })
-          if (txt) { stats.deltaCount++; stats.deltaChars += txt.length; sse(controller, 'delta', { value: txt }) }
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'messageDelta', textLen: txt?.length ?? 0 })
+          if (txt && !(IGNORE_WS_DELTAS && onlyWs(txt))) {
+            stats.deltaCount++; stats.deltaChars += txt.length
+            sse(controller, 'delta', { value: txt })
+          }
         })
 
-        // Tool delta
         runStream.on?.('toolCallDelta', (ev: any) => {
-          const t = toolDeltaFrom(ev)
           if (LOG_FULL) console.log('[spa-chat:event toolCallDelta]', { traceId, ev })
-          if (!t) { if (DIAG) sse(controller, 'debug', { traceId, type: 'toolCallDelta', note: 'no-delta' }); return }
+          const t = toolDeltaFrom(ev)
+          if (!t) return
+          if (IGNORE_WS_DELTAS && onlyWs(t.delta)) return
           const b = (toolBuf[t.id] ||= { name: t.name, args: '' })
           if (t.name && !b.name) b.name = t.name
           b.args += t.delta
@@ -130,10 +174,9 @@ export async function POST(req: NextRequest) {
           sse(controller, 'tool_call.arguments.delta', { id: t.id, name: b.name, arguments: { delta: t.delta } })
         })
 
-        // Tool full
         runStream.on?.('toolCallCompleted', (ev: any) => {
-          const full = toolFullFrom(ev)
           if (LOG_FULL) console.log('[spa-chat:event toolCallCompleted]', { traceId, ev })
+          const full = toolFullFrom(ev)
           if (full) {
             stats.toolCompletedCount++; stats.toolCompletedBytes += full.args.length
             if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args]', { traceId, id: full.id, name: full.name, args: full.args })
@@ -141,7 +184,7 @@ export async function POST(req: NextRequest) {
           } else {
             const id = ev?.id ?? ev?.tool_call_id ?? 'tc'
             const b = toolBuf[id]
-            if (b?.args) {
+            if (b?.args && !(IGNORE_WS_DELTAS && onlyWs(b.args))) {
               stats.toolCompletedCount++; stats.toolCompletedBytes += b.args.length
               if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (buffer)]', { traceId, id, name: b.name, args: b.args })
               sse(controller, 'tool_call.completed', { id, name: b.name, arguments: b.args })
@@ -149,15 +192,13 @@ export async function POST(req: NextRequest) {
           }
         })
 
-        // requires_action → emite completed + reanuda el run (stream si existe, fallback sin stream)
         runStream.on?.('requires_action', async (ev: any) => {
-          const runId = ev?.data?.id ?? ev?.run_id ?? ev?.id
-          const calls = ev?.data?.required_action?.submit_tool_outputs?.tool_calls
+          const runId = ev?.data?.id ?? ev?.run_id ?? ev?.id ?? lastRunId
+          const calls =
+            ev?.data?.required_action?.submit_tool_outputs?.tool_calls
             ?? ev?.required_action?.submit_tool_outputs?.tool_calls
             ?? ev?.tool_calls
             ?? []
-
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'requires_action', toolCalls: calls?.length ?? 0 })
 
           const outputs: Array<{ tool_call_id: string; output: string }> = []
           for (const c of calls) {
@@ -166,48 +207,35 @@ export async function POST(req: NextRequest) {
             const args =
               typeof c?.function?.arguments === 'string' ? c.function.arguments :
               typeof c?.arguments === 'string' ? c.arguments : ''
+            const bufArgs = toolBuf[id]?.args
+            const finalArgs = args || bufArgs || ''
 
-            // manda al cliente el JSON COMPLETO para que tu SPA lo mergee
-            if (args) {
-              stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
-              if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (requires_action)]', { traceId, id, name, args })
-              sse(controller, 'tool_call.completed', { id, name, arguments: args })
-            } else {
-              const b = toolBuf[id]
-              if (b?.args) {
-                stats.toolCompletedCount++; stats.toolCompletedBytes += b.args.length
-                if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (buffer|requires_action)]', { traceId, id, name: b.name, args: b.args })
-                sse(controller, 'tool_call.completed', { id, name: b.name, arguments: b.args })
-              }
+            if (finalArgs && !(IGNORE_WS_DELTAS && onlyWs(finalArgs))) {
+              stats.toolCompletedCount++; stats.toolCompletedBytes += finalArgs.length
+              if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (requires_action)]', { traceId, id, name, args: finalArgs })
+              sse(controller, 'tool_call.completed', { id, name, arguments: finalArgs })
             }
 
-            // responde dummy para reanudar
             outputs.push({ tool_call_id: id, output: JSON.stringify({ status: 'applied' }) })
           }
 
-          if (outputs.length) {
-            const runsAny = (openai.beta.threads.runs as any)
-
-            if (typeof runsAny.submitToolOutputsStream === 'function') {
-              // ✅ SDK nuevo con stream
-              const resumed: any = await runsAny.submitToolOutputsStream(threadId, runId, { tool_outputs: outputs } as any)
-              await attachListeners(resumed, threadId)
-              try { for await (const _ of resumed as AsyncIterable<any>) { /* drain */ } } catch {/* ignore */}
+          if (outputs.length && runId && threadId) {
+            const { resumed, streaming } = await submitToolOutputsCompat(threadId, runId, outputs)
+            if (streaming && resumed) {
+              await attach(resumed)
+              try { for await (const _ of resumed as AsyncIterable<any>) { /* drain */ } } catch {}
             } else {
-              // ♻️ SDK viejo: sin stream → submit + polling
-              await openai.beta.threads.runs.submitToolOutputs(threadId, runId, { tool_outputs: outputs } as any)
-              // Poll hasta que termine (o falle/expire)
-              while (true) {
-                const run = await openai.beta.threads.runs.retrieve(threadId, runId)
-                const st = run.status as string
-                if (['completed', 'cancelled', 'failed', 'expired'].includes(st)) break
-                await sleep(800)
+              // poll hasta terminar
+              let tries = 0
+              while (tries++ < 60) {
+                const run = await runRetrieve(threadId, runId)
+                if (['completed', 'cancelled', 'failed', 'expired'].includes(run.status as string)) break
+                await sleep(900)
               }
             }
           }
         })
 
-        // Errores
         runStream.on?.('error', (err: any) => {
           console.error('[assistants stream error]', { traceId, err })
           sse(controller, 'error', { traceId, message: String(err) })
@@ -215,39 +243,64 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        log('start', { assistantId: ASSISTANT_ID, messagesCount: messages.length, lastPreview: lastUser.slice(0, 160) })
+        // inicio
+        console.log('[spa-chat]', { traceId, msg: 'start', assistantId: ASSISTANT_ID, messagesCount: messages.length, lastPreview: lastUser.slice(0,160) })
         sse(controller, 'response.start', { traceId, message: lastUser })
 
-        // 1) Thread + historial
+        // thread + historial
         const thread = await openai.beta.threads.create()
-        log('thread.created', { threadId: thread.id })
+        threadId = thread.id
+        console.log('[spa-chat]', { traceId, msg: 'thread.created', threadId })
         for (const m of messages) {
-          await openai.beta.threads.messages.create(thread.id, {
-            role: m.role === 'assistant' ? 'assistant' : 'user',
-            content: m.content,
-          })
+          await openai.beta.threads.messages.create(thread.id, { role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })
         }
-        log('messages.loaded', { count: messages.length })
+        console.log('[spa-chat]', { traceId, msg: 'messages.loaded', count: messages.length })
 
-        // 2) Run + streaming
+        // run
         const runStream: any = await openai.beta.threads.runs.stream(thread.id, {
           assistant_id: ASSISTANT_ID,
           stream: true,
           tool_choice: 'auto',
         })
-        log('run.started')
+        console.log('[spa-chat]', { traceId, msg: 'run.started' })
+        await attach(runStream)
 
-        await attachListeners(runStream, thread.id)
-
-        // drenar stream principal (algunos runtimes no emiten si no iteras)
+        // drenar
         try { for await (const _ of runStream as AsyncIterable<any>) { /* drain */ } } catch (iterErr: any) {
           console.error('[spa-chat:iterate error]', { traceId, iterErr })
         }
 
-        // cierre
-        const statsEnd = { ...stats, endAt: Date.now() }
-        console.log('[spa-chat]', { traceId, msg: 'run.end', durationMs: statsEnd.endAt - statsEnd.startAt, stats: statsEnd })
-        if (DIAG) sse(controller, 'debug', { traceId, summary: statsEnd })
+        // rescate final: si no vimos completed, revisa el run
+        try {
+          let runId = lastRunId
+          if (!runId && threadId) {
+            const list = await runsListNewest(threadId)
+            runId = list?.data?.[0]?.id
+          }
+          if (runId && threadId) {
+            const run = await runRetrieve(threadId, runId)
+            if (run.status === 'requires_action') {
+              const calls = (run.required_action as any)?.submit_tool_outputs?.tool_calls ?? []
+              for (const c of calls) {
+                const id = c?.id ?? c?.tool_call_id ?? 'tc'
+                const name = c?.function?.name ?? c?.name
+                const args = typeof c?.function?.arguments === 'string' ? c.function.arguments : ''
+                if (args && !(IGNORE_WS_DELTAS && onlyWs(args))) {
+                  stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
+                  if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (rescue.run)]', { traceId, id, name, args })
+                  sse(controller, 'tool_call.completed', { id, name, arguments: args })
+                }
+              }
+            }
+          }
+        } catch (rescueErr) {
+          console.error('[spa-chat:rescue error]', { traceId, rescueErr })
+        }
+
+        // fin
+        stats.endAt = Date.now()
+        console.log('[spa-chat]', { traceId, msg: 'run.end', durationMs: stats.endAt - stats.startAt, stats })
+        if (DIAG) sse(controller, 'debug', { traceId, summary: stats })
         sse(controller, 'done', { text: '' })
         controller.close()
       } catch (err: any) {
