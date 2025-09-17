@@ -1,226 +1,110 @@
+// /app/api/spa-chat/route.ts
+/* eslint-disable no-console */
 import OpenAI from "openai";
+import type { NextRequest } from "next/server";
 
-export const runtime = "edge"; // quítalo si prefieres Node
+export const runtime = "edge";          // Edge runtime = Web Streams (sin @types/node)
+export const dynamic = "force-dynamic"; // evita cache en Vercel/Next
 
-const ALLOW_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
-const corsHeaders: Record<string, string> = {
-  "Access-Control-Allow-Origin": ALLOW_ORIGIN,
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Access-Control-Allow-Credentials": "true",
-  Vary: "Origin",
-};
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!; // ← tienes esta var en Vercel
 
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: corsHeaders });
+// Helper SSE
+const enc = new TextEncoder();
+function send(controller: ReadableStreamDefaultController, event: string, data: any) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  controller.enqueue(enc.encode(payload));
 }
 
-type UIMessage = { role: "user" | "assistant" | "system"; content: string };
-
-function sseChunk(event: string, data: any) {
-  return `event: ${event}\n` + `data: ${JSON.stringify(data)}\n\n`;
-}
-
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    let body: any = {};
-    try { body = await req.json(); } catch {}
+    const body = (await req.json().catch(() => ({}))) as {
+      messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+    };
 
-    // 1) Normaliza entrada
-    let msgs: UIMessage[] | undefined = body?.messages;
-    if (!Array.isArray(msgs)) {
-      const single = body?.message ?? body?.input ?? body?.prompt ?? body?.text ?? null;
-      if (typeof single === "string" && single.trim()) {
-        msgs = [{ role: "user", content: single.trim() }];
-      }
-    }
-    if (!Array.isArray(msgs) || msgs.length === 0) {
-      return new Response(
-        JSON.stringify({
-          error:
-            "Bad Request: envía { messages: Array<{role, content}> } o un string en 'message'/'input'/'prompt'.",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
+    const messages = body.messages ?? [];
+    if (!ASSISTANT_ID) {
+      return new Response("Missing OPENAI_ASSISTANT_ID", { status: 500 });
     }
 
-    // 2) Instructions (fijas + cualquier mensaje 'system')
-    const fixedInstructions =
-      "Eres Coco Volare Intelligence. Responde siempre en español, breve y claro. " +
-      "Cuando el usuario comparta detalles de viaje, llama a la función upsert_itinerary con { partial: ... } " +
-      "usando claves meta, summary, flights, days, transports, extras y labels. " +
-      "No borres datos existentes; sólo mergea. Después de emitir la tool, da una confirmación corta tipo: 'Listo, actualicé el itinerario de la derecha.'";
-
-    const systemNotes = msgs
-      .filter((m) => m.role === "system" && String(m.content ?? "").trim())
-      .map((m) => m.content.trim())
-      .join("\n");
-
-    const instructions = systemNotes
-      ? `${fixedInstructions}\n\nNotas del sistema:\n${systemNotes}`
-      : fixedInstructions;
-
-    // 3) input → usa input_text/output_text según el rol
-    type PartType = "input_text" | "output_text";
-    const input = msgs
-      .filter((m) => m.role !== "system" && String(m.content ?? "").trim().length > 0)
-      .map((m) => {
-        const text = String(m.content).trim();
-        const type: PartType = m.role === "assistant" ? "output_text" : "input_text";
-        return { role: m.role, content: [{ type, text }] };
-      });
-
-    // 4) Tools (formato NUEVO)
-    const tools = [
-      {
-        type: "function",
-        name: "upsert_itinerary",
-        description:
-          "Actualiza (merge) el itinerario de la UI con un objeto parcial. Nunca borres campos existentes.",
-        parameters: {
-          type: "object",
-          additionalProperties: true,
-          properties: {
-            partial: {
-              type: "object",
-              description:
-                "Partial<Itinerary> con meta/summary/flights/days/transports/extras/labels",
-              additionalProperties: true,
-            },
-          },
-          required: ["partial"],
-        },
-      },
-    ] as any;
-
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-
-    // 5) Stream con Responses API
-    const stream = await (openai.responses as any).stream({
-      model: "gpt-4.1-mini",
-      input,
-      instructions,
-      tools,
-      tool_choice: "auto",
-      stream: true,
-      max_output_tokens: 1200,
-    });
-
-    const encoder = new TextEncoder();
-
-    // Banderas para fallback
-    let hasText = false;
-    let hasTool = false;
-
-    const rs = new ReadableStream({
-      async start(controller) {
-        const send = (event: string, data: any) =>
-          controller.enqueue(encoder.encode(sseChunk(event, data)));
-
+    const stream = new ReadableStream({
+      start: async (controller) => {
         try {
-          for await (const ev of stream as any) {
-            const type = ev?.type as string;
+          // 1) Crea thread y envía TODO el historial que venga del front
+          const thread = await openai.beta.threads.create();
 
-            // --- Texto token a token
-            if (type === "response.output_text.delta") {
-              hasText = true;
-              send("delta", { value: ev.delta });
-              continue;
-            }
-            if (type === "response.refusal.delta") {
-              hasText = true;
-              send("delta", { value: ev.delta });
-              continue;
-            }
-
-            // --- Tool (args delta y completed)
-            if (type === "response.function_call.arguments.delta") {
-              hasTool = true;
-              send("tool_call.arguments.delta", {
-                id: ev.item?.id,
-                name: ev.item?.name,
-                arguments: { delta: ev.delta },
-              });
-              continue;
-            }
-            if (type === "response.function_call.completed") {
-              hasTool = true;
-              send("tool_call.completed", {
-                id: ev.item?.id,
-                name: ev.item?.name,
-                arguments: ev.item?.arguments, // JSON string
-              });
-              continue;
-            }
-
-            // --- Meta/created/done/error + debug
-            if (type === "response.created") {
-              send("meta", { threadId: ev.response?.id });
-              continue;
-            }
-            if (type === "response.completed") {
-              // Puede no haber texto si sólo hubo tool; 'output_text' puede venir vacío
-              const text = ev.response?.output_text ?? "";
-              // No forzamos hasText=true aquí; dejamos que flags decidan fallback
-              send("done", { text });
-              continue;
-            }
-            if (type === "response.error" || type === "error") {
-              send("error", { message: ev.error?.message ?? String(ev) });
-              continue;
-            }
-
-            // --- Cubre otros tipos (multi-item, added/done, etc.) para depurar
-            send("debug", { type, ev });
+          // Importante: solo agregamos mensajes de usuario/assistant; los system no aplican en threads
+          for (const m of messages) {
+            const role = m.role === "assistant" ? "assistant" : "user";
+            await openai.beta.threads.messages.create(thread.id, {
+              role,
+              content: m.content,
+            });
           }
-        } catch (e: any) {
-          send("error", { message: String(e?.message || e) });
-        } finally {
-          // Fallback: si no hubo ni texto ni tool, hacemos una respuesta corta no-stream
-          if (!hasText && !hasTool) {
-            try {
-              const short = await (openai.responses as any).create({
-                model: "gpt-4.1-mini",
-                input: [
-                  {
-                    role: "user",
-                    content: [
-                      {
-                        type: "input_text",
-                        text:
-                          "Genera una confirmación breve en español (1 línea) diciendo que leíste la solicitud y que empezarás a armar el itinerario. No uses viñetas.",
-                      },
-                    ],
-                  },
-                ],
-                instructions,
-                max_output_tokens: 60,
-              });
-              const txt = short?.output_text ?? "Listo, comencé a procesar tu solicitud.";
-              send("delta", { value: txt });
-              send("done", { text: txt });
-            } catch {
-              send("delta", { value: "Listo, comencé a procesar tu solicitud." });
-              send("done", { text: "Listo, comencé a procesar tu solicitud." });
-            }
-          }
-          controller.close();
+
+          // 2) Lanza el run del Assistant con streaming de eventos
+          const runStream: any = await openai.beta.threads.runs.stream(thread.id, {
+            assistant_id: ASSISTANT_ID,
+            stream: true,
+            tool_choice: "auto",
+          });
+
+          // Texto delta (lo que tu hook mapea a 'delta')
+          runStream.on("textDelta", (e: any) => {
+            // e.value es el chunk
+            send(controller, "delta", { value: e?.value ?? "" });
+          });
+
+          // Tool calls: argumentos parciales (tu hook espera 'tool_call.arguments.delta')
+          runStream.on("toolCallDelta", (e: any) => {
+            // e.id, e.name, e.delta (string incremental)
+            send(controller, "tool_call.arguments.delta", {
+              id: e?.id ?? "tc",
+              name: e?.name,
+              arguments: { delta: e?.delta ?? "" },
+            });
+          });
+
+          // Tool calls: completado con args totales (tu hook espera 'tool_call.completed')
+          runStream.on("toolCallCompleted", (e: any) => {
+            // e.id, e.name, e.args (string completo con el JSON)
+            send(controller, "tool_call.completed", {
+              id: e?.id ?? "tc",
+              name: e?.name,
+              arguments: typeof e?.args === "string" ? e.args : "",
+            });
+          });
+
+          // Fin de stream
+          runStream.on("end", () => {
+            send(controller, "done", { text: "" });
+            controller.close();
+          });
+
+          // Errores
+          runStream.on("error", (err: any) => {
+            console.error("[assistants stream error]", err);
+            send(controller, "error", { message: String(err), err });
+            try { controller.close(); } catch {}
+          });
+        } catch (err: any) {
+          console.error("[route error]", err);
+          send(controller, "error", { message: String(err), err });
+          try { controller.close(); } catch {}
         }
       },
     });
 
-    return new Response(rs, {
+    return new Response(stream, {
+      status: 200,
       headers: {
-        ...corsHeaders,
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
       },
     });
-  } catch (err: any) {
-    return new Response(
-      JSON.stringify({ error: String(err?.message || err) }),
-      { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
-    );
+  } catch (e: any) {
+    return new Response(`Bad Request: ${e?.message || e}`, { status: 400 });
   }
 }
