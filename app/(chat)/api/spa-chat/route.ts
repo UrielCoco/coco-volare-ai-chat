@@ -3,7 +3,7 @@
 import type { NextRequest } from 'next/server'
 import OpenAI from 'openai'
 
-export const runtime = 'edge'
+export const runtime = 'nodejs'          // ✅ Node runtime (listeners estables)
 export const dynamic = 'force-dynamic'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
@@ -18,15 +18,14 @@ function sse(controller: Ctl, event: string, data: any) {
 }
 function tid() { return Math.random().toString(36).slice(2) + '-' + Date.now().toString(36) }
 
-// -------- extractors súper tolerantes (varias versiones del SDK) --------
 function extractText(ev: any): string | null {
   if (!ev) return null
-  if (typeof ev.value === 'string') return ev.value                     // textDelta
-  if (typeof ev.delta === 'string') return ev.delta                     // algunas libs
-  if (typeof ev.textDelta === 'string') return ev.textDelta             // vercel ai sdk
+  if (typeof ev.value === 'string') return ev.value
+  if (typeof ev.delta === 'string') return ev.delta
+  if (typeof ev.textDelta === 'string') return ev.textDelta
   if (typeof ev.content === 'string') return ev.content
   if (typeof ev.answer === 'string') return ev.answer
-  if (typeof ev?.delta?.text === 'string') return ev.delta.text         // response.delta
+  if (typeof ev?.delta?.text === 'string') return ev.delta.text
   const arr = ev?.delta?.content
   if (Array.isArray(arr)) {
     for (const c of arr) {
@@ -62,193 +61,201 @@ function extractToolFull(ev: any): { id: string; name?: string; args: string } |
   return { id, name, args }
 }
 
-// --------- ROUTE ---------
 export async function POST(req: NextRequest) {
-  if (!process.env.OPENAI_API_KEY) return new Response('Falta OPENAI_API_KEY', { status: 500 })
-  if (!ASSISTANT_ID) return new Response('Falta OPENAI_ASSISTANT_ID', { status: 500 })
+  try {
+    if (!process.env.OPENAI_API_KEY) return new Response('Falta OPENAI_API_KEY', { status: 500 })
+    if (!ASSISTANT_ID) return new Response('Falta OPENAI_ASSISTANT_ID', { status: 500 })
 
-  const url = new URL(req.url)
-  const DIAG = url.searchParams.get('diag') === '1' || process.env.CHAT_DIAGNOSTIC_MODE === '1'
-  const LOG_FULL = process.env.LOG_FULL_EVENTS === '1'
-  const traceId = tid()
+    const url = new URL(req.url)
+    const DIAG = url.searchParams.get('diag') === '1' || process.env.CHAT_DIAGNOSTIC_MODE === '1'
+    const LOG_FULL = process.env.LOG_FULL_EVENTS === '1'
+    const traceId = tid()
 
-  const body = await req.json().catch(() => ({} as { messages?: ChatMsg[] }))
-  const messages = (body?.messages ?? []) as ChatMsg[]
-  const lastUser = messages.filter(m => m.role === 'user').at(-1)?.content ?? ''
+    const body = await req.json().catch(() => ({} as { messages?: ChatMsg[] }))
+    const messages = (body?.messages ?? []) as ChatMsg[]
+    const lastUser = messages.filter(m => m.role === 'user').at(-1)?.content ?? ''
 
-  const stream = new ReadableStream({
-    start: async (controller) => {
-      const log = (msg: string, extra?: any) => {
-        const entry = { traceId, msg, ...(extra || {}) }
-        console.log('[spa-chat]', entry)               // visible en Vercel
-        if (DIAG) sse(controller, 'debug', entry)      // y también por SSE si activas diag
-      }
-
-      const stats = {
-        startAt: Date.now(),
-        endAt: 0,
-        deltaCount: 0,
-        deltaChars: 0,
-        toolDeltaCount: 0,
-        toolDeltaBytes: 0,
-        toolCompletedCount: 0,
-        toolCompletedBytes: 0,
-      }
-
-      try {
-        log('start', { assistantId: ASSISTANT_ID, messagesCount: messages.length, lastPreview: lastUser.slice(0, 160) })
-        sse(controller, 'response.start', { traceId, message: lastUser })
-
-        // 1) Thread y mensajes (user/assistant)
-        const thread = await openai.beta.threads.create()
-        log('thread.created', { threadId: thread.id })
-        for (const m of messages) {
-          await openai.beta.threads.messages.create(thread.id, {
-            role: m.role === 'assistant' ? 'assistant' : 'user',
-            content: m.content,
-          })
-        }
-        log('messages.loaded', { count: messages.length })
-
-        // 2) Run + streaming con listeners EXPLÍCITOS
-        const runStream: any = await openai.beta.threads.runs.stream(thread.id, {
-          assistant_id: ASSISTANT_ID,
-          stream: true,
-          tool_choice: 'auto',
-        })
-        log('run.started')
-
-        // Acumuladores de tool por id
-        const toolBuf: Record<string, { name?: string; args: string }> = {}
-
-        // ---- Texto incremental
-        runStream.on('textDelta', (ev: any) => {
-          const txt = extractText(ev)
-          if (LOG_FULL) console.log('[spa-chat:event textDelta]', { traceId, ev })
-          if (txt) {
-            stats.deltaCount++; stats.deltaChars += txt.length
-            sse(controller, 'delta', { value: txt })
-          }
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'textDelta', textLen: txt?.length ?? 0 })
-        })
-
-        // Algunos SDKs emiten messageDelta en lugar de textDelta
-        runStream.on('messageDelta', (ev: any) => {
-          const txt = extractText(ev)
-          if (LOG_FULL) console.log('[spa-chat:event messageDelta]', { traceId, ev })
-          if (txt) {
-            stats.deltaCount++; stats.deltaChars += txt.length
-            sse(controller, 'delta', { value: txt })
-          }
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'messageDelta', textLen: txt?.length ?? 0 })
-        })
-
-        // ---- Tool arguments delta
-        runStream.on('toolCallDelta', (ev: any) => {
-          if (LOG_FULL) console.log('[spa-chat:event toolCallDelta]', { traceId, ev })
-          const t = extractToolDelta(ev)
-          if (!t) {
-            if (DIAG) sse(controller, 'debug', { traceId, type: 'toolCallDelta', note: 'no-delta' })
-            return
-          }
-          const b = (toolBuf[t.id] ||= { name: t.name, args: '' })
-          if (t.name && !b.name) b.name = t.name
-          b.args += t.delta
-          stats.toolDeltaCount++; stats.toolDeltaBytes += t.delta.length
-          sse(controller, 'tool_call.arguments.delta', { id: t.id, name: b.name, arguments: { delta: t.delta } })
-        })
-
-        // ---- Tool arguments completos
-        runStream.on('toolCallCompleted', (ev: any) => {
-          if (LOG_FULL) console.log('[spa-chat:event toolCallCompleted]', { traceId, ev })
-          const full = extractToolFull(ev)
-          if (!full) {
-            // si el SDK no incluye los args completos aquí, usa el buffer acumulado
-            const id = ev?.id ?? ev?.tool_call_id ?? 'tc'
-            const b = toolBuf[id]
-            if (b?.args) {
-              stats.toolCompletedCount++; stats.toolCompletedBytes += b.args.length
-              sse(controller, 'tool_call.completed', { id, name: b.name, arguments: b.args })
-            } else {
-              if (DIAG) sse(controller, 'debug', { traceId, type: 'toolCallCompleted', note: 'no-full-args' })
-            }
-            return
-          }
-          stats.toolCompletedCount++; stats.toolCompletedBytes += full.args.length
-          sse(controller, 'tool_call.completed', { id: full.id, name: full.name, arguments: full.args })
-        })
-
-        // (Opcional) otros eventos informativos — los mandamos como debug
-        const infoEvents = ['messageCreated','messageCompleted','runStepCreated','runStepDelta','runStepCompleted']
-        for (const evName of infoEvents) {
-          runStream.on(evName, (ev: any) => {
-            if (DIAG) sse(controller, 'debug', { traceId, type: evName, brief: summarize(ev) })
-          })
-        }
-
-        // Fallback súper defensivo: “event” catch–all (no todos los SDK lo exponen)
-        runStream.on?.('event', (ev: any) => {
-          const txt = extractText(ev)
-          const td = extractToolDelta(ev)
-          const tf = extractToolFull(ev)
-          if (DIAG) sse(controller, 'debug', { traceId, type: 'event', hasText: !!txt, hasToolDelta: !!td, hasToolFull: !!tf })
-          if (txt) {
-            stats.deltaCount++; stats.deltaChars += txt.length
-            sse(controller, 'delta', { value: txt })
-          }
-          if (td) {
-            const b = (toolBuf[td.id] ||= { name: td.name, args: '' })
-            if (td.name && !b.name) b.name = td.name
-            b.args += td.delta
-            stats.toolDeltaCount++; stats.toolDeltaBytes += td.delta.length
-            sse(controller, 'tool_call.arguments.delta', { id: td.id, name: b.name, arguments: { delta: td.delta } })
-          }
-          if (tf) {
-            stats.toolCompletedCount++; stats.toolCompletedBytes += tf.args.length
-            sse(controller, 'tool_call.completed', { id: tf.id, name: tf.name, arguments: tf.args })
-          }
-        })
-
-        runStream.on('end', () => {
-          stats.endAt = Date.now()
-          log('run.end', { durationMs: stats.endAt - stats.startAt })
-          sse(controller, 'debug', { traceId, summary: stats })
-          sse(controller, 'done', { text: '' })
-          controller.close()
-        })
-
-        runStream.on('error', (err: any) => {
-          stats.endAt = Date.now()
-          console.error('[assistants stream error]', { traceId, err })
-          sse(controller, 'error', { traceId, message: String(err) })
-          try { controller.close() } catch {}
-        })
-      } catch (err: any) {
-        console.error('[spa-chat:route error]', { traceId, err })
-        sse(controller, 'error', { traceId, message: String(err) })
-        try { controller.close() } catch {}
-      }
-    },
-  })
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
+    const headers = new Headers({
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
       'x-trace-id': traceId,
-    },
-  })
-}
+    })
 
-function summarize(ev: any) {
-  try {
-    const s: any = { id: ev?.id ?? ev?.tool_call_id, name: ev?.name ?? ev?.function?.name }
-    const txt = extractText(ev); if (txt) s.textLen = txt.length
-    const td = extractToolDelta(ev); if (td) s.toolDeltaLen = td.delta.length
-    const tf = extractToolFull(ev); if (tf) s.toolFullLen = tf.args.length
-    return s
-  } catch { return { note: 'summarize-failed' } }
+    const stream = new ReadableStream({
+      start: async (controller) => {
+        const log = (msg: string, extra?: any) => {
+          const entry = { traceId, msg, ...(extra || {}) }
+          console.log('[spa-chat]', entry)
+          if (DIAG) sse(controller, 'debug', entry)
+        }
+
+        const stats = {
+          startAt: Date.now(),
+          endAt: 0,
+          deltaCount: 0,
+          deltaChars: 0,
+          toolDeltaCount: 0,
+          toolDeltaBytes: 0,
+          toolCompletedCount: 0,
+          toolCompletedBytes: 0,
+          hadAnyEvent: false,
+          hadCompleted: false,
+          lastRunId: '' as string | undefined,
+          threadId: '' as string | undefined,
+        }
+
+        try {
+          log('start', { assistantId: ASSISTANT_ID, messagesCount: messages.length, lastPreview: lastUser.slice(0, 160) })
+          sse(controller, 'response.start', { traceId, message: lastUser })
+
+          // 1) Thread y mensajes
+          const thread = await openai.beta.threads.create()
+          stats.threadId = thread.id
+          log('thread.created', { threadId: thread.id })
+
+          for (const m of messages) {
+            await openai.beta.threads.messages.create(thread.id, {
+              role: m.role === 'assistant' ? 'assistant' : 'user',
+              content: m.content,
+            })
+          }
+          log('messages.loaded', { count: messages.length })
+
+          // 2) Run + streaming
+          const runStream: any = await openai.beta.threads.runs.stream(thread.id, {
+            assistant_id: ASSISTANT_ID,
+            stream: true,
+            tool_choice: 'auto',
+          })
+          log('run.started')
+
+          const toolBuf: Record<string, { name?: string; args: string }> = {}
+
+          // Listeners explícitos
+          runStream.on?.('textDelta', (ev: any) => {
+            stats.hadAnyEvent = true
+            const txt = extractText(ev)
+            if (LOG_FULL) console.log('[spa-chat:event textDelta]', { traceId, ev })
+            if (txt) {
+              stats.deltaCount++; stats.deltaChars += txt.length
+              sse(controller, 'delta', { value: txt })
+            }
+            if (DIAG) sse(controller, 'debug', { traceId, type: 'textDelta', textLen: txt?.length ?? 0 })
+          })
+          runStream.on?.('messageDelta', (ev: any) => {
+            stats.hadAnyEvent = true
+            const txt = extractText(ev)
+            if (LOG_FULL) console.log('[spa-chat:event messageDelta]', { traceId, ev })
+            if (txt) {
+              stats.deltaCount++; stats.deltaChars += txt.length
+              sse(controller, 'delta', { value: txt })
+            }
+            if (DIAG) sse(controller, 'debug', { traceId, type: 'messageDelta', textLen: txt?.length ?? 0 })
+          })
+          runStream.on?.('toolCallDelta', (ev: any) => {
+            stats.hadAnyEvent = true
+            if (LOG_FULL) console.log('[spa-chat:event toolCallDelta]', { traceId, ev })
+            const t = extractToolDelta(ev)
+            if (!t) {
+              if (DIAG) sse(controller, 'debug', { traceId, type: 'toolCallDelta', note: 'no-delta' })
+              return
+            }
+            const b = (toolBuf[t.id] ||= { name: t.name, args: '' })
+            if (t.name && !b.name) b.name = t.name
+            b.args += t.delta
+            stats.toolDeltaCount++; stats.toolDeltaBytes += t.delta.length
+            sse(controller, 'tool_call.arguments.delta', { id: t.id, name: b.name, arguments: { delta: t.delta } })
+          })
+          runStream.on?.('toolCallCompleted', (ev: any) => {
+            stats.hadAnyEvent = true
+            if (LOG_FULL) console.log('[spa-chat:event toolCallCompleted]', { traceId, ev })
+            const full = extractToolFull(ev)
+            if (full) {
+              stats.toolCompletedCount++; stats.toolCompletedBytes += full.args.length
+              stats.hadCompleted = true
+              sse(controller, 'tool_call.completed', { id: full.id, name: full.name, arguments: full.args })
+            } else {
+              // usa buffer si el SDK no trae args completos aquí
+              const id = ev?.id ?? ev?.tool_call_id ?? 'tc'
+              const b = toolBuf[id]
+              if (b?.args) {
+                stats.toolCompletedCount++; stats.toolCompletedBytes += b.args.length
+                stats.hadCompleted = true
+                sse(controller, 'tool_call.completed', { id, name: b.name, arguments: b.args })
+              } else if (DIAG) {
+                sse(controller, 'debug', { traceId, type: 'toolCallCompleted', note: 'no-full-args' })
+              }
+            }
+          })
+          // info extra
+          const infoEvents = ['messageCreated','messageCompleted','runStepCreated','runStepDelta','runStepCompleted','runCreated','runQueued','runInProgress']
+          for (const evName of infoEvents) {
+            runStream.on?.(evName, (ev: any) => {
+              stats.hadAnyEvent = true
+              if (DIAG) sse(controller, 'debug', { traceId, type: evName })
+            })
+          }
+          runStream.on?.('end', () => {
+            // handled abajo por for-await también
+          })
+          runStream.on?.('error', (err: any) => {
+            console.error('[assistants stream error]', { traceId, err })
+            sse(controller, 'error', { traceId, message: String(err) })
+          })
+
+          // ✅ CONSUME el stream (for-await asegura que realmente fluya)
+          try {
+            for await (const ev of runStream as AsyncIterable<any>) {
+              stats.hadAnyEvent = true
+              // opcional: podríamos duplicar manejo aquí, pero ya lo hicimos con listeners
+              // lo dejamos como tick para “drain” del stream
+            }
+          } catch (iterErr: any) {
+            console.error('[spa-chat:iterate error]', { traceId, iterErr })
+          }
+
+          // —— Rescate: si no hubo toolCallCompleted, intentamos sacar los tool_calls del último mensaje
+          if (!stats.hadCompleted && stats.threadId) {
+            try {
+              const page = await openai.beta.threads.messages.list(stats.threadId, { order: 'desc', limit: 1 })
+              const last = page.data?.[0]
+              const toolCalls = (last?.content as any[])?.flatMap((c) => (c?.type === 'tool_call' ? [c] : [])) ?? []
+              if (toolCalls.length) {
+                for (const tc of toolCalls) {
+                  const name = tc?.name ?? tc?.function?.name
+                  const args =
+                    typeof tc?.args === 'string' ? tc.args
+                    : typeof tc?.arguments === 'string' ? tc.arguments
+                    : typeof tc?.function?.arguments === 'string' ? tc.function.arguments
+                    : ''
+                  if (args) {
+                    stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
+                    sse(controller, 'tool_call.completed', { id: tc?.id ?? 'tc', name, arguments: args })
+                  }
+                }
+              }
+            } catch (rescueErr) {
+              if (DIAG) sse(controller, 'debug', { traceId, type: 'rescue.failed' })
+            }
+          }
+
+          stats.endAt = Date.now()
+          log('run.end', { durationMs: stats.endAt - stats.startAt })
+          if (DIAG) sse(controller, 'debug', { traceId, summary: stats })
+          sse(controller, 'done', { text: '' })
+          controller.close()
+        } catch (err: any) {
+          console.error('[spa-chat:route error]', { traceId, err })
+          sse(controller, 'error', { traceId, message: String(err) })
+          try { controller.close() } catch {}
+        }
+      },
+    })
+
+    return new Response(stream, { status: 200, headers })
+  } catch (e: any) {
+    return new Response(`Bad Request: ${e?.message || e}`, { status: 400 })
+  }
 }
