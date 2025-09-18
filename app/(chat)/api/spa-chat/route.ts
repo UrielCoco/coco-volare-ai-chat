@@ -22,17 +22,18 @@ const onlyWs = (s?: string) => !s || /^\s+$/.test(s)
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const tid = () => Math.random().toString(36).slice(2) + '-' + Date.now().toString(36)
 
-function sse(controller: Ctl, event: string, data: any) {
-  controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+function sse(ctrl: Ctl, event: string, data: any) {
+  ctrl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
 }
 
-/* ---------------------- SDK compatibility helpers (as any) ---------------------- */
+/* ---------- Helpers de compatibilidad con firmas viejas/nuevas del SDK ---------- */
 const runsApi = () => (openai.beta.threads.runs as any)
 
 async function runsListNewest(threadId: string) {
   const api = runsApi()
   try { return await api.list(threadId, { order: 'desc', limit: 1 }) } catch {}
   try { return await api.list({ thread_id: threadId, order: 'desc', limit: 1 }) } catch {}
+  // fallback neutral
   return { data: [] }
 }
 async function runRetrieve(threadId: string, runId: string) {
@@ -40,7 +41,7 @@ async function runRetrieve(threadId: string, runId: string) {
   try { return await api.retrieve(threadId, runId) } catch {}
   try { return await api.retrieve(threadId, { run_id: runId }) } catch {}
   try { return await api.retrieve({ thread_id: threadId, run_id: runId }) } catch {}
-  // último intento “ciegas”
+  // último intento
   return await (openai.beta.threads.runs as any).retrieve(threadId as any, runId as any)
 }
 async function submitToolOutputsCompat(threadId: string, runId: string, tool_outputs: any[]) {
@@ -52,7 +53,7 @@ async function submitToolOutputsCompat(threadId: string, runId: string, tool_out
   await api.submitToolOutputs(threadId, runId, { tool_outputs } as any)
   return { resumed: null, streaming: false }
 }
-/* -------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------------- */
 
 function textFrom(ev: any): string | null {
   if (!ev) return null
@@ -117,8 +118,8 @@ export async function POST(req: NextRequest) {
     'x-trace-id': traceId,
   })
 
-  let lastRunId: string | undefined
   let threadId: string | undefined
+  let lastRunId: string | undefined
 
   const stream = new ReadableStream({
     start: async (controller) => {
@@ -141,9 +142,15 @@ export async function POST(req: NextRequest) {
       const toolBuf: Record<string, { name?: string; args: string }> = {}
 
       async function attach(runStream: any) {
-        runStream.on?.('runCreated', (ev: any) => { lastRunId = ev?.data?.id ?? ev?.id })
-        runStream.on?.('runQueued',  (ev: any) => { lastRunId = ev?.data?.id ?? ev?.id })
-        runStream.on?.('runInProgress',(ev:any)=> { lastRunId = ev?.data?.id ?? ev?.id })
+        // Guarda el runId en todos los momentos posibles
+        const capture = (ev: any, label: string) => {
+          const id = ev?.data?.id ?? ev?.id
+          if (id) lastRunId = id
+          if (DIAG) sse(controller, 'debug', { traceId, type: label, runId: id })
+        }
+        runStream.on?.('runCreated', (ev: any) => capture(ev, 'runCreated'))
+        runStream.on?.('runQueued', (ev: any) => capture(ev, 'runQueued'))
+        runStream.on?.('runInProgress', (ev: any) => capture(ev, 'runInProgress'))
 
         runStream.on?.('textDelta', (ev: any) => {
           const txt = textFrom(ev)
@@ -215,7 +222,6 @@ export async function POST(req: NextRequest) {
               if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (requires_action)]', { traceId, id, name, args: finalArgs })
               sse(controller, 'tool_call.completed', { id, name, arguments: finalArgs })
             }
-
             outputs.push({ tool_call_id: id, output: JSON.stringify({ status: 'applied' }) })
           }
 
@@ -225,14 +231,16 @@ export async function POST(req: NextRequest) {
               await attach(resumed)
               try { for await (const _ of resumed as AsyncIterable<any>) { /* drain */ } } catch {}
             } else {
-              // poll hasta terminar
+              // polling hasta terminar
               let tries = 0
               while (tries++ < 60) {
                 const run = await runRetrieve(threadId, runId)
-                if (['completed', 'cancelled', 'failed', 'expired'].includes(run.status as string)) break
+                if (['completed','cancelled','failed','expired'].includes(run.status as string)) break
                 await sleep(900)
               }
             }
+          } else {
+            console.log('[spa-chat]', { traceId, msg: 'requires_action.skip', haveThread: !!threadId, haveRun: !!runId, outputs: outputs.length })
           }
         })
 
@@ -243,11 +251,10 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        // inicio
         console.log('[spa-chat]', { traceId, msg: 'start', assistantId: ASSISTANT_ID, messagesCount: messages.length, lastPreview: lastUser.slice(0,160) })
         sse(controller, 'response.start', { traceId, message: lastUser })
 
-        // thread + historial
+        // Thread + historial
         const thread = await openai.beta.threads.create()
         threadId = thread.id
         console.log('[spa-chat]', { traceId, msg: 'thread.created', threadId })
@@ -256,7 +263,7 @@ export async function POST(req: NextRequest) {
         }
         console.log('[spa-chat]', { traceId, msg: 'messages.loaded', count: messages.length })
 
-        // run
+        // Run (stream)
         const runStream: any = await openai.beta.threads.runs.stream(thread.id, {
           assistant_id: ASSISTANT_ID,
           stream: true,
@@ -265,39 +272,55 @@ export async function POST(req: NextRequest) {
         console.log('[spa-chat]', { traceId, msg: 'run.started' })
         await attach(runStream)
 
-        // drenar
+        // Drenar (necesario para que fluya en algunos runtimes)
         try { for await (const _ of runStream as AsyncIterable<any>) { /* drain */ } } catch (iterErr: any) {
           console.error('[spa-chat:iterate error]', { traceId, iterErr })
         }
 
-        // rescate final: si no vimos completed, revisa el run
+        /* ---------------------- RESCATE FINAL ULTRA-ROBUSTO ---------------------- */
         try {
-          let runId = lastRunId
-          if (!runId && threadId) {
-            const list = await runsListNewest(threadId)
-            runId = list?.data?.[0]?.id
-          }
-          if (runId && threadId) {
-            const run = await runRetrieve(threadId, runId)
-            if (run.status === 'requires_action') {
-              const calls = (run.required_action as any)?.submit_tool_outputs?.tool_calls ?? []
-              for (const c of calls) {
-                const id = c?.id ?? c?.tool_call_id ?? 'tc'
-                const name = c?.function?.name ?? c?.name
-                const args = typeof c?.function?.arguments === 'string' ? c.function.arguments : ''
-                if (args && !(IGNORE_WS_DELTAS && onlyWs(args))) {
-                  stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
-                  if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (rescue.run)]', { traceId, id, name, args })
-                  sse(controller, 'tool_call.completed', { id, name, arguments: args })
+          const observed = { threadId, lastRunId }
+          console.log('[spa-chat]', { traceId, msg: 'rescue.inspect', observed })
+
+          // 1) Asegura threadId
+          const tId = threadId
+          if (!tId) {
+            console.log('[spa-chat]', { traceId, msg: 'rescue.skip', reason: 'no-threadId' })
+          } else {
+            // 2) Asegura runId
+            let rId = lastRunId
+            if (!rId) {
+              const list = await runsListNewest(tId)
+              rId = list?.data?.[0]?.id
+              console.log('[spa-chat]', { traceId, msg: 'rescue.list', foundRunId: rId })
+            }
+
+            if (tId && rId) {
+              const run = await runRetrieve(tId, rId)
+              console.log('[spa-chat]', { traceId, msg: 'rescue.run', status: run.status, runId: rId })
+
+              if (run.status === 'requires_action') {
+                const calls = (run.required_action as any)?.submit_tool_outputs?.tool_calls ?? []
+                for (const c of calls) {
+                  const id = c?.id ?? c?.tool_call_id ?? 'tc'
+                  const name = c?.function?.name ?? c?.name
+                  const args = typeof c?.function?.arguments === 'string' ? c.function.arguments : ''
+                  if (args && !(IGNORE_WS_DELTAS && onlyWs(args))) {
+                    stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
+                    if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (rescue.run)]', { traceId, id, name, args })
+                    sse(controller, 'tool_call.completed', { id, name, arguments: args })
+                  }
                 }
               }
+            } else {
+              console.log('[spa-chat]', { traceId, msg: 'rescue.skip', reason: 'missing-ids', threadId: tId, runId: rId })
             }
           }
         } catch (rescueErr) {
           console.error('[spa-chat:rescue error]', { traceId, rescueErr })
         }
+        /* ------------------------------------------------------------------------ */
 
-        // fin
         stats.endAt = Date.now()
         console.log('[spa-chat]', { traceId, msg: 'run.end', durationMs: stats.endAt - stats.startAt, stats })
         if (DIAG) sse(controller, 'debug', { traceId, summary: stats })
