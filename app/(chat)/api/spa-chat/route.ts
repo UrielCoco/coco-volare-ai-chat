@@ -26,24 +26,43 @@ function sse(ctrl: Ctl, event: string, data: any) {
   ctrl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
 }
 
-/* ---------- Helpers de compatibilidad con firmas viejas/nuevas del SDK ---------- */
+/* ---------------- Helpers de compatibilidad (SDKs viejos/nuevos) ---------------- */
 const runsApi = () => (openai.beta.threads.runs as any)
 
 async function runsListNewest(threadId: string) {
   const api = runsApi()
   try { return await api.list(threadId, { order: 'desc', limit: 1 }) } catch {}
   try { return await api.list({ thread_id: threadId, order: 'desc', limit: 1 }) } catch {}
-  // fallback neutral
   return { data: [] }
 }
-async function runRetrieve(threadId: string, runId: string) {
+
+async function runRetrieve(traceId: string, threadId: string, runId: string) {
   const api = runsApi()
-  try { return await api.retrieve(threadId, runId) } catch {}
-  try { return await api.retrieve(threadId, { run_id: runId }) } catch {}
-  try { return await api.retrieve({ thread_id: threadId, run_id: runId }) } catch {}
-  // último intento
-  return await (openai.beta.threads.runs as any).retrieve(threadId as any, runId as any)
+  // 1) (threadId, runId)
+  try {
+    console.log('[spa-chat:retrieve]', { traceId, sig: '(threadId, runId)', threadId, runId })
+    return await api.retrieve(threadId, runId)
+  } catch {}
+  // 2) (threadId, { run_id })
+  try {
+    console.log('[spa-chat:retrieve]', { traceId, sig: '(threadId, {run_id})', threadId, runId })
+    return await api.retrieve(threadId, { run_id: runId })
+  } catch {}
+  // 3) ({ thread_id, run_id })
+  try {
+    console.log('[spa-chat:retrieve]', { traceId, sig: '({thread_id,run_id})', threadId, runId })
+    return await api.retrieve({ thread_id: threadId, run_id: runId })
+  } catch {}
+  // 4) ({ run_id })  ← SDKs que NO piden threadId
+  try {
+    console.log('[spa-chat:retrieve]', { traceId, sig: '({run_id})', runId })
+    return await api.retrieve({ run_id: runId })
+  } catch {}
+  // 5) (runId)       ← SDKs que aceptan 1 arg
+  console.log('[spa-chat:retrieve]', { traceId, sig: '(runId)', runId })
+  return await api.retrieve(runId)
 }
+
 async function submitToolOutputsCompat(threadId: string, runId: string, tool_outputs: any[]) {
   const api = runsApi()
   if (typeof api.submitToolOutputsStream === 'function') {
@@ -142,7 +161,6 @@ export async function POST(req: NextRequest) {
       const toolBuf: Record<string, { name?: string; args: string }> = {}
 
       async function attach(runStream: any) {
-        // Guarda el runId en todos los momentos posibles
         const capture = (ev: any, label: string) => {
           const id = ev?.data?.id ?? ev?.id
           if (id) lastRunId = id
@@ -231,10 +249,9 @@ export async function POST(req: NextRequest) {
               await attach(resumed)
               try { for await (const _ of resumed as AsyncIterable<any>) { /* drain */ } } catch {}
             } else {
-              // polling hasta terminar
               let tries = 0
               while (tries++ < 60) {
-                const run = await runRetrieve(threadId, runId)
+                const run = await runRetrieve(traceId, threadId, runId)
                 if (['completed','cancelled','failed','expired'].includes(run.status as string)) break
                 await sleep(900)
               }
@@ -271,55 +288,55 @@ export async function POST(req: NextRequest) {
         })
         console.log('[spa-chat]', { traceId, msg: 'run.started' })
         await attach(runStream)
-
-        // Drenar (necesario para que fluya en algunos runtimes)
         try { for await (const _ of runStream as AsyncIterable<any>) { /* drain */ } } catch (iterErr: any) {
           console.error('[spa-chat:iterate error]', { traceId, iterErr })
         }
 
-        /* ---------------------- RESCATE FINAL ULTRA-ROBUSTO ---------------------- */
+        /* ---------------------- RESCATE FINAL blindado ---------------------- */
         try {
-          const observed = { threadId, lastRunId }
-          console.log('[spa-chat]', { traceId, msg: 'rescue.inspect', observed })
+          console.log('[spa-chat]', { traceId, msg: 'rescue.inspect', observed: { threadId, lastRunId } })
 
-          // 1) Asegura threadId
-          const tId = threadId
-          if (!tId) {
-            console.log('[spa-chat]', { traceId, msg: 'rescue.skip', reason: 'no-threadId' })
-          } else {
-            // 2) Asegura runId
-            let rId = lastRunId
-            if (!rId) {
-              const list = await runsListNewest(tId)
-              rId = list?.data?.[0]?.id
-              console.log('[spa-chat]', { traceId, msg: 'rescue.list', foundRunId: rId })
-            }
+          let tId = threadId
+          let rId = lastRunId
 
-            if (tId && rId) {
-              const run = await runRetrieve(tId, rId)
-              console.log('[spa-chat]', { traceId, msg: 'rescue.run', status: run.status, runId: rId })
+          // Si falta runId, lo buscamos
+          if (!rId && tId) {
+            const list = await runsListNewest(tId)
+            rId = list?.data?.[0]?.id
+            console.log('[spa-chat]', { traceId, msg: 'rescue.list', foundRunId: rId })
+          }
 
-              if (run.status === 'requires_action') {
-                const calls = (run.required_action as any)?.submit_tool_outputs?.tool_calls ?? []
-                for (const c of calls) {
-                  const id = c?.id ?? c?.tool_call_id ?? 'tc'
-                  const name = c?.function?.name ?? c?.name
-                  const args = typeof c?.function?.arguments === 'string' ? c.function.arguments : ''
-                  if (args && !(IGNORE_WS_DELTAS && onlyWs(args))) {
-                    stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
-                    if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (rescue.run)]', { traceId, id, name, args })
-                    sse(controller, 'tool_call.completed', { id, name, arguments: args })
-                  }
+          // Si por error vienen cruzados, corrígelos
+          if (tId && tId.startsWith('run_') && rId && rId.startsWith('thread_')) {
+            console.log('[spa-chat]', { traceId, msg: 'rescue.swapIds', before: { tId, rId } })
+            const tmp = tId; tId = rId; rId = tmp
+            console.log('[spa-chat]', { traceId, msg: 'rescue.swapIds.done', after: { tId, rId } })
+          }
+
+          if (tId && rId) {
+            const run = await runRetrieve(traceId, tId, rId)
+            console.log('[spa-chat]', { traceId, msg: 'rescue.run', status: run.status, runId: rId })
+
+            if (run.status === 'requires_action') {
+              const calls = (run.required_action as any)?.submit_tool_outputs?.tool_calls ?? []
+              for (const c of calls) {
+                const id = c?.id ?? c?.tool_call_id ?? 'tc'
+                const name = c?.function?.name ?? c?.name
+                const args = typeof c?.function?.arguments === 'string' ? c.function.arguments : ''
+                if (args && !(IGNORE_WS_DELTAS && onlyWs(args))) {
+                  stats.toolCompletedCount++; stats.toolCompletedBytes += args.length
+                  if (LOG_TOOL_ARGS) console.log('[spa-chat:tool args (rescue.run)]', { traceId, id, name, args })
+                  sse(controller, 'tool_call.completed', { id, name, arguments: args })
                 }
               }
-            } else {
-              console.log('[spa-chat]', { traceId, msg: 'rescue.skip', reason: 'missing-ids', threadId: tId, runId: rId })
             }
+          } else {
+            console.log('[spa-chat]', { traceId, msg: 'rescue.skip', reason: 'missing-ids', threadId: tId, runId: rId })
           }
         } catch (rescueErr) {
           console.error('[spa-chat:rescue error]', { traceId, rescueErr })
         }
-        /* ------------------------------------------------------------------------ */
+        /* ------------------------------------------------------------------- */
 
         stats.endAt = Date.now()
         console.log('[spa-chat]', { traceId, msg: 'run.end', durationMs: stats.endAt - stats.startAt, stats })
