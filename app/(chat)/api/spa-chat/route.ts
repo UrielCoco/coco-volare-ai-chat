@@ -1,10 +1,10 @@
 /* eslint-disable no-console */
 // app/(chat)/api/spa-chat/route.ts
-// SSE alineado a OpenAI con DIAGNÓSTICO EXTREMO:
-// - Consume createAndStream como AsyncIterable y también via .on('event')
-// - Mapea eventos genéricos e.event → run.*, message.*, tool_call.*, tool_result
-// - Shim 'delta' para compat con SPA actual
-// - Trae traceId y logs exhaustivos
+// SSE alineado a OpenAI con DIAGNÓSTICO EXTREMO y soporte de:
+// - Deltas de tools char-by-char (function.arguments) y arguments_delta
+// - run.requires_action con JSON final de tool_calls
+// - Mapea a: run.*, message.*, tool_call.arguments.delta, tool_call.completed, tool_result, done
+// - Logs detallados con traceId
 
 import type { NextRequest } from 'next/server'
 import { NextResponse } from 'next/server'
@@ -13,17 +13,15 @@ import OpenAI from 'openai'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// ------------ Config de entorno / flags de log ------------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID!
 
-const LOG_FULL = (process.env.SPA_CHAT_LOG_FULL ?? '0') === '1'
 const LOG_EVENTS = (process.env.SPA_CHAT_LOG_EVENTS ?? '1') === '1'
-const LOG_TOOL_ARGS = (process.env.SPA_CHAT_LOG_TOOL_ARGS ?? '0') === '1'
+const LOG_FULL = (process.env.SPA_CHAT_LOG_FULL ?? '0') === '1'
+const LOG_TOOL_ARGS = (process.env.SPA_CHAT_LOG_TOOL_ARGS ?? '1') === '1'
 const DIAG_ALWAYS = (process.env.SPA_CHAT_DIAG_ALWAYS ?? '0') === '1'
 const IGNORE_WS_DELTAS = (process.env.SPA_CHAT_IGNORE_WS_DELTAS ?? '1') === '1'
 
-// ------------ Tipos / helpers ------------
 type ChatMsg = { role: 'user' | 'assistant' | 'system'; content: string }
 type Ctl = ReadableStreamDefaultController
 const enc = new TextEncoder()
@@ -40,10 +38,9 @@ const sse = (c: Ctl, event: string, data: any) => {
   c.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
 }
 const safeJson = (t: string) => { try { return JSON.parse(t) } catch { return null } }
-const asUserMessage = (messages: ChatMsg[] | undefined) =>
+const lastUserMsg = (messages: ChatMsg[] | undefined) =>
   ({ role: 'user' as const, content: (messages || []).filter(m => m.role === 'user').at(-1)?.content || '' })
 
-// Extrae texto de varias formas de evento
 function extractTextDelta(e: any): string {
   const a = e?.data?.delta?.content?.[0]?.text?.value
   const b = e?.data?.delta?.[0]?.text?.value
@@ -54,7 +51,29 @@ function extractTextDelta(e: any): string {
   return a || b || c || d || ''
 }
 
-// ------------ Mapeo de eventos genéricos OpenAI → SSE propios ------------
+// ----------------- Acumulador de tool calls -----------------
+type ToolAcc = {
+  id: string
+  name?: string | null
+  buf: string
+}
+const newToolAcc = (id: string, name?: string | null): ToolAcc => ({ id, name: name ?? null, buf: '' })
+
+function maybeClosedJson(s: string): boolean {
+  // Heurística mínima: JSON aparentemente balanceado (empieza con { y termina con } y llaves balanceadas)
+  if (!s) return false
+  const trimmed = s.trim()
+  if (!(trimmed.startsWith('{') && trimmed.endsWith('}'))) return false
+  let bal = 0
+  for (const ch of trimmed) {
+    if (ch === '{') bal++
+    if (ch === '}') bal--
+    if (bal < 0) return false
+  }
+  return bal === 0
+}
+
+// ----------------- Mapeo de eventos -----------------
 function makeEventMapper(opts: {
   controller: Ctl
   traceId: string
@@ -63,14 +82,31 @@ function makeEventMapper(opts: {
 }) {
   const { controller, traceId, threadId, setRunId } = opts
 
+  // toolCallId -> acumulador
+  const toolAcc = new Map<string, ToolAcc>()
+  let lastToolId: string | null = null
+
   function log(label: string, payload: any) {
     if (LOG_EVENTS) console.log('[spa-chat:event]', { traceId, label, preview: trunc(payload, 1200) })
+  }
+
+  function emitToolDelta(id: string, name: string | null | undefined, delta: string) {
+    if (LOG_TOOL_ARGS) console.log('[spa-chat:toolCallDelta]', { traceId, id, name, delta: trunc(delta, 600) })
+    sse(controller, 'tool_call.arguments.delta', {
+      data: { id, tool_name: name ?? null, arguments: { delta } },
+    })
+  }
+
+  function emitToolCompleted(id: string, name: string | null | undefined, args: string) {
+    if (LOG_TOOL_ARGS) console.log('[spa-chat:toolCallCompleted]', { traceId, id, name, argsPreview: trunc(args, 1200) })
+    sse(controller, 'tool_call.completed', {
+      data: { id, tool_name: name ?? null, arguments: args },
+    })
   }
 
   return function handle(e: any) {
     const type = e?.event as string
     if (!type) return
-
     log(type, e)
 
     // ---- RUN lifecycle ----
@@ -98,126 +134,120 @@ function makeEventMapper(opts: {
       return
     }
 
-    // ---- MESSAGE deltas / completed ----
+    // ---- Mensajes de texto ----
     if (type === 'thread.message.delta') {
       const id = e?.data?.id ?? e?.id ?? 'msg'
       const txt = extractTextDelta(e)
       if (txt && !(IGNORE_WS_DELTAS && onlyWs(txt))) {
         if (LOG_FULL) console.log('[spa-chat:textDelta]', { traceId, len: txt.length, sample: txt.slice(0, 160) })
         sse(controller, 'message.delta', {
-          data: {
-            id, role: 'assistant',
-            content: [{ type: 'text', content_type: 'text/plain', text_delta: txt }],
-          },
+          data: { id, role: 'assistant', content: [{ type: 'text', content_type: 'text/plain', text_delta: txt }] },
         })
-        // Shim para tu SPA actual
-        sse(controller, 'delta', { value: txt })
+        sse(controller, 'delta', { value: txt }) // shim
       }
       return
     }
     if (type === 'thread.message.completed') {
-      // Entrega el contenido tal cual (puede traer parts variados)
       const id = e?.data?.id ?? e?.id ?? 'msg'
-      sse(controller, 'message.completed', {
-        data: { id, role: 'assistant', content: e?.data?.content ?? [] },
-      })
+      sse(controller, 'message.completed', { data: { id, role: 'assistant', content: e?.data?.content ?? [] } })
       return
     }
 
-    // ---- TOOL calls (distintos SDKs las emiten bajo run.step.delta/created) ----
-    // Buscamos deltas de argumentos de funciones
-    if (type === 'thread.run.step.delta' || type === 'thread.run.step.created' || type === 'thread.run.step.completed') {
-      // En algunos SDKs, la info viene en e.data.step_details o e.data.delta
-      const step = e?.data?.step_details || e?.data?.delta || e?.data
-      // 1) Delta de argumentos (function call)
-      const fDelta =
-        step?.tool_calls?.[0]?.function?.arguments_delta ||
-        step?.function?.arguments_delta ||
-        step?.function?.arguments ||
-        step?.tool_calls?.[0]?.function?.arguments ||
-        null
+    // ---- Deltas de tool calls (variantes) ----
+    if (type === 'thread.run.step.delta') {
+      const d = e?.data?.delta?.step_details
+      // Caso A: formato con id + def de tool (apertura)
+      const tc0 = d?.tool_calls?.[0]
+      if (tc0?.id && tc0?.type === 'function' && tc0?.function?.name) {
+        const id = tc0.id
+        lastToolId = id
+        if (!toolAcc.has(id)) toolAcc.set(id, newToolAcc(id, tc0.function.name))
+      }
 
-      const toolName =
-        step?.tool_calls?.[0]?.function?.name ||
-        step?.function?.name ||
-        step?.name ||
-        null
-
-      const toolCallId =
-        step?.tool_calls?.[0]?.id ||
-        step?.id ||
-        e?.data?.id ||
-        'tc'
-
-      if (typeof fDelta === 'string' && fDelta.length) {
-        if (LOG_TOOL_ARGS) console.log('[spa-chat:toolCallDelta]', { traceId, toolCallId, toolName, deltaPreview: trunc(fDelta, 600) })
-        sse(controller, 'tool_call.arguments.delta', {
-          data: { id: toolCallId, tool_name: toolName, arguments: { delta: fDelta } },
-        })
+      // Caso B: argumentos fragmentados en 'arguments' (no *_delta)
+      const fragA = tc0?.function?.arguments
+      if (typeof fragA === 'string' && fragA.length) {
+        const id = tc0?.id || lastToolId || 'tc'
+        const acc = toolAcc.get(id) ?? newToolAcc(id, tc0?.function?.name)
+        toolAcc.set(id, acc)
+        acc.name = acc.name || tc0?.function?.name || null
+        acc.buf += fragA
+        emitToolDelta(id, acc.name, fragA)
+        // si parece JSON cerrado, disparamos completed tentativo (por si no llega requires_action)
+        if (maybeClosedJson(acc.buf)) {
+          emitToolCompleted(id, acc.name, acc.buf)
+        }
         return
       }
 
-      // 2) Tool call "cerrado" (argumentos completos)
-      const fArgs =
-        step?.tool_calls?.[0]?.function?.arguments ||
-        step?.function?.arguments ||
+      // Caso C: arguments_delta explícito
+      const fragDelta =
+        d?.tool_calls?.[0]?.function?.arguments_delta ??
+        d?.function?.arguments_delta ??
         null
-
-      if (typeof fArgs === 'string' && fArgs.length) {
-        if (LOG_TOOL_ARGS) console.log('[spa-chat:toolCallCompleted]', { traceId, toolCallId, toolName, argsPreview: trunc(fArgs, 1200) })
-        sse(controller, 'tool_call.completed', { data: { id: toolCallId, tool_name: toolName, arguments: fArgs } })
+      if (typeof fragDelta === 'string' && fragDelta.length) {
+        const id = d?.tool_calls?.[0]?.id || lastToolId || 'tc'
+        const name = d?.tool_calls?.[0]?.function?.name || null
+        const acc = toolAcc.get(id) ?? newToolAcc(id, name)
+        toolAcc.set(id, acc)
+        if (name) acc.name = name
+        acc.buf += fragDelta
+        emitToolDelta(id, acc.name, fragDelta)
+        if (maybeClosedJson(acc.buf)) emitToolCompleted(id, acc.name, acc.buf)
         return
       }
 
-      // 3) Resultados de tool (cuando existan)
-      const tOut =
-        step?.tool_output ??
-        step?.output ??
-        null
-
-      if (tOut != null) {
-        if (LOG_TOOL_ARGS) console.log('[spa-chat:toolResult]', { traceId, tool_call_id: toolCallId, resultPreview: trunc(tOut, 1200) })
-        sse(controller, 'tool_result', { data: { tool_call_id: toolCallId, result: tOut } })
+      // Caso D: resultado de herramienta
+      const toolOut = d?.output ?? d?.tool_output ?? null
+      if (toolOut != null) {
+        const id = d?.id || lastToolId || 'tc'
+        sse(controller, 'tool_result', { data: { tool_call_id: id, result: toolOut } })
         return
       }
       return
     }
 
-    // ---- Otros eventos de respuesta (por compat futura) ----
+    // ---- Señal con JSON completo de las tools ----
+    if (type === 'thread.run.requires_action') {
+      const calls = e?.data?.required_action?.submit_tool_outputs?.tool_calls || []
+      for (const call of calls) {
+        const id = call?.id || lastToolId || 'tc'
+        const name = call?.function?.name || toolAcc.get(id)?.name || null
+        const args = call?.function?.arguments || ''
+        // Actualiza buffer y emite completed definitivo
+        if (!toolAcc.has(id)) toolAcc.set(id, newToolAcc(id, name))
+        const acc = toolAcc.get(id)!
+        acc.name = acc.name || name
+        acc.buf = args // pisa con JSON final del SDK
+        emitToolCompleted(id, acc.name, args)
+      }
+      return
+    }
+
+    // ---- Otros formatos de response.* (por compatibilidad) ----
     if (type?.startsWith('response.')) {
-      // Algunos SDKs emiten response.output_text.delta / response.completed
       if (type === 'response.output_text.delta') {
         const val = e?.data?.delta ?? ''
         if (val && !(IGNORE_WS_DELTAS && onlyWs(val))) {
           sse(controller, 'message.delta', {
-            data: {
-              id: e?.data?.id ?? 'msg',
-              role: 'assistant',
-              content: [{ type: 'text', content_type: 'text/plain', text_delta: val }],
-            },
+            data: { id: e?.data?.id ?? 'msg', role: 'assistant', content: [{ type: 'text', content_type: 'text/plain', text_delta: val }] },
           })
           sse(controller, 'delta', { value: val })
         }
       } else if (type === 'response.completed') {
         sse(controller, 'message.completed', {
-          data: {
-            id: e?.data?.id ?? 'msg',
-            role: 'assistant',
-            content: e?.data?.output_text
-              ? [{ type: 'text', content_type: 'text/plain', text: e?.data?.output_text }]
-              : [],
-          },
+          data: { id: e?.data?.id ?? 'msg', role: 'assistant', content: e?.data?.output_text ? [{ type: 'text', content_type: 'text/plain', text: e?.data?.output_text }] : [] },
         })
       }
       return
     }
 
-    // Si llega algo desconocido, lo mandamos como debug SSE para inspección
+    // Debug por si aparece un tipo nuevo
     sse(controller, 'debug', { event: type, raw: e })
   }
 }
 
-// ------------ Handler principal ------------
+// ----------------- Handler principal -----------------
 export async function POST(req: NextRequest) {
   const traceId = tid()
   const url = new URL(req.url)
@@ -232,11 +262,10 @@ export async function POST(req: NextRequest) {
     return new Response('Falta OPENAI_ASSISTANT_ID', { status: 500 })
   }
 
-  // Body RAW para diagnóstico
   const raw = await req.text().catch(() => '')
   const body = raw ? safeJson(raw) : {}
   const messages = (body?.messages ?? []) as ChatMsg[]
-  const lastUser = asUserMessage(messages)
+  const lastUser = lastUserMsg(messages)
 
   console.log('[spa-chat:req]', {
     traceId,
@@ -253,16 +282,6 @@ export async function POST(req: NextRequest) {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
-
-  const stats = {
-    startedAt: Date.now(),
-    deltaCount: 0,
-    deltaChars: 0,
-    toolDeltaCount: 0,
-    toolDeltaBytes: 0,
-    toolCompletedCount: 0,
-    toolCompletedBytes: 0,
-  }
 
   const stream = new ReadableStream({
     start: async (controller) => {
@@ -281,8 +300,7 @@ export async function POST(req: NextRequest) {
 
         console.log('[spa-chat:run.start]', { traceId, threadId: thread.id, assistantId: ASSISTANT_ID })
 
-        // createAndStream devuelve AsyncIterable + EventEmitter
-        // @ts-ignore diferencias de tipos según versión del SDK
+        // @ts-ignore - el SDK expone iterable + emitter
         const emitter: any = await openai.beta.threads.runs.createAndStream(thread.id, {
           assistant_id: ASSISTANT_ID,
         })
@@ -292,18 +310,15 @@ export async function POST(req: NextRequest) {
 
         const handle = makeEventMapper({ controller, traceId, threadId: thread.id, setRunId })
 
-        // 1) Suscripción genérica a eventos (por si el SDK emite .on('event', e))
-        emitter.on?.('event', (e: any) => {
-          if (LOG_EVENTS) console.log('[spa-chat:on.event]', { traceId, type: e?.event })
-          handle(e)
+        emitter.on?.('event', (ev: any) => {
+          if (LOG_EVENTS) console.log('[spa-chat:on.event]', { traceId, type: ev?.event })
+          handle(ev)
         })
-
         emitter.on?.('end', () => {
           console.log('[spa-chat:on.end]', { traceId, threadId: thread.id, runId })
           sse(controller, 'done', {})
           controller.close()
         })
-
         emitter.on?.('error', (err: any) => {
           console.error('[spa-chat:on.error]', { traceId, err: trunc(err, 1200) })
           sse(controller, 'run.failed', { data: { id: runId, status: 'failed', thread_id: thread.id, error: { message: String(err?.message || err || 'stream_error') } } })
@@ -311,7 +326,6 @@ export async function POST(req: NextRequest) {
           controller.close()
         })
 
-        // 2) Consumo del AsyncIterable (algunas versiones sólo emiten así)
         try {
           for await (const ev of emitter as AsyncIterable<any>) {
             if (LOG_EVENTS) console.log('[spa-chat:iter.event]', { traceId, type: ev?.event })
@@ -325,14 +339,7 @@ export async function POST(req: NextRequest) {
           return
         }
 
-        // Cierre por si el SDK no dispara 'end'
-        console.log('[spa-chat:stream.end]', {
-          traceId,
-          threadId: thread.id,
-          runId,
-          stats,
-          tookMs: Date.now() - stats.startedAt,
-        })
+        console.log('[spa-chat:stream.end]', { traceId, threadId: thread.id, runId })
         sse(controller, 'done', {})
         controller.close()
       } catch (err: any) {
