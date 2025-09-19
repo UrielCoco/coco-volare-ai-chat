@@ -2,52 +2,78 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
-export const runtime = "nodejs"; // fuerza entorno de servidor
+/**
+ * Fuerza que este endpoint no se cachee y se ejecute en cada request.
+ * Y que corra en Node (para ver logs en Vercel fácilmente).
+ */
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const runtime = "nodejs";
 
 type ChatRole = "user" | "assistant" | "system";
 type ChatMessage = { role: ChatRole; content: string };
 type ChatRequest = { messages: ChatMessage[] };
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  try {
-    const body: ChatRequest = await req.json();
+function log(...args: any[]) {
+  // Logs que verás en Vercel -> "Functions" / "Logs"
+  console.log("[spa-chat]", ...args);
+}
 
-    // Validación mínima
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
+
+  try {
+    const bodyText = await req.text();
+    let body: ChatRequest | null = null;
+
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      log("ERROR body JSON parse:", bodyText);
+      return NextResponse.json(
+        { ok: false, error: "Request body must be valid JSON" },
+        { status: 400 }
+      );
+    }
+
+    log("REQUEST.messages:", body?.messages);
+
     if (!body?.messages?.length) {
+      log("ERROR missing messages[]");
       return NextResponse.json(
         { ok: false, error: "Missing messages[]" },
         { status: 400 }
       );
     }
 
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      log("ERROR OPENAI_API_KEY missing");
+      return NextResponse.json(
+        { ok: false, error: "OPENAI_API_KEY is not set" },
+        { status: 500 }
+      );
+    }
 
-    // Usa tu modelo preferido (ajústalo a tu setup)
+    const client = new OpenAI({ apiKey });
     const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
     const completion = await client.chat.completions.create({
       model,
       messages: body.messages,
-      // Si luego quieres streaming, aquí pasarías stream: true y harías SSE
     });
 
     const text = completion.choices?.[0]?.message?.content ?? "";
 
+    log("OK response in", Date.now() - startedAt, "ms");
     return NextResponse.json({
       ok: true,
       message: { role: "assistant", content: text } satisfies ChatMessage,
-      // Puedes incluir metadata si lo necesitas
       usage: completion.usage ?? null,
     });
   } catch (err) {
     const e = err as Error;
-    // Log visible (Vercel) para diagnóstico
-    console.error("[spa-chat] POST error:", e.message, e.stack);
-    return NextResponse.json(
-      { ok: false, error: e.message },
-      { status: 500 }
-    );
+    log("FATAL:", e.message, e.stack);
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
   }
 }
